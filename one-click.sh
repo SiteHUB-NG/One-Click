@@ -168,91 +168,103 @@ r3=( '|' '\' '-' '/' )
 # ==== Loader Body ====
 load_body() {
   local url=${1:-}
-  local cache_dir="${2:-}"
-  local cache_file="${3:-}"
+  local backup_url=${2:-}
+  local cache_dir="${3:-}"
+  local cache_file="${4:-}"
   local ttl=$((24 * 3600))
   mkdir -p "$cache_dir"
   local now
   now=$(date +%s)
   local cache_age=0
-  if [[ -f "$cache_file" ]]; then
-    cache_age=$(( now - $(stat -c %Y "$cache_file") ))
-  fi
   if [[ ! -f "$cache_file" || $cache_age -gt $ttl ]]; then
-    if ! curl -fsSL --connect-timeout 5 --max-time 10 \
+    # ==== Try and pull from a214354.network ====
+    if curl -fsSL --connect-timeout 5 --max-time 10 \
          "$url" -o "$cache_file.tmp" &> /dev/null; then
-      if [[ ! -f "$cache_file" ]]; then
-        error "Failed to download backup module and no cache available"
-      fi
-      warn "Network unavailable, using cached backup module"
+        mv -f "$cache_file.tmp" "$cache_file"
+    # ==== Try Github if primary fails ====
+    elif [[ -n "$backup_url" ]] && \
+         curl -fsSL --connect-timeout 5 --max-time 10 \
+         "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
+        warn "Primary failed, loaded from backup mirror"
+        mv -f "$cache_file.tmp" "$cache_file"
     else
-      mv -f "$cache_file.tmp" "$cache_file"
+        if [[ ! -f "$cache_file" ]]; then
+            error "Failed to download module (primary + backup) and no cache available"
+        fi
+        warn "Network unavailable, using cached module"
     fi
   fi
-  # ==== Final safety check ====
+  # ==== Use cache if both mirrors unavailable ====
   [[ -f "$cache_file" ]] || die "Backup module missing after load attempt"
   source "$cache_file"
 }
 # ==== Load Without Calling ====
 # ==== Functions ====
 func_url="https://as214354.network/functions.sh"
+backup_func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/functions.sh?token=GHSAT0AAAAAADUHPX55KHOJFIDCH7QHVRYG2MNAN6A"
 func_cache_dir="/var/cache/one-click/"
 func_cache_file="${func_cache_dir:-}/functions.sh"
-load_body "$func_url" "$func_cache_dir" "$func_cache_file"
+load_body "$func_url" "$backup_func_url" "$func_cache_dir" "$func_cache_file"
 # ==== Cron Logic ====
 cron_url="https://as214354.network/cron.sh"
+backup_cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/cron.sh?token=GHSAT0AAAAAADUHPX55OQBPXQ2ACLRMWOB42MNAM3A"
 cron_cache_dir="/var/cache/one-click/"
 cron_cache_file="${cron_cache_dir}/cron.sh"
-load_body "$cron_url" "$cron_cache_dir" "$cron_cache_file"
+load_body "$cron_url" "$backup_cron_url" "$cron_cache_dir" "$cron_cache_file"
 # ==== None Essential Modules ====
 # ==== Network Repair ====
 load_net_repair() {
   local url="https://as214354.network/net-recovery.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/net-recovery.sh?token=GHSAT0AAAAAADUHPX55FTJQ6GK2V6YHITCG2MNALWA"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/net-recovery.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
 # ==== System Information ====
 load_system() {
   local url="https://as214354.network/sys-info.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/sys-info.sh?token=GHSAT0AAAAAADUHPX55XIQCJAYCHZHPM5WY2MNAZDQ"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/sys-info.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
 # ==== Boot Recovery ====
 load_recovery() {
   local url="https://as214354.network/boot-recovery.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/boot-recovery.sh?token=GHSAT0AAAAAADUHPX55RVSZWHPELT6BUYMW2MNAOVQ"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/boot-recovery.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
 # ==== Migrator ====
 load_migrator() {
   local url="https://as214354.network/migrator.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/migrator.sh?token=GHSAT0AAAAAADUHPX54QK3NV66NS7PMOKCU2MNARJA"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/migrator.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
 # ==== OS Reinstall ====
 load_reinstall() {
   local url="https://as214354.network/os_reinstall.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/os_reinstall.sh?token=GHSAT0AAAAAADUHPX5546CZOX5UU6JQID4U2MM7YBA"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/reinstall.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
-# ==== One-Click Backup ====
 # ==== One-Click Backup ====
 load_backup() {
   local url="https://as214354.network/oc-backup.sh"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/oc-backup.sh?token=GHSAT0AAAAAADUHPX55ZBPMO6P6MAANID3O2MNAKVQ"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/oc-backup.sh"
   collect_sysinfo
-  load_body "$url" "$cache_dir" "$cache_file"
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 # ==== System Info Dashboard - Skip TMUX and root checks ====
