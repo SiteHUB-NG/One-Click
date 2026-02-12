@@ -13,6 +13,8 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== One-Click Backup ==== #
+profiles_dir="/etc/one-click/backup-tool/profiles"
+mkdir -p "$profiles_dir"
 show_profiles_table() {
   local profile_dir="/etc/one-click/backup-tool/profiles"
   [[ -d "$profile_dir" ]] || die "Profiles directory not found: $profile_dir"
@@ -78,11 +80,11 @@ list_profiles() {
 select_profile() {
   list_profiles
   if [[ ${#profiles[@]} -eq 0 ]]; then
-    #echo "[WARN]: No profiles found" >&2
+    warn "No profiles found" >&2
     backup_info
     configure_backup
   fi
-  echo "[INFO]: Available backup profiles:"
+  info "Available backup profiles:"
   local i=1
   for p in "${profiles[@]}"; do
     printf "  %d) %s\n" "$i" "$p"
@@ -94,7 +96,7 @@ select_profile() {
       selected_profile="${profiles[$((sel-1))]}"
       break
     else
-      echo "[WARN]: Invalid selection"
+      warn "Invalid selection"
     fi
   done
 }
@@ -110,16 +112,30 @@ switch_profile() {
 }
 load_profile() {
   local profile_name="$1"
-  [[ -n "$profile_name" ]] || { error "[ERROR]: No profile name provided to load_profile()" >&2; profile_name=default; }
+  [[ -n "$profile_name" ]] || profile_name=$(current_profile)
   local config_file="$profiles_dir/${profile_name}.conf"
-  [[ -r "$config_file" ]] || { error "[ERROR]: Cannot read profile $config_file" >&2; return 1; }
-  # shellcheck source=/dev/null
+  [[ -r "$config_file" ]] || { 
+    warn "[WARN]: Profile $profile_name missing or unreadable. Using default."
+    profile_name="default"
+    config_file="$profiles_dir/default.conf"
+    [[ -f "$config_file" ]] || touch "$config_file"
+  }
   source "$config_file"
   printf '%s\n' "$profile_name" > "$profiles_dir/.current_profile"
   config="$config_file"
 }
 current_profile() {
-  [[ -r "$profiles_dir/.current_profile" ]] && cat "$profiles_dir/.current_profile" || echo ""
+  # Ensure profiles_dir exists
+  [[ -n "$profiles_dir" ]] || profiles_dir="/etc/one-click/backup-tool/profiles"
+  mkdir -p "$profiles_dir"
+  if [[ -r "$profiles_dir/.current_profile" ]]; then
+    cat "$profiles_dir/.current_profile"
+  else
+    default_conf="$profiles_dir/default.conf"
+    [[ -f "$default_conf" ]] || touch "$default_conf"
+    echo "default" > "$profiles_dir/.current_profile"
+    echo "default"
+  fi
 }
 # ==== Does the user want to use ssh-keys? ====
 ssh_key() {
@@ -818,12 +834,7 @@ rsync_rclone() {
   mkdir -p "$profiles_dir"
   local profile
   profile=$(current_profile)
-  if [[ -z "$profile" ]]; then
-    select_profile || { echo "[WARN]: No profile available. Please create one"; configure_backup; }
-    profile="$selected_profile"
-  fi
-
-  echo "[SUCCESS]: Using profile: $profile"
+  success "Using profile: ${cyan}${profile}${reset}"
   load_profile "$profile" || exit 1
   if [[ ! -f "${config:-}" ]]; then
     backup_info
@@ -832,7 +843,8 @@ rsync_rclone() {
     launch_header
     run_menu
   else
-    warn "Config file not complete."
+    warn "Configuration file has not been initialized."
+    info "Configuring now."
     configure_backup
   fi
 }
