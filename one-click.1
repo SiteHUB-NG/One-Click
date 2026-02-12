@@ -1,0 +1,320 @@
+." Man page for one-click
+.TH ONE-CLICK 8 "2026-02-12" "One-Click v1.0" "System Administration"
+
+.SH NAME
+one-click - modular server management, recovery, backup, and migration toolkit
+
+.SH SYNOPSIS
+.B one-click
+.RI [ command ]
+
+.B one-click help
+
+.B one-click cron
+
+.SH DESCRIPTION
+.B one-click
+is a modular server management and disaster recovery toolkit designed for predictable,
+repeatable, and auditable Linux system administration.
+
+It provides tools for operating system reinstallation, backup, migration, boot recovery,
+network repair, automation, and system inspection.
+
+The toolkit is designed for use on VPS, dedicated servers, and bare-metal systems.
+Operations may be interactive or automated.
+
+Long-running operations are automatically executed within a
+.BR tmux (1)
+session to prevent interruption from SSH disconnects.
+
+Commands are explicit and user-initiated. Destructive operations require confirmation.
+
+.SH COMMANDS
+.TP
+.B reinstall
+Perform a destructive operating system reinstallation over the network.
+
+.TP
+.B backup
+Create incremental or compressed backups locally or remotely.
+
+.TP
+.B boot-recovery
+Create or restore boot and root partition snapshots.
+
+.TP
+.B repair
+Repair or restore network configurations.
+
+.TP
+.B migrate
+Migrate entire systems using block-level or file-level methods.
+
+.TP
+.B sys-info
+Display live system statistics.
+
+.TP
+.B cron
+Configure scheduled automation tasks.
+
+.TP
+.B uninstall
+Remove one-click and all associated files.
+
+.TP
+.B help
+Display the interactive help menu.
+
+.SH OPTIONS
+Currently,
+.B one-click
+uses subcommands instead of traditional command-line options.
+
+Future versions may introduce additional flags.
+
+.SH EXAMPLES
+Reinstall operating system:
+.RS
+one-click reinstall
+.RE
+
+Create a backup:
+.RS
+one-click backup
+.RE
+
+Repair network configuration:
+.RS
+one-click repair
+.RE
+
+Migrate system:
+.RS
+one-click migrate
+.RE
+
+View system information:
+.RS
+one-click sys-info
+.RE
+
+Configure cron automation:
+.RS
+one-click cron
+.RE
+
+Uninstall toolkit:
+.RS
+one-click uninstall
+.RE
+
+.SH REINSTALL
+The
+.B reinstall
+command performs a complete operating system reinstallation.
+
+WARNING:
+This operation destroys all existing data.
+
+Features include:
+
+.IP (bu 2
+Network-based installation
+.IP (bu 2
+Supports Linux and Windows targets
+.IP (bu 2
+Independent of current system state
+.IP (bu 2
+Suitable for recovery or reprovisioning
+
+.SH BACKUP
+The
+.B backup
+command creates incremental backups using:
+
+.IP (bu 2
+rsync local snapshots
+.IP (bu 2
+Remote rsync over SSH
+.IP (bu 2
+Cloud storage via rclone
+
+Backups are incremental and optimized for efficiency and fast restore.
+
+.SH BOOT-RECOVERY
+The
+.B boot-recovery
+command creates and restores boot-critical snapshots.
+
+This includes:
+
+.IP (bu 2
+Bootloader
+.IP (bu 2
+Kernel
+.IP (bu 2
+Initramfs
+.IP (bu 2
+Root filesystem metadata
+
+Useful for recovering from boot failures.
+
+.SH REPAIR
+The
+.B repair
+command restores network configuration from snapshots.
+
+This allows recovery from:
+
+.IP (bu 2
+Firewall misconfiguration
+.IP (bu 2
+Interface errors
+.IP (bu 2
+Routing failures
+
+Especially useful for remote servers.
+
+.SH MIGRATE
+The
+.B migrate
+command transfers entire systems.
+
+Supported methods:
+
+.TP
+.B dd
+Block-level cloning.
+
+.TP
+.B rsync
+File-level migration.
+
+Used for:
+
+.IP (bu 2
+Server replacement
+.IP (bu 2
+Failover preparation
+.IP (bu 2
+Infrastructure migration
+
+.SH SYS-INFO
+Displays live system statistics including:
+
+.IP (bu 2
+CPU usage
+.IP (bu 2
+Memory usage
+.IP (bu 2
+Disk usage
+.IP (bu 2
+Network statistics
+.IP (bu 2
+Load average
+
+Provides functionality similar to
+.BR top (1)
+and
+.BR htop (1).
+
+.SH CRON
+Provides an interface for configuring scheduled automation tasks.
+
+Supports:
+
+.IP (bu 2
+Scheduled backups
+.IP (bu 2
+Maintenance automation
+.IP (bu 2
+Snapshot rotation
+
+.SH UNINSTALL
+Removes one-click and associated files including:
+
+.IP (bu 2
+Installed scripts
+.IP (bu 2
+Configuration files
+.IP (bu 2
+Cron jobs
+.IP (bu 2
+Logs
+
+.SH FILES
+.TP
+.I /etc/one-click/
+Configuration directory.
+
+.TP
+.I /var/log/one-click/
+Log directory.
+
+.TP
+.I /usr/local/bin/one-click
+Executable.
+
+.TP
+.I /usr/local/share/man/man8/one-click.8
+Man page.
+
+.SH ENVIRONMENT
+.TP
+.B TMUX
+Used automatically for persistent sessions.
+
+.TP
+.B HOME
+Used for user configuration.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+
+.TP
+.B 1
+General error.
+
+.TP
+.B 2
+Invalid usage.
+
+.TP
+.B 130
+Interrupted by user.
+
+.SH SECURITY
+.B one-click
+requires root privileges for most operations.
+
+Users should:
+
+.IP (bu 2
+Verify script source integrity
+.IP (bu 2
+Review destructive commands before execution
+.IP (bu 2
+Maintain backups before reinstall or migration
+
+.SH VERSION
+One-Click v1.0
+
+.SH AUTHOR
+Chike Egbuna
+
+.SH SEE ALSO
+.BR rsync (1),
+.BR rclone (1),
+.BR tmux (1),
+.BR cron (8),
+.BR dd (1),
+.BR top (1),
+.BR htop (1),
+.BR sgdisk (8),
+.BR parted (8)
+
+.SH HOMEPAGE
+https://github.com/SiteHUB-NG/One-Click
