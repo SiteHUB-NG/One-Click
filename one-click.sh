@@ -373,7 +373,13 @@ map_one_click() {
 if [[ ! -s "$manpage" ]]; then
   mkdir -p "$man_dir"
   wget -P "$man_dir" "$one_click_1"
-  mandb
+  if mandb -q; then
+    info "1 man subdirectory contained newer manual pages." \
+      "1 manual page was added." "0 stray cats were added." \
+      "0 old database entries were purged."
+  else
+    error "Failed to add man page."
+  fi
 fi
 # ==== Install ====
 if ! command -v 'one-click' >/dev/null 2>&1; then
@@ -381,6 +387,7 @@ if ! command -v 'one-click' >/dev/null 2>&1; then
     exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
+bash
 # ==== Install dependancies ====
 #dependancies
 mkdir -p "${log_dir:-}" "${base:-}"
@@ -484,7 +491,7 @@ if [[ $# -gt 0 ]]; then
         " " "$(tput smul)Options:$(tput rmul)                $(tput smul)Description$(tput rmul)" \
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
-        "  migrator                 System migration tool. Rsync + DD options." \
+        "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  repair                  Repair network (Includes snapshots and backup of network files)" \
         "  sys-info                System Information" \
