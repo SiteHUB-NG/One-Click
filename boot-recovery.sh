@@ -12,6 +12,7 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ===== Detect boot/root disks =====
+non_interactive="${non_interactive:-}"
 detect_boot_disk() {
   lsblk -no pkname "$(findmnt -nvo SOURCE /)" | head -n1 | sed 's|^|/dev/|'
 }
@@ -219,7 +220,7 @@ recovery_restore() {
   info "Restoring snapshot: $snap_path -> $disk"
   warn "This is destructive! Entire disk will be overwritten!"
   read -rp "${cyan}[USER]${reset} Type CONFIRM to proceed: " confirm
-  [[ "$confirm" != "CONFIRM" ]] && error "Restore aborted"; return
+  [[ "$confirm" != "CONFIRM" ]] && { error "Restore aborted"; return; }
   # ==== Restore partition layout ====
   info "Restoring partition table"
   sgdisk --load-backup="$snap_path/layout.bin" "$disk"
