@@ -16,13 +16,13 @@ Designed for hosting providers, infrastructure engineers, DevOps operators, and 
 # How To Run
 ## Primary Mirror
 ```
-curl -fsSL https://as214354.network/one-click.sh -o /tmp/one-click.sh && \
+curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh && \
 bash /tmp/one-click.sh setup && \
 rm -f /tmp/one-click.sh
 ```
-## Github Mirror
+## Backup Mirror
 ```
-curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh && \
+curl -fsSL https://as214354.network/one-click.sh -o /tmp/one-click.sh && \
 bash /tmp/one-click.sh setup && \
 rm -f /tmp/one-click.sh
 ```
