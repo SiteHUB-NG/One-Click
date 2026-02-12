@@ -146,7 +146,9 @@ secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 man_dir="/usr/local/share/man/man1/"
 tab_complete="/etc/bash_completion.d/one-click"
-one_click_1="https://as214354.network/one-click.1"
+one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
+# ==== Alt Mirror ====
+#one_click_1="https://as214354.network/one-click.1"
 manpage="${man_dir}one-click.1"
 kern="$(uname -r)"
 blue="$(tput setaf 4)"
@@ -204,22 +206,28 @@ load_body() {
 }
 # ==== Load Without Calling ====
 # ==== Functions ====
-func_url="https://as214354.network/functions.sh"
-backup_func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
+func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
+backup_func_url=""
+# ==== Alt Mirror ====
+#backup_func_url="https://as214354.network/functions.sh"
 func_cache_dir="/var/cache/one-click/"
 func_cache_file="${func_cache_dir:-}/functions.sh"
 load_body "$func_url" "$backup_func_url" "$func_cache_dir" "$func_cache_file"
 # ==== Cron Logic ====
-cron_url="https://as214354.network/cron.sh"
-backup_cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/cron.sh"
+cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/cron.sh"
+backup_cron_url=""
+# ==== Alt Mirror ====
+#backup_cron_url="https://as214354.network/cron.sh"
 cron_cache_dir="/var/cache/one-click/"
 cron_cache_file="${cron_cache_dir}/cron.sh"
 load_body "$cron_url" "$backup_cron_url" "$cron_cache_dir" "$cron_cache_file"
 # ==== None Essential Modules ====
 # ==== Network Repair ====
 load_net_repair() {
-  local url="https://as214354.network/net-recovery.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/net-recovery.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/net-recovery.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/net-recovery.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/net-recovery.sh"
   collect_sysinfo
@@ -227,8 +235,10 @@ load_net_repair() {
 }
 # ==== System Information ====
 load_system() {
-  local url="https://as214354.network/sys-info.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/sys-info.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/sys-info.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/sys-info.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/sys-info.sh"
   collect_sysinfo
@@ -236,8 +246,10 @@ load_system() {
 }
 # ==== Boot Recovery ====
 load_recovery() {
-  local url="https://as214354.network/boot-recovery.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/boot-recovery.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/boot-recovery.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/boot-recovery.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/boot-recovery.sh"
   collect_sysinfo
@@ -245,8 +257,10 @@ load_recovery() {
 }
 # ==== Migrator ====
 load_migrator() {
-  local url="https://as214354.network/migrator.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/migrator.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/migrator.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/migrator.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/migrator.sh"
   collect_sysinfo
@@ -254,8 +268,10 @@ load_migrator() {
 }
 # ==== OS Reinstall ====
 load_reinstall() {
-  local url="https://as214354.network/os_reinstall.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/os_reinstall.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/os_reinstall.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/os_reinstall.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/reinstall.sh"
   collect_sysinfo
@@ -263,8 +279,10 @@ load_reinstall() {
 }
 # ==== One-Click Backup ====
 load_backup() {
-  local url="https://as214354.network/oc-backup.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/oc-backup.sh"
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/oc-backup.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/oc-backup.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/oc-backup.sh"
   collect_sysinfo
