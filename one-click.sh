@@ -452,7 +452,11 @@ if [[ $# -gt 0 ]]; then
     -z) backup             ;; ### # # ###  ### ### # ### # #               ##
     # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ==== ##
     *)
-      echo "Unknown option: $1"
+      if [[ "$1" == "setup" ]]; then
+        success "Setup Completed Successfully"
+      else
+        error "Unknown option: $1"
+      fi
       printf '%s\n' \
         "$(tput smul)Usage:$(tput rmul) $(tput setaf 11)one-click$(tput sgr 0) $(tput setaf 4)[ARG]$(tput sgr 0)" \
         " " "$(tput smul)Options:$(tput rmul)                $(tput smul)Description$(tput rmul)" \
