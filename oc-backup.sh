@@ -14,6 +14,9 @@
 # ====== One-Click ====== #
 # ==== One-Click Backup ==== #
 profiles_dir="/etc/one-click/backup-tool/profiles"
+backup_dest="${backup_dest:-}"
+profile_name="${profile_name:-default}"
+config="${config:-$profiles_dir/${profile_name}.conf}"
 mkdir -p "$profiles_dir"
 show_profiles_table() {
   local profile_dir="/etc/one-click/backup-tool/profiles"
@@ -44,8 +47,7 @@ show_profiles_table() {
   echo -e "\e[1;34m└────┴──────────────────────┴────────┴──────────────────┴────────┴──────────┘\e[0m"
   echo
 }
-
-# List available profiles
+# ==== List available profiles ====
 select_snapshot_from_list() {
   local snapshots=("$@")
   [[ ${#snapshots[@]} -gt 0 ]] || error "No snapshots available"; run_menu
@@ -125,7 +127,7 @@ load_profile() {
   config="$config_file"
 }
 current_profile() {
-  # Ensure profiles_dir exists
+  # ==== Ensure profiles_dir exists ====
   [[ -n "$profiles_dir" ]] || profiles_dir="/etc/one-click/backup-tool/profiles"
   mkdir -p "$profiles_dir"
   if [[ -r "$profiles_dir/.current_profile" ]]; then
@@ -345,26 +347,21 @@ fetch_db_backup() {
 add_profile() {
   echo
   info "Additional Profiles Wizard"
-  get_new_profile() {
-    read -rp "${cyan}[USER]${reset} Enter a name for the new profile: " new_profile
-    if [[ -n "$new_profile" ]]; then
-      info "A new profile will now be created for $new_profile"
-      new_profile="${new_profile// /_}"
-    else
-      warn "User profile names cannot be empty"
-      get_new_profile
-    fi
-  }
-  get_new_profile 
+  read -rp "${cyan}[USER]${reset} Enter a name for the new profile: " new_profile
+  [[ -n "$new_profile" ]] || { warn "Profile name cannot be empty"; return 1; }
+  new_profile="${new_profile// /_}"
   local profile_file="$profiles_dir/${new_profile}.conf"
   if [[ -f "$profile_file" ]]; then
     warn "Profile '$new_profile' already exists."
-    run_menu
+    return 1
   fi
   local old_config="$config"
+  local old_profile="$profile_name"
+  profile_name="$new_profile"
   config="$profile_file"
   configure_backup
   config="$old_config"
+  profile_name="$old_profile"
   success "Profile '$new_profile' created successfully"
 }
 backup() {
@@ -523,8 +520,8 @@ configure_backup() {
   read -rp "${cyan}[USER]${reset} Enter a descriptive name for this backup (optional):                                     " backup_label
   backup_label="${backup_label// /_}"
   warn "Confirming SSH Credentials"
-  if [[ -n "${req:-}" ]]; then
-    ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
+  if [[ "${req:-}" == "y" || "${req:-}" == "yes" ]]; then
+    ssh -i "$key" -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
       "exit" \
       && success "${green}SSH Credentials Validated${reset}"
   else
@@ -549,8 +546,9 @@ ssh_port="$ssh_port"                      # SSH_Port
 dst_dir="$dst_dir"                        # Remote_Directory
 use_rclone="$use_rclone"                  # Use_of_rclone?
 r_remote="${r_remote:-no}"                # rclone_Remote
-pass="${e_pass:-$key}"                    # SSH_Key_or_encrypted_Password
-req="${req:-no}"                          # SSH_Key_request--(Yes/No)
+pass="${e_pass:-}"                        # encrypted_Password
+key="${key:-}"                            # SSH_key_path
+req="${req:-n}"                           # SSH_Key_request--(Yes/No)
 key="${key:-}"                            # SSH_Key_Path
 dump_dir="$source/.db_dumps"              # Database_dump_directory
 compress_rclone="${compress_rclone:-yes}" # Compress_rclone_backups
@@ -562,12 +560,14 @@ EOF
   mv "${config}.tmp" "${config}"
   chmod 600 "$config"
   success "Profile successfully created"
-  info "To automate the firing of this script, we need to use cron for scheduled runs." \
-    "Please configure a cron job: "
-  install_cron "-z" "One-Click Backup Tool" "y" "$profile_name" "$backup_dest"
+  if [[ -n "${dst_dir:-}" ]]; then
+    info "To automate the firing of this script, we need to use cron for scheduled runs." \
+      "Please configure a cron job: "
+    install_cron "-z" "One-Click Backup Tool" "y" "$profile_name" "$backup_dest"
+  else
+    die "SSH Validation failed."
+  fi
   success "Backup profile '$profile_name' saved."
-  menu
-  read -rp "Press Enter to continue: "
   return 0
 }
 restore_remote_backs() {
