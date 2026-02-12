@@ -201,13 +201,13 @@ load_body() {
 # ==== Load Without Calling ====
 # ==== Functions ====
 func_url="https://as214354.network/functions.sh"
-backup_func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/functions.sh?token=GHSAT0AAAAAADUHPX55KHOJFIDCH7QHVRYG2MNAN6A"
+backup_func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/functions.sh"
 func_cache_dir="/var/cache/one-click/"
 func_cache_file="${func_cache_dir:-}/functions.sh"
 load_body "$func_url" "$backup_func_url" "$func_cache_dir" "$func_cache_file"
 # ==== Cron Logic ====
 cron_url="https://as214354.network/cron.sh"
-backup_cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/cron.sh?token=GHSAT0AAAAAADUHPX55OQBPXQ2ACLRMWOB42MNAM3A"
+backup_cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/cron.sh"
 cron_cache_dir="/var/cache/one-click/"
 cron_cache_file="${cron_cache_dir}/cron.sh"
 load_body "$cron_url" "$backup_cron_url" "$cron_cache_dir" "$cron_cache_file"
@@ -215,7 +215,7 @@ load_body "$cron_url" "$backup_cron_url" "$cron_cache_dir" "$cron_cache_file"
 # ==== Network Repair ====
 load_net_repair() {
   local url="https://as214354.network/net-recovery.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/net-recovery.sh?token=GHSAT0AAAAAADUHPX55FTJQ6GK2V6YHITCG2MNALWA"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/net-recovery.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/net-recovery.sh"
   collect_sysinfo
@@ -224,7 +224,7 @@ load_net_repair() {
 # ==== System Information ====
 load_system() {
   local url="https://as214354.network/sys-info.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/sys-info.sh?token=GHSAT0AAAAAADUHPX55XIQCJAYCHZHPM5WY2MNAZDQ"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/sys-info.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/sys-info.sh"
   collect_sysinfo
@@ -233,7 +233,7 @@ load_system() {
 # ==== Boot Recovery ====
 load_recovery() {
   local url="https://as214354.network/boot-recovery.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/boot-recovery.sh?token=GHSAT0AAAAAADUHPX55RVSZWHPELT6BUYMW2MNAOVQ"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/boot-recovery.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/boot-recovery.sh"
   collect_sysinfo
@@ -242,7 +242,7 @@ load_recovery() {
 # ==== Migrator ====
 load_migrator() {
   local url="https://as214354.network/migrator.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/migrator.sh?token=GHSAT0AAAAAADUHPX54QK3NV66NS7PMOKCU2MNARJA"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/migrator.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/migrator.sh"
   collect_sysinfo
@@ -251,7 +251,7 @@ load_migrator() {
 # ==== OS Reinstall ====
 load_reinstall() {
   local url="https://as214354.network/os_reinstall.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/os_reinstall.sh?token=GHSAT0AAAAAADUHPX5546CZOX5UU6JQID4U2MM7YBA"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/os_reinstall.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/reinstall.sh"
   collect_sysinfo
@@ -260,7 +260,7 @@ load_reinstall() {
 # ==== One-Click Backup ====
 load_backup() {
   local url="https://as214354.network/oc-backup.sh"
-  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Cllick/refs/heads/main/oc-backup.sh?token=GHSAT0AAAAAADUHPX55ZBPMO6P6MAANID3O2MNAKVQ"
+  local backup_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/oc-backup.sh"
   local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/oc-backup.sh"
   collect_sysinfo
