@@ -460,7 +460,7 @@ if [[ $# -gt 0 ]]; then
         read -rp "Are you sure? [y/n]: " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
-          rm_rf "$log_dir" "$base" "$manpage" "$tab_complete" "$(command -v one-click)"
+          rm -rf "$log_dir" "$base" "$manpage" "$tab_complete" "$(command -v one-click)"
           success "One-Click has been uninstalled."
           exit 0
         else
