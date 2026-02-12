@@ -353,7 +353,7 @@ add_profile() {
   local profile_file="$profiles_dir/${new_profile}.conf"
   if [[ -f "$profile_file" ]]; then
     warn "Profile '$new_profile' already exists."
-    return 1
+    return 
   fi
   local old_config="$config"
   local old_profile="$profile_name"
