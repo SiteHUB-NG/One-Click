@@ -149,25 +149,18 @@ add_cron_job() {
   if [[ -n "$existing_cron" ]]; then
     echo
     warn "${yellow}CRON JOB EXISTS FOR: ${comment}${reset}"
-    echo "$existing_cron"
     echo
-    read -rp "${cyan}[USER]${reset} Replace it? [y/n]: " del_cron
-    del_cron=${del_cron,,}
-    if [[ "$del_cron" =~ ^(y|yes)$ ]]; then
-      current_cron=$(sed "\,# ${comment}$,d" <<< "$current_cron")
-      success "Existing cron job removed."
-    else
-      info "Keeping existing cron job."
-      return
-    fi
+    delete_cron_job
+    exec < /dev/tty
+    return
   fi
   cron_cmd="${schedule} TZ=\"${tz}\" ${cmd}"
   [[ -n "$logfile" ]] && cron_cmd+=" >> \"$logfile\" 2>&1"
   cron_cmd+=" # ${comment}"
-  info "Adding cron job:"
-  echo "  $cron_cmd"
+  info "Adding cron job: ${cyan}${cron_cmd}${reset}"
   (echo "$current_cron"; echo "$cron_cmd") | crontab -
   decrypt_cron "$schedule" "$tz"
+  sleep 2
 }
 install_cron() {
   local set_flag base_comment set_menu profile
@@ -186,6 +179,7 @@ install_cron() {
   local comment="${profile}:${base_comment}"
   local logfile="/var/log/oneclick-cron.log"
   add_cron_job "$final_cron_schedule" "$user_tz" "$cmd" "$comment" "$logfile"
+  exec < /dev/tty
   [[ "$set_menu" == "y" ]] && run_menu
   [[ "$set_menu" == "r" ]] && recovery_menu
   [[ "$set_menu" == "v" ]] && network_select_option
@@ -225,7 +219,7 @@ delete_cron_job() {
   local cron new_cron choice
   cron=$(crontab -l 2>/dev/null)
   [[ -z "$cron" ]] && { warn "No cron jobs to delete."; return; }
-  declare -gA cron_map=()
+  mapfile -t cron_map <<< "$(list_cron_jobs | awk '{print $0}')"
   list_cron_jobs
   echo
   read -rp "${cyan}[USER]${reset} Enter job number(s) to delete (e.g. 1 or 1 3 5), Enter to cancel: " choice
