@@ -41,6 +41,76 @@ or
 ```
 tmux attach -t one-click
 ```
+To detach:
+```
+Ctrl+b d
+```
+# Usage
+
+## Syntax
+
+one-click [COMMAND]
+
+---
+
+## Command Reference
+
+| Command      | Description |
+|--------------|-------------|
+| reinstall    | OS reinstallation module |
+| backup       | Backup and restore tool using rsync with optional rclone support |
+| migrator     | System migration tool supporting both rsync and dd modes |
+| recovery     | Boot partition backup and recovery tool (BIOS, UEFI, GRUB) |
+| repair       | Network repair module including configuration snapshot and restore |
+| sys-info     | Display system information |
+| system       | Display system information (alias of sys-info) |
+| logs         | Interactive system log browser |
+| log-browser  | Interactive system log browser (alias of logs) |
+| cron         | Configure and manage cron jobs |
+| help         | Show help and usage information |
+| uninstall    | Remove One-Click and all associated files and configurations |
+
+---
+
+## Examples
+
+**Run network repair:**
+```
+one-click repair
+```
+**Run backup tool:**
+```
+one-click backup
+```
+**Run OS reinstall module:**
+```
+one-click reinstall
+```
+**Run migration tool:**
+```
+one-click migrator
+```
+**Run recovery tool:**
+```
+one-click recovery
+```
+**View system information:**
+```
+one-click sys-info
+```
+**Open log browser:**
+```
+one-click logs
+```
+**Configure cron job:**
+```
+one-click cron
+```
+**Remove One-Click completely:**
+```
+one-click uninstall
+```
+
 # Core Capabilities
 
 One-Click simplifies tedious and complex server tasks.
@@ -106,14 +176,27 @@ Built for remote recovery scenarios where SSH access may be unstable.
 
 Built for fast diagnostics in headless environments.
 
-## Dependency Model
+# Dependency Model
 
-One-Click uses a staged dependency strategy:
+Core dependencies installed during initial execution include:
 
-- Core dependencies are installed during initial execution.
-- Module-specific dependencies are installed only when a related tool is invoked.
+- curl
+- tmux
+- core shell utilities
+- epel-release
+- rclone
+- sgdisk
+- sshpass
+- psutil
+- pv
+- iostat
+- whois
+- fzf
 
-This minimizes unnecessary package installation and keeps the base footprint lean while still ensuring each module has what it requires at runtime.
+Additional dependencies may be installed depending on distribution and module usage.
+
+This staged model ensures minimal base footprint while maintaining full functionality.
+
 
 ## Architecture Highlights
 
