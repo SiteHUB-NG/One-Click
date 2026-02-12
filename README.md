@@ -1,7 +1,6 @@
 # One-Click Toolkit
-
+![One-Click Logo](https://as214354.network/one-click.png)
 One-Click is a modular Linux infrastructure automation toolkit built for controlled server lifecycle management.
-
 It provides structured, repeatable workflows for:
 
 - OS reinstallation
@@ -13,7 +12,6 @@ It provides structured, repeatable workflows for:
 
 Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
 
----
 
 # How To Run
 ## Primary Mirror
@@ -43,13 +41,11 @@ or
 ```
 tmux attach -t one-click
 ```
----
 # Core Capabilities
 
 One-Click simplifies tedious and complex server tasks.
 It is designed to operate safely in production environments with caching, fallback mirrors, and validation safeguards.
 
----
 ## OS Reinstall
 
 - Network-based OS deployment
@@ -60,8 +56,6 @@ It is designed to operate safely in production environments with caching, fallba
 - Automatic fallback to cached module if network fails
 
 Designed for remote or recovery-only environments.
-
----
 
 ## Migration & Backup Modes
 
@@ -79,8 +73,6 @@ Suitable for:
 - RAID rebuild workflows
 - VPS migrations
 - Provider transitions
-  
----
 
 ## Boot & Recovery Tooling
 
@@ -92,8 +84,6 @@ Suitable for:
 
 Designed for systems that fail to boot after disk or migration operations.
 
----
-
 ## Network Repair Module
 
 - Network configuration snapshot
@@ -102,8 +92,6 @@ Designed for systems that fail to boot after disk or migration operations.
 - Safe rollback model
 
 Built for remote recovery scenarios where SSH access may be unstable.
-
----
 
 ## Log Management Console
 
@@ -118,8 +106,6 @@ Built for remote recovery scenarios where SSH access may be unstable.
 
 Built for fast diagnostics in headless environments.
 
----
-
 ## Dependency Model
 
 One-Click uses a staged dependency strategy:
@@ -128,8 +114,6 @@ One-Click uses a staged dependency strategy:
 - Module-specific dependencies are installed only when a related tool is invoked.
 
 This minimizes unnecessary package installation and keeps the base footprint lean while still ensuring each module has what it requires at runtime.
-
----
 
 ## Architecture Highlights
 
@@ -156,7 +140,6 @@ One-Click is engineered for environments where:
 - Network stability is inconsistent
 - Downtime must be minimized
 - Recovery must be deterministic
----
 
 ## Requirements
 
@@ -164,7 +147,7 @@ One-Click is engineered for environments where:
 - curl
 - sudo or root access
 Additional packages are installed automatically as required by specific modules.
----
+
 ## Disclaimer
 
 One-Click is a modular toolkit.
