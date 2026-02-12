@@ -531,6 +531,7 @@ configure_backup() {
   fi
   if [[ "${profile_name:-}" == "" ]]; then
     profile_name=default
+    p_name="$profile_name"
     config="/etc/one-click/backup-tool/profiles/${profile_name}.conf"
     mkdir -p "/etc/one-click/backup-tool/profiles/"
     touch "$config"
@@ -559,10 +560,11 @@ EOF
   rm -f "$config"
   mv "${config}.tmp" "${config}"
   chmod 600 "$config"
-  success "Profile successfully created"
+  success "${p_name:-Profile} successfully created"
   if [[ -n "${dst_dir:-}" ]]; then
     info "To automate the firing of this script, we need to use cron for scheduled runs." \
       "Please configure a cron job: "
+    read -rp "Press Enter to continue to configuring a cron job for ${p_name:-${profile_name/.*}}"
     install_cron "-z" "One-Click Backup Tool" "y" "$profile_name" "$backup_dest"
   else
     die "SSH Validation failed."
