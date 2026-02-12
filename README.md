@@ -8,11 +8,11 @@ Built for operators, administrators, hosting providers, and infrastructure engin
 
 ## How To Run
 ```
-bash <(curl -sL https://as214354.network/one-click.sh)
+curl -sL https://as214354.network/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
 ```
 or
 ```
-bash <(curl -sL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/one-click.sh)
+curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
 ```
 ---
 ## Core Purpose
