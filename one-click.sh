@@ -165,6 +165,10 @@ r1=( '|' '/' '-' '\' )
 r2=( '-' '/' '|' '\' )
 r3=( '|' '\' '-' '/' )
 # ==== Load Source Body ====
+warn() {
+  printf "$yellow[WARN]:$reset %s\n" "$@" >&2;
+  _log_write "$yellow[WARN]$reset $*" >&2;
+}
 # ==== Loader Body ====
 load_body() {
   local url=${1:-}
