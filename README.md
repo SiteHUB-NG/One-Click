@@ -12,7 +12,7 @@ bash <(curl -sL https://as214354.network/one-click.sh)
 ```
 or
 ```
-bash <(curl -sL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/one-click.sh?token=GHSAT0AAAAAADUHPX55IWZAVQACTWQ4JEEA2MNBIEA)
+bash <(curl -sL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/refs/heads/main/one-click.sh)
 ```
 ---
 ## Core Purpose
