@@ -387,6 +387,7 @@ if ! command -v 'one-click' >/dev/null 2>&1; then
     exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
+source "$tab_complete"
 # ==== Install dependancies ====
 #dependancies
 mkdir -p "${log_dir:-}" "${base:-}"
