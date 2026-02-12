@@ -8,7 +8,7 @@ Built for operators, administrators, hosting providers, and infrastructure engin
 
 ## How To Run
 ```
-curl -sL https://as214354.network/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
+curl -fsSL https://as214354.network/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
 ```
 or
 ```
