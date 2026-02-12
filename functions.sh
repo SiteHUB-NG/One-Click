@@ -11,8 +11,8 @@
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
 # ==== One-Click Backup ==== #
-
-
+mkdir -p "${log_dir:-}"
+touch "${log_error_file:-}" "${log_file:-}"
 # ==== Build Essential Variables ====
 build_vars() {
   mapfile -t local_drives < <(lsblk -dn -o NAME,SIZE,TYPE | awk '$3=="disk"{print $1,$2}')
