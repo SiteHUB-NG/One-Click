@@ -472,7 +472,7 @@ configure_backup() {
   read -rp "${cyan}[USER]${reset} Press Enter to continue: " 
   source_dir() {
     tree -d -L 2 -I 'proc|sys|dev|run|tmp|snap|lost+found|lib|mail|spool|cache|lang|locale|zoneinfo|boot|bin|rc[0-9]*|.*' /
-    read -rp "${cyan}[USER]${reset} Please select a source directory to backup                                             " source
+    read -rp "${cyan}[USER]${reset} Enter the directory where files should be backed up:                                         " source
     if [[ -d "$source" ]]; then
       tree -I 'proc|sys|dev|run|tmp|snap|lost+found|lib|mail|spool|cache|lang|locale|zoneinfo|boot|bin|rc[0-9]*|.*' "$source"
     else
