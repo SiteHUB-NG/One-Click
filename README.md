@@ -1,114 +1,192 @@
 # One-Click Toolkit
 
-One-Click is a modular infrastructure automation toolkit designed for rapid OS reinstallation, migration, backup, and recovery operations on Linux servers.
+One-Click is a modular Linux infrastructure automation toolkit built for controlled server lifecycle management.
 
-Built for operators, administrators, hosting providers, and infrastructure engineers who need fast, repeatable, and reliable server lifecycle management.
+It provides structured, repeatable workflows for:
+
+- OS reinstallation
+- Disk migration
+- Backup & restore
+- Boot recovery
+- Network repair
+- Log inspection
+
+Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
 
 ---
 
-## How To Run
+# How To Run
+## Primary Mirror
 ```
-curl -fsSL https://as214354.network/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
+curl -fsSL https://as214354.network/one-click.sh -o /tmp/one-click.sh && \
+bash /tmp/one-click.sh setup && \
+rm -f /tmp/one-click.sh
+```
+## Github Mirror
+```
+curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh && \
+bash /tmp/one-click.sh setup && \
+rm -f /tmp/one-click.sh
+```
+On first execution, One-Click will:
+
+- Install core required dependencies
+- Initialize internal directories and cache structure
+- Configure baseline environment checks
+- Launch inside a managed tmux session
+
+To reattach:
+```
+tmux attach
 ```
 or
 ```
-curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh; bash /tmp/one-click.sh setup && rm -f /tmp/one-click.sh
+tmux attach -t one-click
 ```
 ---
-## Core Purpose
+# Core Capabilities
 
-One-Click simplifies tedious and complex server tasks such as:
-
-- OS reinstallation
-- Disk migrations
-- Backup & restore workflows
-- Disaster recovery preparation
-- Live environment repair
-- Log inspection & diagnostics
-
+One-Click simplifies tedious and complex server tasks.
 It is designed to operate safely in production environments with caching, fallback mirrors, and validation safeguards.
 
 ---
-## Key Features
+## OS Reinstall
 
-### OS Reinstall
-- Remote script loading with:
-  - Primary + backup mirror support
-  - 24-hour cache TTL
-  - Safe temporary file replacement
+- Network-based OS deployment
+- Modular loader architecture
+- Primary + fallback mirror support
+- 24-hour module caching (TTL)
+- Atomic temporary file replacement
 - Automatic fallback to cached module if network fails
-- Modular loading architecture
-- Network OS Reinstallation
+
+Designed for remote or recovery-only environments.
 
 ---
 
-### Migration & Backup Modes
-- `dd` based block migration
-- `rsync` incremental backups
-- Profile-based configuration support
+## Migration & Backup Modes
+
+- dd block-level disk migration
+- rsync incremental backups
+- Profile-based configuration
 - Dry-run support
-- Snapshot-friendly workflows
+- rclone integration
+- Snapshot-aware workflows
+- Non-interactive automation flags
 
+Suitable for:
+
+- Hardware replacement
+- RAID rebuild workflows
+- VPS migrations
+- Provider transitions
+  
 ---
 
-### Recovery Tooling
-- Boot repair helper
-- EFI re-mount automation
+## Boot & Recovery Tooling
+
+- EFI remount automation
 - GRUB reinstall assistance
-- Emergency live-environment helpers
+- Boot partition backup
+- Recovery structure validation
+- Live-environment repair helpers
+
+Designed for systems that fail to boot after disk or migration operations.
 
 ---
 
-### Log Management Console
-Interactive TUI log system:
+## Network Repair Module
 
-- Arrow key navigation
-- Live preview window
+- Network configuration snapshot
+- Automated repair routines
+- Fallback restoration logic
+- Safe rollback model
+
+Built for remote recovery scenarios where SSH access may be unstable.
+
+---
+
+## Log Management Console
+
+- Interactive terminal-based log browser with:
+- Arrow-key navigation
+- Live preview pane
 - Search filtering
-- Highlighted priority logs
-- Journalctl service browser
-- Safe delete support
-- Cache and system log visibility
+- Priority highlighting
+- Journalctl service browsing
+- Safe deletion controls
+- Cache + system log visibility
+
+Built for fast diagnostics in headless environments.
 
 ---
 
-### Mirror & Cache Awareness
+## Dependency Model
 
-- Primary + backup URL support
-- 24h TTL cache logic
+One-Click uses a staged dependency strategy:
+
+- Core dependencies are installed during initial execution.
+- Module-specific dependencies are installed only when a related tool is invoked.
+
+This minimizes unnecessary package installation and keeps the base footprint lean while still ensuring each module has what it requires at runtime.
+
+---
+
+## Architecture Highlights
+
+- Modular remote-loaded components
+- Primary + backup mirror awareness
+- 24-hour intelligent cache TTL
 - Network timeout safeguards
-- Fallback to last known working module
-- Designed for unreliable or remote environments
-
----
-
-## Design Philosophy
-
-- Production-safe by default
-- Fail gracefully
-- No silent corruption
-- Minimal external dependencies
-- Clean modular structure
+- Atomic file replacement strategy
+- Graceful failure handling
 - Bash-native portability
 
-One-Click is built for environments where:
+## Design Principles
 
-- Servers may be remote
-- Network may be unreliable
+- Production-safe defaults
+- Fail predictably
+- No silent corruption
+- Minimal persistent footprint
+- Modular by design
+- Resilient in remote environments
+
+One-Click is engineered for environments where:
+
+- Servers are remote or headless
+- Network stability is inconsistent
 - Downtime must be minimized
-- Recovery must be predictable
-
+- Recovery must be deterministic
 ---
 
-## 📦 Requirements
+## Requirements
 
 - Bash 4+
 - curl
 - sudo or root access
+Additional packages are installed automatically as required by specific modules.
 ---
 ## Disclaimer
 
-This tool performs low-level system operations including disk manipulation and OS reinstallation. Use only in environments you control and understand.
+One-Click is a modular toolkit.
 
-Always test in staging before production use.
+Not all modules perform low-level system operations.
+
+Certain tools — such as OS reinstallation, disk migration, or boot recovery — may perform operations including:
+
+- Disk manipulation
+- Bootloader modification
+- Partition changes
+- System reconfiguration
+
+Other modules (such as log browsing or system information) are read-only or minimally invasive.
+
+Risk level is therefore dependent on the module invoked.
+
+Always:
+
+- Understand the specific tool you are executing
+- Review flags before confirming destructive actions
+- Test workflows in staging before production use
+
+Use responsibly in environments you control and understand.
 
