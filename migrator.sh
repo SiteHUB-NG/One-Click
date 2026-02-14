@@ -13,6 +13,10 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== One-Click Migrator ====
+kernel_version="$(uname -r)"
+int=$(basename $(ls -1 /etc/wireguard/*.conf))
+int="${int/.*}"
+wg_file=($(ls -1 /etc/wireguard/*.conf))
 install_dependencies() {
   local needed=(cpio gzip busybox dropbear)
   local missing=()
@@ -76,162 +80,118 @@ install_dependencies() {
 before_migration() {
   recovery_dir="/boot/recovery"
   rm -rf "$recovery_dir"
-  mkdir -p "$recovery_dir/"{bin,sbin,etc,proc,sys,dev,run,root}
-  vmlinux="/boot/recovery-vmlinuz"
-  initrd="/boot/recovery-initrd"
-  mask=$(sed -En '/inet/{s,[^/]*/([0-9]+).*.*,\1,p}' <(ip -4 addr show dev eth0))
-  cidr_to_mask() {
-  local n=$1 mask=0xffffffff
-  printf "%d.%d.%d.%d\n" \
-    $(( (mask << (32-n)) >> 24 & 255 )) \
-    $(( (mask << (32-n)) >> 16 & 255 )) \
-    $(( (mask << (32-n)) >> 8  & 255 )) \
-    $(( (mask << (32-n))       & 255 ))
-  }
-  #mask=$(cidr_to_mask "$mask")
-  destination_server="${destination_server:-}"
-  destination_gw="${destination_gw:-}"
-  nic="${nic:-}"
-  key="${key:-}"
-  install_dependencies
-  # ==== KERNEL ====
+  mkdir -p "$recovery_dir/"{bin,sbin,etc,proc,sys,dev,run,root,lib,lib64}
+  vmlinuz="$recovery_dir/vmlinuz-$(uname -r)"
+  initrd="$recovery_dir/initrd-$(uname -r).img"
+  # ==== Copy kernel ====
   success "${green}[+]${reset} Copying kernel"
-  cp -f /boot/vmlinuz-$(uname -r) "$vmlinux"
-  box="$(which busybox)"
-  bear="$(which dropbear)"
-  # ==== INITRAMFS TREE ==== 
+  cp -f /boot/vmlinuz-$(uname -r) "$vmlinuz"
+  install_dependencies
+  # ==== Build Initramfs tree ====
   warn "${yellow}[+]${reset} Building recovery initramfs tree"
+  box="$(which busybox)"
   cp -f "$box" "$recovery_dir/bin/"
-  for cmd in sh ip mount udhcpc ls mkdir cat echo cp umount chroot; do
-    ln -s "$box" "${recovery_dir}/bin/${cmd}"
+  copy_libs() {
+    local bin="$1"
+    ldd "$bin" | awk '{print $3}' | grep -E '^/' | while read -r lib; do
+      mkdir -p "$recovery_dir$(dirname "$lib")"
+      cp -f "$lib" "${recovery_dir}${lib}"
+    done
+  }
+  copy_libs "$box"
+  for cmd in sh ip mount umount ls mkdir cp echo cat dd blkid udhcpc; do
+    ln -s busybox "$recovery_dir/bin/$cmd"
   done
-  mkdir -p "$recovery_dir/etc/dropbear"
-  cp "$bear" "$recovery_dir/sbin/"
-  echo "$key" > "$recovery_dir/etc/dropbear/authorized_keys"
-  chmod 600 "$recovery_dir/etc/dropbear/authorized_keys"
-  # ==== NETWORK CONFIG ==== 
-  cat > "$recovery_dir/etc/net.conf" <<EOF
+  cp -a /lib/modules/$(uname -r) "$recovery_dir/lib/modules/"
+  mkdir -p "$recovery_dir/dev"
+  mknod -m 622 "$recovery_dir/dev/console" c 5 1
+  mknod -m 666 "$recovery_dir/dev/null" c 1 3
+  mknod -m 666 "$recovery_dir/dev/tty0" c 4 0
+  cat > "$recovery_dir/etc/net.conf" <<'EOF'
 nic="$nic"
 destination_server="${destination_server:-}"
 mask="$mask"
 destination_gw="${destination_gw:-}"
 EOF
-  # ==== INIT SCRIPT ====
-  cat > "$recovery_dir/init" <<EOF
+  # ==== Init script ====
+  mkdir -p "$recovery_dir/lib/modules/$kernel_version"
+  cp -f /sbin/modprobe "$recovery_dir/sbin/"
+  copy_libs /sbin/modprobe
+  cp -f /lib/modules/$(uname -r)/modules.* "$recovery_dir/lib/modules/$(uname -r)/"
+  cat > "$recovery_dir/init" <<'EOF'
 #!/bin/sh
-#set -e
+# Mount pseudo-filesystems
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 mount -t tmpfs tmpfs /run
+# Load modules
+for mod in $(ls /lib/modules/$(uname -r)/kernel/drivers/net/ | sed 's/.ko$//'); do
+    modprobe $mod 2>/dev/null || true
+done
+# Configure network
 . /etc/net.conf
 ip link set lo up
 if [ -n "${destination_server:-}" ]; then
-  ip link set "$nic" up
-  ip addr add "${destination_server:-}/${mask}" dev "$nic"
-  ip route add default via "${destination_gw:-}"
+    ip addr add "${destination_server:-}/${mask}" dev "$nic"
+    ip link set "$nic" up
+    ip route add default via "${destination_gw:-}"
 else
-  for i in $(ls /sys/class/net | grep -v lo); do
-    ip link set "$i" up
-    udhcpc -i "$i" &
-  done
+    for i in $(ls /sys/class/net | grep -v lo); do
+        ip link set "$i" up
+        udhcpc -i "$i" &
+    done
 fi
-sleep 3
+sleep 1
 if [ -x /sbin/dropbear ]; then
-  dropbear -R -E &
+    dropbear -R -E &
+fi
+# ==== Mount target root if available ====
+if [ -b /dev/sda1 ]; then
+    mkdir -p /mnt
+    mount /dev/sda1 /mnt
 fi
 # ==== Auto-repair ====
 if [ -x /sbin/auto-repair.sh ]; then
-  /sbin/auto-repair.sh
+    /sbin/auto-repair.sh
 fi
-success "$(tput setaf 3)[${reset}recovery$(tput setaf 3)]${reset} SSH ready"
-exec sh
+# Fallback shell
+exec /bin/sh
 EOF
-
   chmod +x "$recovery_dir/init"
-  # ==== AUTO-REPAIR SCRIPT ==== #
-  cat > "$recovery_dir/sbin/auto-repair.sh" <<EOF
-#!/bin/sh
-set -e
-root_dev=$(blkid -t TYPE=ext4 -o device | head -n1)
-efi_dev=$(blkid -t TYPE=vfat -o device | head -n1)
-mount "${root_dev:-}" /mnt
-mount "${efi_dev:-}" /mnt/boot/efi
-mount --bind /dev  /mnt/dev
-mount --bind /proc /mnt/proc
-mount --bind /sys  /mnt/sys
-#chroot /mnt /bin/bash <<EOF2
-#chroot /mnt /bin/bash -c '
-#update-initramfs -u -k all
-if [ -d /sys/firmware/efi ]; then
-  chroot /mnt /bin/bash -c '
-  update-initramfs -u -k all
-  grub-install --target=x86_64-efi ---efi-directory=/boot/efi --recheck --bootloader-id=GRUB --modules="normal linux search" --boot-directory=/boot --force
-  grub-mkconfig -o /boot/grub/grub.cfg
-  '
-else
-  chroot /mnt /bin/bash -c '
-  update-initramfs -u -k all
-  grub-install --target=i386-pc '"${root_dev:-}"' --boot-directory=/boot --modules="normal linux search configfile" --root-directory=/mnt
-  grub-mkconfig -o /boot/grub/grub.cfg
-  '
-fi
-#grub-mkconfig -o /boot/grub/grub.cfg
-#'
-#EOF2
-
-sync
-reboot -f
-EOF
-
-  chmod +x "$recovery_dir/sbin/auto-repair.sh"
-  # ==== BUILD INITRD ==== 
-  info "${blue}[+]${reset} Creating initrd"
+  # ==== Build initrd image ====
+  warn "${yellow}[+]${reset} Creating initramfs image"
   (
     cd "$recovery_dir"
     find . | cpio -H newc -o
   ) | gzip > "$initrd"
-  # ==== GRUB ENTRY ==== #
-  info "${blue}[+]${reset} Building GRUB"
-  for id in "${ids[@]}"; do
-    case "$id" in
-      debian|ubuntu)
-        warn "${yellow}[+]${reset} Installing GRUB recovery entry"
-        cat >> /boot/grub/custom.cfg <<'EOF'
-
+  # ==== GRUB Entry ====
+  warn "${yellow}[+]${reset} Installing GRUB recovery entry"
+  cat >> /boot/grub/custom.cfg <<EOF
 menuentry "Recovery Environment (SSH)" {
-  search --file --set=root /recovery-vmlinuz
-  linux /recovery-vmlinuz root=ram0 ro
-  initrd /recovery-initrd
+    search --file --no-floppy --set=root /boot/recovery/vmlinuz-${kernel_version}
+    set prefix=(\$root)/boot/grub
+    insmod linux
+    insmod ext4
+    insmod search_fs_file
+    insmod search_fs_uuid
+    linux /boot/recovery/vmlinuz-${kernel_version} root=/dev/ram0 rw rdinit=/init
+    initrd /boot/recovery/initrd-${kernel_version}.img
 }
 EOF
-        ;;
-      centos|rhel|fedora)
-        warn "${yellow}[+]${reset} Installing GRUB recovery entry"
-        echo "[+] Installing GRUB recovery entry"
-        cat >> /boot/grub2/custom.cfg <<'EOF'
 
-menuentry "Recovery Environment (SSH)" {
-    search --file --set=root /recovery-vmlinuz
-    linux /recovery-vmlinuz root=ram0 ro
-    initrd /recovery-initrd
-}
-EOF
-        ;;
-    esac
-  done
-  echo 'GRUB_CUSTOM_CFG="/boot/grub/custom.cfg"' >> /etc/default/grub
-  sed -Ei.bak '
+  sed -Ei.one-click-backup '
     s/(GRUB_DEFAULT=)"?[^"]*"?/\1"Recovery Environment (SSH)"/
     s/(GRUB_TIMEOUT=)"?[^"]*"?/\15/
   ' /etc/default/grub
   update-grub
-  success "${green}[✓]${reset} Recovery environment prepared"
-  warn "Now proceeding with server migration"
+  success "${green}[✓]${reset} Recovery environment prepared successfully"
+  warn "Now ready to perform DD migration. The system can auto-boot into recovery after migration."
 }
 after_migration() {
   rm -f /etc/default/grub
-  mv /etc/default/grub.bak /etc/default/grub
+  rm -f /etc/default/custom.cfg
+  mv /etc/default/grub.one-click-backup /etc/default/grub
   update-grub
   rm -rf /boot/recovery
 }
@@ -919,33 +879,48 @@ for id in ${ids[@]} ; do
   case \${id:-} in
     debian|ubuntu)
       [[ -f /etc/network/interfaces ]] && cp /etc/network/interfaces /etc/network/interfaces.bak
-      sed -Ei "
+      sed -Ei.one-click-backup "
         s/$sys_gw/$destination_gw/;
-        s/$ipv6_gw/${remote_v6_gw:-};
-        s/$sys_ip/$destination_server/g; 
-        s/${sys_ipv6/:1}/${destination_v6/:1}/g; 
         s/$ipv6_gw/${remote_v6_gw:-}/g;
-        $ {/gateway/!
-          {
-            p;
-            s/^([\t ]+).*/\1gateway ${remote_v6_gw:-}/;
+        s/$sys_ip/$destination_server/g; 
+        s,${sys_ipv6/:1},${destination_v6/:1},g; 
+        s/$ipv6_gw/${remote_v6_gw:-}/g;
+        /${nic:-}/,/inet6/ {
+          /gateway/! {
+            /netmask/ {
+              p;
+              s/^([\t ]+).*/\1gateway ${destination_gw:-}/;
+            }
+          }
+        }
+        /inet6/,$ {
+          /gateway/! {
+            /netmask/ {
+              p;
+              s/^([\t ]+).*/\1gateway ${destination_v6_gw:-}/;
+            }
           }
         }
       " /etc/network/interfaces
-      if [[ -f /etc/wireguard/wg0.conf ]]; then
-        sed -Ei "
+      if [[ -d /etc/wireguard/ ]]; then
+        wg-quick down "$int"
+        sed -Ei.one-click-backup "
           /ip -6/ ! {
             s/$sys_ip/$destination_server/g; 
             s/$sys_gw/$destination_gw/g; 
-            s/${sys_ipv6/:1}/${destination_v6/:1}/g; 
+            s,${sys_ipv6/:1},${destination_v6/:1},g; 
             s/$ipv6_gw/${remote_v6_gw:-}/g;
-            s/^.*200 default via $destination_gw/#&/
+            s/^.*200 default via $destination_gw/#&/;
+            /ip -6/ {
+              /${sys_ip}|${destination_server}/d
+            }
           }
         " $wg_file
-        wg-quick up wg0
+        wg-quick up "$int"
       fi
-      sed -i "s/eth0/$nic/g" /etc/network/interfaces
+      sed -i.one-click-backup "s/eth0/$nic/g" /etc/network/interfaces
       ip addr flush dev "$nic" || true
+      ifdown "$nic" &> /dev/null || true
       ifup "$nic" &> /dev/null || true
       ;;
     rhel|centos|rocky|almalinux|fedora)
@@ -954,25 +929,29 @@ for id in ${ids[@]} ; do
       if command -v nmcli &> /dev/null; then
         iface_file="/etc/NetworkManager/system-connections/$nic.nmconnection"
         [[ -f /etc/NetworkManager/system-connections/$nic.nmconnection ]] && cp /etc/NetworkManager/system-connections/$nic.nmconnection /etc/NetworkManager/system-connections/$nic.nmconnection.bak
-        sed -Ei "
+        sed -Ei.one-click-backup "
           s/$sys_ip/$destination_server/g;
           s/$sys_gw/$destination_gw/g;
-          s/${sys_ipv6/:1}/${destination_v6/:1}/g;
+          s,${sys_ipv6/:1},${destination_v6/:1},g;
           s/$ipv6_gw/${remote_v6_gw:-}/g
         " /etc/NetworkManager/system-connections/$nic.nmconnection
         if [[ -f /etc/wireguard/wg0.conf ]]; then
-          sed -Ei "
+          wg-quick down "$int"
+          sed -Ei.one-click-backup "
             /ip -6/ ! {
               s/$sys_ip/$destination_server/g;
               s/$sys_gw/$destination_gw/g;
               s/${sys_ipv6/:1}/${destination_v6/:1}/g;
               s/$ipv6_gw/${remote_v6_gw:-}/g;
-              s/200 default via $destination_gw/#&/
+              s/200 default via $destination_gw/#&/;
+              /ip -6/ {
+                /${sys_ip}|${destination_server}/d
+              }
             }
           " $wg_file
-          wg-quick up wg0
+          wg-quick up "$int"
         fi
-        sed -i "s/eth0/$nic/g" /etc/NetworkManager/system-connections/$nic.nmconnection
+        sed -i.one-click-backup "s/eth0/$nic/g" /etc/NetworkManager/system-connections/$nic.nmconnection
         nmcli device set "$nic" managed yes
         nmcli connection reload
         nmcli device disconnect $nic
@@ -983,25 +962,29 @@ for id in ${ids[@]} ; do
         local iface_file
         iface_file="/etc/sysconfig/network-scripts/ifcfg-$nic"
         [[ -f /etc/sysconfig/network-scripts/ifcfg-$nic ]] && cp /etc/sysconfig/network-scripts/ifcfg-$nic /etc/sysconfig/network-scripts/ifcfg-$nic.bak
-        sed -Ei "
+        sed -Ei.one-click-backup "
           s/$sys_ip/$destination_server/g;
           s/$sys_gw/$destination_gw/g;
-          s/${sys_ipv6/:1}/${destination_v6/:1}/g;
+          s,${sys_ipv6/:1},${destination_v6/:1},g;
           s/$ipv6_gw/${remote_v6_gw:-}/g
         " /etc/sysconfig/network-scripts/ifcfg-$nic
-        if [[ -f /etc/wireguard/wg0.conf ]]; then
-          sed -Ei "
+        if [[ -d /etc/wireguard/ ]]; then
+          wg-quick down "$int"
+          sed -Ei.one-click-backup "
             /ip -6/ ! {
               s/$sys_ip/$destination_server/g;
               s/$sys_gw/$destination_gw/g;
-              s/${sys_ipv6/:1}/${destination_v6/:1}/g;
+              s,${sys_ipv6/:1},${destination_v6/:1},g;
               s/$ipv6_gw/${remote_v6_gw:-}/g;
-              s/200 default via $destination_gw/#&/
+              s/200 default via $destination_gw/#&/;
+              /ip -6/ {
+                /${sys_ip}|${destination_server}/d
+              }
             }  
           " $wg_file
-          wg-quick up wg0
+          wg-quick up "$int"
         fi
-        sed -i "s/eth0/$nic/g" /etc/sysconfig/network-scripts/ifcfg-$nic
+        sed -i.one-click-backup "s/eth0/$nic/g" /etc/sysconfig/network-scripts/ifcfg-$nic
         systemctl restart network || systemctl restart NetworkManager
       fi
       ;;
