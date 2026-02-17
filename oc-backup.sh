@@ -594,7 +594,7 @@ restore_remote_backs() {
     || die "Invalid backup format"
   remote_snap="${remote_base}/${backup_date}"
   info "Restoring snapshot: $backup_date"
-  rsync_cmd_run="rsync -a --partial --append-verify --progress \
+  local rsync_cmd_run="rsync -a --partial --append-verify --progress \
     -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
     "${backup_user}@${backup_ip}:${remote_snap}/" \
     "$restore_path/"
@@ -689,6 +689,7 @@ restore_menu() {
   case "$restore_from" in
     # ==== LOCAL ====
     l)
+      local rsync_cmd_run="rsync -a --partial --append-verify --progress $src_snap/ $restore_path/"
       mapfile -t local_snaps < <(
         ls -1 "$dst_dir" 2>/dev/null | grep -E '^[0-9]{4}-' | sort
       )
@@ -699,8 +700,13 @@ restore_menu() {
       [[ -d "$src_snap" ]] || die "Snapshot not found"
 
       info "Restoring local snapshot: $selected_snapshot"
-      rsync -a --partial --append-verify --progress "$src_snap/" "$restore_path/" \
-        || die "Local restore failed"
+      wait_for_network
+      create_service "${rsync_cmd_run}" "Local Snapshot Restore"
+      if "${rsync_cmd_run}"; then
+        remove_service
+      else
+        die "restore failed"
+      fi
       success "Local restore completed"
       restore_databases
       ;;
@@ -725,17 +731,22 @@ restore_menu() {
         || die "Restore cancelled"
       remote_snap="${remote_base}/${selected_snapshot}"
       info "Restoring remote snapshot: $selected_snapshot"
-      if [[ "$req" == "y" || "$req" == "yes" ]]; then
-        rsync -a --partial --append-verify --progress \
+      local rsync_cmd_run="rsync -a --partial --append-verify --progress \
           -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
           "${backup_user}@${backup_ip}:${remote_snap}/" \
-          "$restore_path/" \
-          || die "Remote restore failed"
+          "$restore_path/"
+      if [[ "$req" == "y" || "$req" == "yes" ]]; then
+        wait_for_network
+        create_service "${rsync_cmd_run}" "Remote Snapshot Restore"
+        if "${rsync_cmd_run}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
       else
-        sshpass -p "$d_pass" rsync -a --partial --append-verify --progress \
-          -e "ssh -p $ssh_port -o StrictHostKeyChecking=no" \
-          "${backup_user}@${backup_ip}:${remote_snap}/" \
-          "$restore_path/" \
+        wait_for_network
+        create_service "${rsync_cmd_run}" "Remote Snapshot Restore"
+        if sshpass -p "$d_pass" "$rsync_cmd_run" \
           || die "Remote restore failed"
       fi
       success "Remote restore completed"
