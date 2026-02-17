@@ -44,6 +44,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  cron                    Configure a cron job" \
     "  help                    Show this help message" \
     "  uninstall               Remove one-click and all associated files and configurations." \
+    "  --version               Check version" \
     " " "$(tput smul)Examples:$(tput rmul)" \
     "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)       Run network repair" \
     "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
@@ -144,6 +145,8 @@ recovery_base="${base}/boot-recovery-tool"
 recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
+updated="Feb 2026"
+version="1.2.5"
 man_dir="/usr/local/share/man/man1/"
 tab_complete="/etc/bash_completion.d/one-click"
 one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
@@ -166,6 +169,7 @@ spinner_frames=( '\' '-' '/' '|' )
 r1=( '|' '/' '-' '\' )
 r2=( '-' '/' '|' '\' )
 r3=( '|' '\' '-' '/' )
+sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$path"
 # ==== Load Source Body ====
 warn() {
   printf "$yellow[WARN]:$reset %s\n" "$@" >&2;
@@ -202,6 +206,7 @@ load_body() {
   fi
   # ==== Use cache if both mirrors unavailable ====
   [[ -f "$cache_file" ]] || die "Backup module missing after load attempt"
+  sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$cache_file"
   source "$cache_file"
 }
 # ==== Load Without Calling ====
@@ -304,6 +309,10 @@ for arg in "$@"; do
     --profile=*) profile_arg="${arg#*=}"     ;;
   esac
 done
+if [[ "$1" == "--version" ]]; then
+  echo "$version"
+  exit 0
+fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
   export non_interactive=1                                                                  ##
@@ -373,6 +382,7 @@ map_one_click() {
 if [[ ! -s "$manpage" ]]; then
   mkdir -p "$man_dir"
   wget -P "$man_dir" "$one_click_1"
+  sed -Ei "s/@VERSION@/$version/g;s/@DATE@/$(date +%Y-%m-%d)/g" "$manpage"
   if mandb -q; then
     info "1 man subdirectory contained newer manual pages." \
       "1 manual page was added." "0 stray cats were added." \
@@ -501,6 +511,7 @@ if [[ $# -gt 0 ]]; then
         "  cron                    Configure a cron job" \
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
+        "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)       Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
