@@ -697,3 +697,46 @@ browse_journal() {
   done
 }
 # ==== End Of Log Browser ====
+create_service() {
+  rsync_cmd="${1:-}"
+  job="${2:-}"
+  cat << EOF > "$service_file"
+[Unit]
+Description=Resumable RSYNC Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '
+info "Resuming job: \$job"
+\$rsync_cmd
+rm -f "$service_file"
+systemctl daemon-reload
+success "Rsync job completed and service removed: \$job"
+'
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$service_name"
+}
+wait_for_network() {
+  while ! ping -c1 -W1 8.8.8.8 &>/dev/null; do
+    echo "$(date) - Network down, waiting 10s..."
+    sleep 10
+  done
+  info "Network detected. Starting rsync..."
+}
+remove_service() {
+    if [[ -f "$service_file" ]]; then
+        warn "Removing systemd service $service_file"
+        sudo systemctl disable "$service_name" >/dev/null || true
+        sudo rm -f "$service_file"
+        sudo systemctl daemon-reload
+    fi
+}
+
