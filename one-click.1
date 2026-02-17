@@ -1,8 +1,8 @@
-." Man page for one-click
-.TH ONE-CLICK 8 "2026-02-12" "One-Click v1.0" "System Administration"
+.\" Man page for one-click
+.TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "System Administration"
 
 .SH NAME
-one-click - modular server management, recovery, backup, and migration toolkit
+one-click \- modular server management, recovery, backup, and migration toolkit
 
 .SH SYNOPSIS
 .B one-click
@@ -30,6 +30,7 @@ session to prevent interruption from SSH disconnects.
 Commands are explicit and user-initiated. Destructive operations require confirmation.
 
 .SH COMMANDS
+
 .TP
 .B reinstall
 Perform a destructive operating system reinstallation over the network.
@@ -74,109 +75,125 @@ uses subcommands instead of traditional command-line options.
 Future versions may introduce additional flags.
 
 .SH EXAMPLES
+
 Reinstall operating system:
 .RS
-one-click reinstall
+.B one-click reinstall
 .RE
 
 Create a backup:
 .RS
-one-click backup
+.B one-click backup
 .RE
 
 Repair network configuration:
 .RS
-one-click repair
+.B one-click repair
 .RE
 
 Migrate system:
 .RS
-one-click migrate
+.B one-click migrate
 .RE
 
 View system information:
 .RS
-one-click sys-info
+.B one-click sys-info
 .RE
 
 Configure cron automation:
 .RS
-one-click cron
+.B one-click cron
 .RE
 
 Uninstall toolkit:
 .RS
-one-click uninstall
+.B one-click uninstall
 .RE
 
 .SH REINSTALL
+
 The
 .B reinstall
 command performs a complete operating system reinstallation.
 
-WARNING:
+.B WARNING:
 This operation destroys all existing data.
 
 Features include:
 
-.IP (bu 2
+.IP \(bu 2
 Network-based installation
-.IP (bu 2
+
+.IP \(bu 2
 Supports Linux and Windows targets
-.IP (bu 2
+
+.IP \(bu 2
 Independent of current system state
-.IP (bu 2
+
+.IP \(bu 2
 Suitable for recovery or reprovisioning
 
 .SH BACKUP
+
 The
 .B backup
 command creates incremental backups using:
 
-.IP (bu 2
+.IP \(bu 2
 rsync local snapshots
-.IP (bu 2
+
+.IP \(bu 2
 Remote rsync over SSH
-.IP (bu 2
+
+.IP \(bu 2
 Cloud storage via rclone
 
 Backups are incremental and optimized for efficiency and fast restore.
 
 .SH BOOT-RECOVERY
+
 The
 .B boot-recovery
 command creates and restores boot-critical snapshots.
 
 This includes:
 
-.IP (bu 2
+.IP \(bu 2
 Bootloader
-.IP (bu 2
+
+.IP \(bu 2
 Kernel
-.IP (bu 2
+
+.IP \(bu 2
 Initramfs
-.IP (bu 2
+
+.IP \(bu 2
 Root filesystem metadata
 
 Useful for recovering from boot failures.
 
 .SH REPAIR
+
 The
 .B repair
 command restores network configuration from snapshots.
 
 This allows recovery from:
 
-.IP (bu 2
+.IP \(bu 2
 Firewall misconfiguration
-.IP (bu 2
+
+.IP \(bu 2
 Interface errors
-.IP (bu 2
+
+.IP \(bu 2
 Routing failures
 
 Especially useful for remote servers.
 
 .SH MIGRATE
+
 The
 .B migrate
 command transfers entire systems.
@@ -193,25 +210,32 @@ File-level migration.
 
 Used for:
 
-.IP (bu 2
+.IP \(bu 2
 Server replacement
-.IP (bu 2
+
+.IP \(bu 2
 Failover preparation
-.IP (bu 2
+
+.IP \(bu 2
 Infrastructure migration
 
 .SH SYS-INFO
+
 Displays live system statistics including:
 
-.IP (bu 2
+.IP \(bu 2
 CPU usage
-.IP (bu 2
+
+.IP \(bu 2
 Memory usage
-.IP (bu 2
+
+.IP \(bu 2
 Disk usage
-.IP (bu 2
+
+.IP \(bu 2
 Network statistics
-.IP (bu 2
+
+.IP \(bu 2
 Load average
 
 Provides functionality similar to
@@ -220,30 +244,38 @@ and
 .BR htop (1).
 
 .SH CRON
+
 Provides an interface for configuring scheduled automation tasks.
 
 Supports:
 
-.IP (bu 2
+.IP \(bu 2
 Scheduled backups
-.IP (bu 2
+
+.IP \(bu 2
 Maintenance automation
-.IP (bu 2
+
+.IP \(bu 2
 Snapshot rotation
 
 .SH UNINSTALL
+
 Removes one-click and associated files including:
 
-.IP (bu 2
+.IP \(bu 2
 Installed scripts
-.IP (bu 2
+
+.IP \(bu 2
 Configuration files
-.IP (bu 2
+
+.IP \(bu 2
 Cron jobs
-.IP (bu 2
+
+.IP \(bu 2
 Logs
 
 .SH FILES
+
 .TP
 .I /etc/one-click/
 Configuration directory.
@@ -261,6 +293,7 @@ Executable.
 Man page.
 
 .SH ENVIRONMENT
+
 .TP
 .B TMUX
 Used automatically for persistent sessions.
@@ -270,6 +303,7 @@ Used automatically for persistent sessions.
 Used for user configuration.
 
 .SH EXIT STATUS
+
 .TP
 .B 0
 Success.
@@ -287,25 +321,31 @@ Invalid usage.
 Interrupted by user.
 
 .SH SECURITY
+
 .B one-click
 requires root privileges for most operations.
 
 Users should:
 
-.IP (bu 2
+.IP \(bu 2
 Verify script source integrity
-.IP (bu 2
+
+.IP \(bu 2
 Review destructive commands before execution
-.IP (bu 2
+
+.IP \(bu 2
 Maintain backups before reinstall or migration
 
 .SH VERSION
-One-Click v1.0
+
+One-Click v@VERSION@
 
 .SH AUTHOR
+
 Chike Egbuna
 
 .SH SEE ALSO
+
 .BR rsync (1),
 .BR rclone (1),
 .BR tmux (1),
@@ -317,4 +357,5 @@ Chike Egbuna
 .BR parted (8)
 
 .SH HOMEPAGE
+
 https://github.com/SiteHUB-NG/One-Click
