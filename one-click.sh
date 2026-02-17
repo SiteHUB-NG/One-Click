@@ -46,7 +46,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  uninstall               Remove one-click and all associated files and configurations." \
     "  --version               Check version" \
     " " "$(tput smul)Examples:$(tput rmul)" \
-    "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)       Run network repair" \
+    "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
     "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
   exit 0
 fi
@@ -513,7 +513,7 @@ if [[ $# -gt 0 ]]; then
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
-        "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)       Run network repair" \
+        "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
       exit 1
       ;;
