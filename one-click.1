@@ -1,71 +1,67 @@
 .\" Man page for one-click
 .TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "System Administration"
 
-.SH NAME
-one-click \- modular server management, recovery, backup, and migration toolkit
-
-.SH SYNOPSIS
-.B one-click
-.RI [ command ]
-
-.B one-click help
-
-.B one-click cron
-
 .SH DESCRIPTION
+
 .B one-click
 is a modular server management and disaster recovery toolkit designed for predictable,
 repeatable, and auditable Linux system administration.
 
-It provides tools for operating system reinstallation, backup, migration, boot recovery,
-network repair, automation, and system inspection.
+.PP
+It provides tools for:
 
-The toolkit is designed for use on VPS, dedicated servers, and bare-metal systems.
-Operations may be interactive or automated.
+.IP \(bu 2
+Operating system reinstallation
 
+.IP \(bu 2
+Backup and restore
+
+.IP \(bu 2
+System migration
+
+.IP \(bu 2
+Boot recovery
+
+.IP \(bu 2
+Network repair
+
+.IP \(bu 2
+Scheduled automation (cron)
+
+.IP \(bu 2
+System inspection and monitoring
+
+.PP
+The toolkit is suitable for VPS, dedicated servers, and bare-metal systems.
+Operations may be interactive or fully automated.
+
+.PP
 Long-running operations are automatically executed within a
 .BR tmux (1)
-session to prevent interruption from SSH disconnects.
+session to prevent interruption and ensure persistent execution even if SSH connections are lost.
 
-Commands are explicit and user-initiated. Destructive operations require confirmation.
+.PP
+All commands are explicit and user-initiated. Destructive operations require confirmation before proceeding to protect system integrity.
 
 .SH COMMANDS
 
-.TP
-.B reinstall
-Perform a destructive operating system reinstallation over the network.
+Displays available commands with descriptions:
 
-.TP
-.B backup
-Create incremental or compressed backups locally or remotely.
-
-.TP
-.B boot-recovery
-Create or restore boot and root partition snapshots.
-
-.TP
-.B repair
-Repair or restore network configurations.
-
-.TP
-.B migrate
-Migrate entire systems using block-level or file-level methods.
-
-.TP
-.B sys-info
-Display live system statistics.
-
-.TP
-.B cron
-Configure scheduled automation tasks.
-
-.TP
-.B uninstall
-Remove one-click and all associated files.
-
-.TP
-.B help
-Display the interactive help menu.
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+.B reinstall | Perform a destructive operating system reinstallation over the network.
+.B backup | Create incremental or compressed backups locally or remotely.
+.B boot-recovery | Create or restore boot and root partition snapshots.
+.B repair | Repair or restore network configurations.
+.B migrate | Migrate entire systems using block-level or file-level methods.
+.B sys-info | Display live system statistics.
+.B cron | Configure scheduled automation tasks.
+.B uninstall | Remove one-click and all associated files.
+.B help | Display the interactive help menu.
+.TE
 
 .SH OPTIONS
 Currently,
@@ -123,7 +119,7 @@ This operation destroys all existing data.
 Features include:
 
 .IP \(bu 2
-Network-based installation
+Network and cloud based installation
 
 .IP \(bu 2
 Supports Linux and Windows targets
@@ -133,6 +129,101 @@ Independent of current system state
 
 .IP \(bu 2
 Suitable for recovery or reprovisioning
+
+.PP
+The original system can be any system listed in the table below.
+
+.PP
+System requirements for the target system:
+
+.TS
+tab(|) box;
+l l l l
+l l l l.
+System | Version | Memory | Disk
+_
+Alpine | 3.20, 3.21, 3.22, 3.23 | 256 MB | 1 GB
+Debian | 9, 10, 11, 12, 13 | 256 MB | 1 ~ 1.5 GB ^
+Kali | Rolling | 256 MB | 1 ~ 1.5 GB ^
+Ubuntu | 16.04 LTS - 24.04 LTS, 25.10 | 512 MB * | 2 GB
+Anolis | 7, 8, 23 | 512 MB * | 5 GB
+RHEL / AlmaLinux / Rocky / Oracle | 8, 9, 10 | 512 MB * | 5 GB
+OpenCloudOS | 8, 9, Stream 23 | 512 MB * | 5 GB
+CentOS Stream | 9, 10 | 512 MB * | 5 GB
+Fedora | 42, 43 | 512 MB * | 5 GB
+openEuler | 20.03 LTS - 24.03 LTS, 25.09 | 512 MB * | 5 GB
+openSUSE | Leap 15.6, 16.0, Tumbleweed (Rolling) | 512 MB * | 5 GB
+NixOS | 25.11 | 512 MB | 5 GB
+Arch | Rolling | 512 MB | 5 GB
+Gentoo | Rolling | 512 MB | 5 GB
+AOSC OS | Rolling | 512 MB | 5 GB
+fnOS | 1 | 512 MB | 8 GB
+Windows (DD) | Any | 512 MB | Depends on image
+Windows (ISO) | Vista, 7, 8.x (Server 2008 - 2012 R2) | 512 MB | 25 GB
+Windows (ISO) | 10, 11 (Server 2016 - 2025) | 1 GB | 25 GB
+.TE
+
+.PP
+* Indicates installation using cloud images, not traditional network installation.
+
+.PP
+^ Indicates either:
+.br
+256 MB memory + 1.5 GB disk
+.br
+or
+.br
+512 MB memory + 1 GB disk
+
+.PP
+Additional Notes:
+
+.IP \(bu 2
+Username is
+.B root.
+The script prompts for a password. If left blank, a random one is generated.
+
+.IP \(bu 2
+When installing the latest version, the version number does not need to be specified.
+
+.IP \(bu 2
+Maximizes disk space usage: no boot partition (except Fedora) and no swap partition.
+
+.IP \(bu 2
+Automatically selects optimized kernels based on machine type (e.g., Cloud or HWE kernels).
+
+.IP \(bu 2
+When installing Red Hat, you must provide a qcow2 image link obtained from:
+.br
+https://access.redhat.com/downloads/content/rhel
+.br
+Other RHEL-based qcow2 images (e.g., Alibaba Cloud Linux, TencentOS Server) are also supported.
+
+.IP \(bu 2
+After reinstallation, if changing the SSH port or switching to key-based login,
+you must also modify files inside:
+.br
+.I /etc/ssh/sshd_config.d/
+
+.IP \(bu 2
+Supports raw and fixed-size VHD image formats.
+Images may be uncompressed or compressed as:
+.br
+.I .gz, .xz, .zst, .tar, .tar.gz, .tar.xz, .tar.zst
+
+.IP \(bu 2
+When deploying a Windows image:
+.br
+The system disk is automatically expanded.
+.br
+Machines with a static IP will have the IP configured automatically.
+.br
+It may take several minutes after first boot for configuration to complete.
+
+.IP \(bu 2
+When deploying a Linux image:
+.br
+The installer will NOT modify any contents of the image.
 
 .SH BACKUP
 
@@ -149,7 +240,144 @@ Remote rsync over SSH
 .IP \(bu 2
 Cloud storage via rclone
 
+.PP
 Backups are incremental and optimized for efficiency and fast restore.
+
+.PP
+Features include:
+
+.IP \(bu 2
+Block level incremental transfers using rsync delta algorithm
+
+.IP \(bu 2
+Snapshot style backups using hard links to minimize disk usage
+
+.IP \(bu 2
+Local, remote, and cloud destination support
+
+.IP \(bu 2
+Bandwidth efficient operation suitable for limited network environments
+
+.IP \(bu 2
+Fast restore capability with minimal reconstruction time
+
+.IP \(bu 2
+Preserves permissions, ownership, timestamps, and symbolic links
+
+.IP \(bu 2
+Supports full system and partial directory backups
+
+.IP \(bu 2
+Safe operation on live systems without requiring downtime
+
+.PP
+Supported backup destinations:
+
+.TS
+tab(|) box;
+l l.
+Destination | Method
+_
+Local disk | rsync snapshot
+Remote server | rsync over SSH
+Cloud storage | rclone supported providers
+Network storage | SSH, NFS, or mounted filesystem
+External disk | Direct filesystem backup
+.TE
+
+.PP
+Supported cloud providers (via rclone) include but are not limited to:
+
+.IP \(bu 2
+Amazon S3
+
+.IP \(bu 2
+Backblaze B2
+
+.IP \(bu 2
+Google Cloud Storage
+
+.IP \(bu 2
+Microsoft Azure Blob Storage
+
+.IP \(bu 2
+Dropbox
+
+.IP \(bu 2
+Wasabi
+
+.IP \(bu 2
+Cloudflare R2
+
+.IP \(bu 2
+Any provider supported by rclone
+
+.PP
+Backup behavior:
+
+.IP \(bu 2
+Initial backup creates a full snapshot
+
+.IP \(bu 2
+Subsequent backups transfer only changed files
+
+.IP \(bu 2
+Unchanged files are referenced using hard links
+
+.IP \(bu 2
+Deleted files may be retained in previous snapshots
+
+.IP \(bu 2
+Backup integrity is verified during transfer
+
+.PP
+Restore capability:
+
+.IP \(bu 2
+Individual file restore
+
+.IP \(bu 2
+Directory restore
+
+.IP \(bu 2
+Full system restore
+
+.IP \(bu 2
+Bare metal recovery support
+
+.PP
+Requirements:
+
+.TS
+tab(|) box;
+l l.
+Component | Requirement
+_
+Local backup | rsync installed
+Remote backup | rsync and SSH access
+Cloud backup | rclone configured remote
+Filesystem | Supports permissions and hard links
+.TE
+
+.PP
+Security considerations:
+
+.IP \(bu 2
+Remote transfers use SSH encryption
+
+.IP \(bu 2
+Cloud transfers use provider supported encryption
+
+.IP \(bu 2
+Authentication handled via SSH keys or rclone configuration
+
+.IP \(bu 2
+Backup data remains unchanged unless explicitly modified
+
+.PP
+The
+.B backup
+command is suitable for routine system protection, migration preparation, and disaster recovery.
 
 .SH BOOT-RECOVERY
 
@@ -157,21 +385,64 @@ The
 .B boot-recovery
 command creates and restores boot-critical snapshots.
 
-This includes:
+.PP
+This includes the following components:
 
 .IP \(bu 2
-Bootloader
+Bootloader – preserves GRUB or other bootloader configuration and binaries
 
 .IP \(bu 2
-Kernel
+Kernel – captures the current kernel image(s) in use
 
 .IP \(bu 2
-Initramfs
+Initramfs – stores the initial RAM filesystem for boot
 
 .IP \(bu 2
-Root filesystem metadata
+Root filesystem metadata – maintains essential filesystem structures required for boot
 
-Useful for recovering from boot failures.
+.PP
+Use
+.B boot-recovery
+for:
+
+.IP \(bu 2
+Recovering from boot failures caused by kernel or bootloader corruption
+
+.IP \(bu 2
+Testing new kernels or boot configurations without risking system unbootability
+
+.IP \(bu 2
+Safe rollback after failed updates or misconfigured boot parameters
+
+.PP
+Operation details:
+
+.IP \(bu 2
+Snapshots can be created on local storage or remote locations
+
+.IP \(bu 2
+Restoration overwrites only boot-critical components
+
+.IP \(bu 2
+Does not affect user data outside boot-critical areas
+
+.IP \(bu 2
+Supports incremental snapshotting of boot-critical files to save space
+
+.PP
+Security and safety considerations:
+
+.IP \(bu 2
+Requires root privileges to create or restore boot-critical snapshots
+
+.IP \(bu 2
+Restoration is destructive to the boot components; ensure backups are verified
+
+.IP \(bu 2
+Safe to use with backup snapshots created by the
+.B backup
+command
+for coordinated system recovery
 
 .SH REPAIR
 
@@ -179,162 +450,309 @@ The
 .B repair
 command restores network configuration from snapshots.
 
+.PP
 This allows recovery from:
 
 .IP \(bu 2
-Firewall misconfiguration
+Firewall misconfiguration – restores iptables, nftables, or equivalent rules
 
 .IP \(bu 2
-Interface errors
+Interface errors – resets network interfaces to the snapshot state
 
 .IP \(bu 2
-Routing failures
+Routing failures – restores static routes, gateways, and routing tables
 
-Especially useful for remote servers.
+.PP
+Use
+.B repair
+especially for:
+
+.IP \(bu 2
+Remote servers where manual access is limited
+
+.IP \(bu 2
+Systems that must maintain network uptime and connectivity
+
+.IP \(bu 2
+Recovering from configuration errors without requiring a full system reinstall
+
+.PP
+Operation details:
+
+.IP \(bu 2
+Snapshots can be local or stored remotely
+
+.IP \(bu 2
+Restoration applies only to network configuration files and runtime settings
+
+.IP \(bu 2
+Supports both interface-based and system-wide configuration restores
+
+.IP \(bu 2
+Safe incremental restores prevent overwriting unrelated settings
+
+.PP
+Security and safety considerations:
+
+.IP \(bu 2
+Requires root privileges to restore network configuration
+
+.IP \(bu 2
+Ensure backups are verified to avoid restoring misconfigured snapshots
+
+.IP \(bu 2
+When restoring remote servers, consider a temporary console or alternate connection to prevent lockout
+
+.PP
+The
+.B repair
+command is ideal for maintaining network stability and quick recovery from misconfiguration.
 
 .SH MIGRATE
 
 The
 .B migrate
-command transfers entire systems.
+command transfers entire systems from one host or storage to another.
 
+.PP
 Supported methods:
 
 .TP
 .B dd
-Block-level cloning.
+Block-level cloning – creates an exact disk image, including all partitions, bootloader, and filesystem structures.
 
 .TP
 .B rsync
-File-level migration.
+File-level migration – copies files and directories while preserving permissions, ownership, and timestamps.
 
-Used for:
-
-.IP \(bu 2
-Server replacement
-
-.IP \(bu 2
-Failover preparation
+.PP
+Use
+.B migrate
+for:
 
 .IP \(bu 2
-Infrastructure migration
-
-.SH SYS-INFO
-
-Displays live system statistics including:
+Server replacement – move systems to new hardware with minimal downtime.
 
 .IP \(bu 2
-CPU usage
+Failover preparation – replicate systems for high availability or disaster recovery.
 
 .IP \(bu 2
-Memory usage
+Infrastructure migration – migrate servers to new hosts, data centers, or cloud environments.
+
+.PP
+Operation details:
 
 .IP \(bu 2
-Disk usage
+Supports local, remote, and network-based migrations over SSH or mounted storage.
 
 .IP \(bu 2
-Network statistics
+Can perform incremental file-level migrations to reduce transfer time.
 
 .IP \(bu 2
-Load average
+Preserves system configuration, installed packages, and user data.
 
+.IP \(bu 2
+Supports bare metal restores using dd images or rsync snapshots.
+
+.PP
+Safety and security considerations:
+
+.IP \(bu 2
+Requires root privileges to perform full system migration.
+
+.IP \(bu 2
+Ensure target storage has sufficient space for the source system.
+
+.IP \(bu 2
+When migrating remote systems, verify network reliability to avoid incomplete transfers.
+
+.IP \(bu 2
+Block-level cloning overwrites all target disk contents – use with caution.
+
+.SH SYS-INFO/SYSTEM
+
+The
+.B sys-info
+command displays live system statistics, providing a real-time overview of system performance.
+
+.PP
+Monitored metrics include:
+
+.IP \(bu 2
+CPU usage – overall and per-core utilization
+
+.IP \(bu 2
+Memory usage – RAM and swap consumption
+
+.IP \(bu 2
+Disk usage – filesystem space and I/O statistics
+
+.IP \(bu 2
+Network statistics – bandwidth usage and interface traffic
+
+.IP \(bu 2
+Load average – 1, 5, and 15 minute system load metrics
+
+.PP
+Additional features:
+
+.IP \(bu 2
+Real-time updates with refresh intervals
+
+.IP \(bu 2
+Sortable and filterable per CPU, memory, or disk device
+
+.IP \(bu 2
+Optional color-coded output for quick status assessment
+
+.IP \(bu 2
+Supports remote monitoring via SSH (if configured)
+
+.PP
 Provides functionality similar to
 .BR top (1)
 and
-.BR htop (1).
+.BR htop (1), while integrating with other system management utilities.
 
 .SH CRON
 
-Provides an interface for configuring scheduled automation tasks.
+The
+.B cron
+command provides an interface for configuring scheduled automation tasks.
 
-Supports:
-
-.IP \(bu 2
-Scheduled backups
-
-.IP \(bu 2
-Maintenance automation
+.PP
+Supported tasks include:
 
 .IP \(bu 2
-Snapshot rotation
+Scheduled backups – automatically run
+.B backup
+jobs at specified intervals
+
+.IP \(bu 2
+Maintenance automation – perform routine system maintenance, cleanup, or updates
+
+.IP \(bu 2
+Snapshot rotation – manage retention and pruning of backup and boot-recovery snapshots
+
+.PP
+Additional features:
+
+.IP \(bu 2
+Flexible scheduling using standard cron syntax or simplified intervals
+
+.IP \(bu 2
+Supports logging of task output for auditing and troubleshooting
+
+.IP \(bu 2
+Integration with
+.B backup,
+.B boot-recovery,
+and
+.B repair
+commands for automated system management
+
+.IP \(bu 2
+Safe execution – tasks run with defined privileges to prevent accidental system damage
 
 .SH UNINSTALL
 
-Removes one-click and associated files including:
+The
+.B uninstall
+command removes the one-click tool and all associated files from the system.
+
+.PP
+Components removed include:
 
 .IP \(bu 2
-Installed scripts
+Installed scripts – all executable binaries and supporting scripts
 
 .IP \(bu 2
-Configuration files
+Configuration files – user and system-wide configuration files
 
 .IP \(bu 2
-Cron jobs
+Cron jobs – any scheduled automation tasks created by the tool
 
 .IP \(bu 2
-Logs
+Logs – log files and temporary data generated during operation
+
+.PP
+Operation details:
+
+.IP \(bu 2
+Requires root privileges to remove system-wide files and cron entries
+
+.IP \(bu 2
+Performs cleanup safely without affecting unrelated system files
+
+.IP \(bu 2
+Leaves no residual data when executed correctly
+
+.IP \(bu 2
+Can be used to prepare the system for reinstallation or migration
 
 .SH FILES
 
 .TP
 .I /etc/one-click/
-Configuration directory.
+Configuration directory storing system and user settings.
 
 .TP
 .I /var/log/one-click/
-Log directory.
+Log directory for command execution and system events.
 
 .TP
 .I /usr/local/bin/one-click
-Executable.
+Executable for the one-click tool.
 
 .TP
 .I /usr/local/share/man/man8/one-click.8
-Man page.
+Man page for reference and usage documentation.
 
 .SH ENVIRONMENT
 
 .TP
 .B TMUX
-Used automatically for persistent sessions.
+Used automatically to manage persistent sessions when running commands interactively.
 
 .TP
 .B HOME
-Used for user configuration.
-
-.SH EXIT STATUS
-
-.TP
-.B 0
-Success.
-
-.TP
-.B 1
-General error.
-
-.TP
-.B 2
-Invalid usage.
-
-.TP
-.B 130
-Interrupted by user.
+User home directory; used to store user-specific configuration files and temporary data.
 
 .SH SECURITY
 
+The
 .B one-click
-requires root privileges for most operations.
+tool requires root privileges for most operations.
 
-Users should:
-
-.IP \(bu 2
-Verify script source integrity
+.PP
+Users should follow best practices:
 
 .IP \(bu 2
-Review destructive commands before execution
+Verify script source integrity – ensure the tool and updates are obtained from trusted sources.
 
 .IP \(bu 2
-Maintain backups before reinstall or migration
+Review destructive commands before execution – especially
+.B reinstall,
+.B migrate,
+.B repair,
+and
+.B uninstall
+operations.
+
+.IP \(bu 2
+Maintain backups before reinstall or migration – to prevent data loss and allow recovery in case of errors.
+
+.PP
+Additional considerations:
+
+.IP \(bu 2
+Use secure credentials and SSH keys for remote operations.
+
+.IP \(bu 2
+Restrict access to system configuration and snapshot directories.
+
+.IP \(bu 2
+Monitor logs to detect unauthorized or failed operations.
 
 .SH VERSION
 
