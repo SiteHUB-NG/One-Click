@@ -53,6 +53,7 @@ build_vars() {
   log_banner="LOG#BROWSER"
   trap=(
     $(basename "$reinstall")
+    reinstall.log
     $net_config
     all_dirs.txt
     /root/rsync-services-running.txt
@@ -263,7 +264,16 @@ cleanup() {
   rm -f "${trap[@]}"
   systemctl daemon-reexec
   systemctl daemon-reload
-  printf '%s\n' "To exit from TMUX, please type $(tput setab 4)exit${reset:-}"
+  if [[ -n "${TMUX:-}" ]]; then
+    printf '%s\n' "To exit from TMUX, please type $(tput setab 4)exit${reset:-}"
+    return
+  fi
+  if [[ -z "${TMUX:-}" ]]; then
+    if tmux ls >/dev/null 2>&1; then
+        printf '%s\n' "Detached TMUX session(s) detected. Reattach with: $(tput setab 4)tmux attach${reset:-} then type $(tput setab 4)exit${reset:-} to exit"
+        return
+    fi
+  fi
 }
 trap cleanup EXIT
 # ==== Directtory Listing ====
