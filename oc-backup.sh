@@ -269,7 +269,7 @@ fetch_db_backup() {
     case "$mode" in
     local)
       [[ -d "$dump" ]] || { warn "No DB dumps found in local snapshot"; return 0; }
-      if ! rsync -a "$dst_dir/.db_dumps/mysql.sql" "$db_dir/"; then
+      if ! rsync -a --partial --append-verify "$dst_dir/.db_dumps/mysql.sql" "$db_dir/"; then
         error "Failed to copy local DB dumps"
         sleep 2
         run_menu
@@ -308,7 +308,7 @@ fetch_db_backup() {
       local)
         # Database dumps are part of the snapshot
         [[ -d "$dst_dir/.db_dumps" ]] || { warn "No DB dumps found in local snapshot"; set_menu; }
-        if ! rsync -a "$dst_dir/postgres.sql" "$db_dir/"; then
+        if ! rsync -a --partial --append-verify "$dst_dir/postgres.sql" "$db_dir/"; then
           error "Failed to copy local DB dumps"
           sleep 2
           run_menu
@@ -413,7 +413,7 @@ backup() {
         warn "Detecting Database"
         dump_databases
         warn "Backup of data files to local storage now starting."
-        rsync -a --link-dest="$dst_dir/local/latest" "$source/" "$latest_snapshot/"
+        rsync -a --partial --append-verify --link-dest="$dst_dir/local/latest" "$source/" "$latest_snapshot/"
         ln -sfn "$latest_snapshot" "$dst_dir/local/latest"
         success "Local snapshot completed: $latest_snapshot"
         ;;
@@ -424,12 +424,12 @@ backup() {
         warn "Backup of data files to remote storage now starting."
         tar -czf "$tmp_archive" -C "$dst_dir" "$(basename "$latest_snapshot")"
         if [[ "$req" == "y" || "$req" == "yes" ]]; then
-          rsync -av --progress \
+          rsync -av --partial --append-verify --progress \
             -e "ssh -i $key -o StrictHostKeyChecking=no -p $ssh_port" \
             "$tmp_archive" \
             "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
         else
-          rsync -av --progress \
+          rsync -av --partial --append-verify --progress \
             -e "sshpass -p '${d_pass}' ssh -o StrictHostKeyChecking=no -p $ssh_port" \
             "$tmp_archive" \
             "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
@@ -445,7 +445,7 @@ backup() {
         warn "Detecting Database"
         dump_databases
         warn "Backup of data files to rclone storage now starting."
-        rsync -a --link-dest="$dst_dir/rclone/latest" "$source/" "$latest_snapshot/"
+        rsync -a --partial --append-verify --link-dest="$dst_dir/rclone/latest" "$source/" "$latest_snapshot/"
         ln -sfn "$latest_snapshot" "$dst_dir/rclone/latest"
         rclone_check
         rclone_upload_snapshot "$latest_snapshot"
@@ -594,18 +594,26 @@ restore_remote_backs() {
     || die "Invalid backup format"
   remote_snap="${remote_base}/${backup_date}"
   info "Restoring snapshot: $backup_date"
+  rsync_cmd_run="rsync -a --partial --append-verify --progress \
+    -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
+    "${backup_user}@${backup_ip}:${remote_snap}/" \
+    "$restore_path/"
   if [[ "$req" == "y" || "$req" == "yes" ]]; then
-    rsync -a --progress \
-      -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
-      "${backup_user}@${backup_ip}:${remote_snap}/" \
-      "$restore_path/" \
-      || die "Restore failed"
+    wait_for_network
+    create_service "${rsync_cmd_run}" "Remote Backup Restore"
+    if "${rsync_cmd_run}"; then
+      remove_service
+    else
+      die "restore failed"
+    fi
   else
-    sshpass -p "$d_pass" rsync -a --progress \
-      -e "ssh -p $ssh_port -o StrictHostKeyChecking=no" \
-      "${backup_user}@${backup_ip}:${remote_snap}/" \
-      "$restore_path/" \
-      || die "Restore failed"
+    wait_for_network
+    create_service "sshpass -p $d_pass ${rsync_cmd_run}" "Remote Backup Restore"
+    if sshpass -p "$d_pass" "${rsync_cmd_run}"; then
+      remove_service
+    else
+      die "restore_failed"
+    fi
   fi
   success "Remote restore completed: $backup_date"
   info "Restoring databases"
@@ -691,7 +699,7 @@ restore_menu() {
       [[ -d "$src_snap" ]] || die "Snapshot not found"
 
       info "Restoring local snapshot: $selected_snapshot"
-      rsync -a --progress "$src_snap/" "$restore_path/" \
+      rsync -a --partial --append-verify --progress "$src_snap/" "$restore_path/" \
         || die "Local restore failed"
       success "Local restore completed"
       restore_databases
@@ -718,13 +726,13 @@ restore_menu() {
       remote_snap="${remote_base}/${selected_snapshot}"
       info "Restoring remote snapshot: $selected_snapshot"
       if [[ "$req" == "y" || "$req" == "yes" ]]; then
-        rsync -a --progress \
+        rsync -a --partial --append-verify --progress \
           -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
           "${backup_user}@${backup_ip}:${remote_snap}/" \
           "$restore_path/" \
           || die "Remote restore failed"
       else
-        sshpass -p "$d_pass" rsync -a --progress \
+        sshpass -p "$d_pass" rsync -a --partial --append-verify --progress \
           -e "ssh -p $ssh_port -o StrictHostKeyChecking=no" \
           "${backup_user}@${backup_ip}:${remote_snap}/" \
           "$restore_path/" \
