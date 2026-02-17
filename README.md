@@ -12,6 +12,13 @@ It provides structured, repeatable workflows for:
 
 Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
 
+## Supported Platforms
+
+One‑Click supports most mainstream Linux distributions, including Debian,
+Ubuntu, CentOS, Fedora, Rocky, AlmaLinux, openSUSE, Arch, and others.
+
+> Note: BSD systems are not supported at this time, and Alpine Linux may have
+> limited compatibility
 
 # How To Run
 ## Primary Mirror
