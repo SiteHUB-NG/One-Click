@@ -65,7 +65,7 @@ select_snapshot_from_list() {
       q|Q) return 1 ;;
     esac
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#snapshots[@]} )); then
-      SELECTED_SNAPSHOT="${snapshots[$((choice-1))]}"
+      selected_snapshot="${snapshots[$((choice-1))]}"
       return 0
     fi
     warn "Invalid selection"
@@ -317,15 +317,32 @@ fetch_db_backup() {
       ssh)
         info "Fetching database dumps from remote"
         if [[ "$req" == "y" || "$req" == "yes" ]]; then
-          ssh_cmd=(ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip")
+          ssh_cmd=(
+            ssh
+            -p "$ssh_port"
+            -o StrictHostKeyChecking=no
+            "$backup_user@$backup_ip"
+            "mkdir -p '$dst_dir/test'"
+          )
         else
-          ssh_cmd=(sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip")
+          ssh_cmd=(
+            sshpass -p "$d_pass"
+            ssh
+            -p "$ssh_port"
+            -o StrictHostKeyChecking=no
+            "$backup_user@$backup_ip"
+            "mkdir -p '$dst_dir/test'"
+          )
         fi
         remote_cmd="rsync -a \"${dst_dir%/}/postgres.sql\" \"${db_dir%/}/\""
-        if ! "${ssh_cmd[@]}" "$remote_cmd"; then
-            error "Failed to fetch remote DB dumps"
-            sleep 2
-            run_menu
+        wait_for_network
+        create_service "${ssh_cmd[*]}" "Remote SSH Command"
+        if "${ssh_cmd[@]}" "$remote_cmd"; then
+          remove_service
+        else
+          error "Failed to fetch remote DB dumps"
+          sleep 2
+          run_menu
         fi
         ;;
       rclone)
@@ -424,10 +441,12 @@ backup() {
         warn "Backup of data files to remote storage now starting."
         tar -czf "$tmp_archive" -C "$dst_dir" "$(basename "$latest_snapshot")"
         if [[ "$req" == "y" || "$req" == "yes" ]]; then
-          rsync_cmd_run='rsync -av --partial --append-verify --progress \
-            -e "ssh -i $key -o StrictHostKeyChecking=no -p $ssh_port" \
-            "$tmp_archive" \
-            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"'
+          rsync_cmd_run=(
+            rsync -av --partial --append-verify --progress \
+              -e "ssh -i $key -o StrictHostKeyChecking=no -p $ssh_port" \
+              "$tmp_archive" \
+              "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
+          )
           wait_for_network
           create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
           if "${rsync_cmd_run[@]}"; then
@@ -436,10 +455,12 @@ backup() {
             die "restore failed"
           fi
         else
-          rsync_cmd_run='rsync -av --partial --append-verify --progress \
-            -e "sshpass -p '${d_pass}' ssh -o StrictHostKeyChecking=no -p $ssh_port" \
-            "$tmp_archive" \
-            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"'
+          rsync_cmd_run=(
+            rsync -av --partial --append-verify --progress \
+              -e "sshpass -p '${d_pass}' ssh -o StrictHostKeyChecking=no -p $ssh_port" \
+              "$tmp_archive" \
+              "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
+          )
           wait_for_network
           create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
           if "${rsync_cmd_run[@]}"; then
@@ -522,7 +543,7 @@ configure_backup() {
     fi
     echo
     if [[ -n "$pass" ]]; then
-        e_pass=$(encrypt_password "$pass")
+      e_pass=$(encrypt_password "$pass")
     else
       ssh_key
     fi
@@ -802,19 +823,18 @@ menu() {
     "One-Click offers an array of useful and disaster recovery tools."
   echo
   printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-  "[1]. Edit Configuration" \
-  "[2]. View Configuration" \
-  "[3]. View Profiles" \
-  "[4]. Add Profile" \
-  "[5]. Switch Profile" \
-  "[6]. Take A Snapshot" \
-  "[7]. Restore A Snapshot" \
-  "[8]. View Local Snapshots" \
-  "[9]. View Remote Snapshots" \
+  "[1].  Edit Configuration" \
+  "[2].  View Configuration" \
+  "[3].  View Profiles" \
+  "[4].  Add Profile" \
+  "[5].  Switch Profile" \
+  "[6].  Take A Snapshot" \
+  "[7].  Restore A Snapshot" \
+  "[8].  View Local Snapshots" \
+  "[9].  View Remote Snapshots" \
   "[10]. Configure cron job" \
   "[11]. Exit"
 }
-
 # ==== RUN MENU ====
 run_menu() {
   remote_base="$dst_dir/rsync"
