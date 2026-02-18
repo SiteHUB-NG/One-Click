@@ -6,7 +6,7 @@
 # Server System status available for basic server performance insight + stats. #
 # Please note this tool will install numerous required dependencies automatic. #
 # Network repair script *************************** OS install feature use tool#
-# available fo DD where * ONE-CLICK MULIPLE TOOLS * reinstall by ~bin456789 to #
+# available fo DD where * ONE-CLICK MULTI TOOLBOX * reinstall by ~bin456789 to #
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
