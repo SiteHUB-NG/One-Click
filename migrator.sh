@@ -563,8 +563,7 @@ run_migrate_rsync() {
         db_name="${db[$migrate_db]}"
         backup_database "$db_name"
       else
-        warn "Your response must be an integer or a lettered option" \
-                     "Please try again."
+        warn "Your response must be an integer or a lettered option" "Please try again."
         sleep 0.3
         mig
       fi
@@ -625,7 +624,7 @@ run_migrate_rsync() {
       )
       if [[ ! -s "${key:-}" ]]; then
         wait_for_network
-        create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
+        create_service "${rsync_cmd_run[*]}" "MIGRATOR: Directories"
         if "${rsync_cmd_run[@]}"; then
           remove_service
         else
@@ -634,7 +633,7 @@ run_migrate_rsync() {
         ec="$?"
       else
         wait_for_network
-        create_service "${rsync_cmd_run1[*]}" "Remote Backup Restore"
+        create_service "${rsync_cmd_run1[*]}" "MIGRATOR: Directories"
         if "${rsync_cmd_run1[@]}"; then
           remove_service
         else
@@ -693,7 +692,7 @@ run_migrate_rsync() {
       )
       if [[ ! -s "$key" ]]; then
         wait_for_network
-        create_service "${rsync_cmd_run[*]}" "Sensitive Files"
+        create_service "${rsync_cmd_run[*]}" "MIGRATOR: Sensitive Files"
         if "${rsync_cmd_run[@]}"; then
           remove_service
         else
@@ -701,7 +700,7 @@ run_migrate_rsync() {
         fi
       else
         wait_for_network
-        create_service "${rsync_cmd_run1[*]}" "Sensitive Files"
+        create_service "${rsync_cmd_run1[*]}" "MIGRATOR: Sensitive Files"
         if "${rsync_cmd_run1[@]}"; then
           remove_service
         else
@@ -720,7 +719,7 @@ run_migrate_rsync() {
     if [[ ! -s "$key" ]]; then
       final_phase "/etc/pam.d/*"
       wait_for_network
-      create_service "${fp_rsync_cmd_run_pam[*]}" "Final Phase PAM"
+      create_service "${fp_rsync_cmd_run_pam[*]}" "MIGRATOR: Final Phase PAM"
       if "${fp_rsync_cmd_run_pam[@]}"; then
         remove_service
       else
@@ -728,7 +727,7 @@ run_migrate_rsync() {
       fi
       final_phase "/etc/ssh/*"
       wait_for_network
-      create_service "${fp_rsync_cmd_run_ssh[*]}" "Final Phase SSH"
+      create_service "${fp_rsync_cmd_run_ssh[*]}" "MIGRATOR: Final Phase SSH"
       if "${fp_rsync_cmd_run_ssh[@]}"; then
         remove_service
       else
@@ -748,7 +747,7 @@ run_migrate_rsync() {
       ' >/dev/null 2>&1 &"
     else
       wait_for_network
-      create_service "${fp_rsync_cmd_run_pam[*]}" "Final Phase PAM"
+      create_service "${fp_rsync_cmd_run_pam[*]}" "MIGRATOR: Final Phase PAM"
       if "${fp_rsync_cmd_run_pam[@]}"; then
         remove_service
       else
@@ -756,7 +755,7 @@ run_migrate_rsync() {
       fi
       final_phase "/etc/ssh/*"
       wait_for_network
-      create_service "${fp_rsync_cmd_run_ssh[*]}" "Final Phase SSH"
+      create_service "${fp_rsync_cmd_run_ssh[*]}" "MIGRATOR: Final Phase SSH"
       if "${fp_rsync_cmd_run_ssh[@]}"; then
         remove_service
       else
@@ -817,12 +816,12 @@ run_migrate_rsync() {
     done < /root/rsync-services-running.txt
     echo "All services have no been restarted on the remote server"
   }
-  before_migration
+  #before_migration
   db_migration
   dir_migration
   track_restart_services
   complete_migration
-  after_migration
+  #after_migration
 }
 # ==== Use DD as the backup/migration tool ====
 dd_migrate() {
