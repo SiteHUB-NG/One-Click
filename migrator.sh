@@ -617,11 +617,29 @@ run_migrate_rsync() {
         directory=File
       fi
       info '%s\n' "${grey}${directory:-} ${cyan}${migrate}${grey} is now being migrated${reset}"
-      if [[ ! -s "$key" ]]; then
+      rsync_cmd_run=(
         sshpass -p "$pass" rsync --relative "${rsync_opts[@]}" "/${migrate}" "${user}@${destination_server}:/"
+      )
+      rsycn_cmd_run1=(
+        rsync --relative "${rsync_opts[@]} -e ssh -i "$key"" "/${migrate}" "${user}@${destination_server}:/"
+      )
+      if [[ ! -s "$key" ]]; then
+        wait_for_network
+        create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
+        if "${rsync_cmd_run[@]}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
         ec="$?"
       else
-        rsync --relative "${rsync_opts[@]} -e ssh -i "$key"" "/${migrate}" "${user}@${destination_server}:/"
+        wait_for_network
+        create_service "${rsync_cmd_run1[*]}" "Remote Backup Restore"
+        if "${rsync_cmd_run1[@]}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
       fi
       if [[ $ec -ne 0 ]]; then
           echo
@@ -667,19 +685,55 @@ run_migrate_rsync() {
     for sensitive in "${sensitive_files[@]}"; do
       info "${grey}Final phase migration!! ${red}${sensitive}${grey} is now being written to the remote server.${reset}"
       final_phase "$sensitive"
-      if [[ ! -s "$key" ]]; then
+      rsync_cmd_run=(
         sshpass -p "$pass" rsync "${rsync_opts[@]}" "/$sensitive" "${user}@${destination_server}:/etc-temp/"
-      else
+      )
+      rsync_cmd_run1=(
         rsync "${rsync_opts[@]} -e ssh -i $key" "/$sensitive" "${user}@${destination_server}:/etc-temp/"
+      )
+      if [[ ! -s "$key" ]]; then
+        wait_for_network
+        create_service "${rsync_cmd_run[*]}" "Sensitive Files"
+        if "${rsync_cmd_run[@]}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
+      else
+        wait_for_network
+        create_service "${rsync_cmd_run1[*]}" "Sensitive Files"
+        if "${rsync_cmd_run1[@]}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
       fi
     done
     echo
     sleep 0.5
+    fp_rsync_cmd_run_pam=(
+      sshpass -p "$pass" rsync -av --delete /etc/pam.d/ "${user}@${destination_server}":/etc/pam.d/
+    )
+    fp_rsync_cmd_run_ssh=(
+      sshpass -p "$pass" rsync -av --delete /etc/ssh/ "${user}@${destination_server}":/etc/ssh/
+    )
     if [[ ! -s "$key" ]]; then
       final_phase "/etc/pam.d/*"
-      sshpass -p "$pass" rsync -av --delete /etc/pam.d/ "${user}@${destination_server}":/etc/pam.d/
+      wait_for_network
+      create_service "${fp_rsync_cmd_run_pam[*]}" "Final Phase PAM"
+      if "${fp_rsync_cmd_run_pam[@]}"; then
+        remove_service
+      else
+        die "restore failed"
+      fi
       final_phase "/etc/ssh/*"
-      sshpass -p "$pass" rsync -av --delete /etc/ssh/ "${user}@${destination_server}":/etc/ssh/
+      wait_for_network
+      create_service "${fp_rsync_cmd_run_ssh[*]}" "Final Phase SSH"
+      if "${fp_rsync_cmd_run_ssh[@]}"; then
+        remove_service
+      else
+        die "restore failed"
+      fi
       info '%s\n' " " \
         "${yellow}Finalizing!" \
         "${grey}Remote server will be rebooted shortly...${reset}" " "
@@ -693,10 +747,21 @@ run_migrate_rsync() {
         reboot -f
       ' >/dev/null 2>&1 &"
     else
-      final_phase "/etc/pam.d/*"
-      rsync -av --delete -e ssh -i "$key" /etc/pam.d/ "${user}@${destination_server}":/etc/pam.d/
+      wait_for_network
+      create_service "${fp_rsync_cmd_run_pam[*]}" "Final Phase PAM"
+      if "${fp_rsync_cmd_run_pam[@]}"; then
+        remove_service
+      else
+        die "restore failed"
+      fi
       final_phase "/etc/ssh/*"
-      rsync -av --delete -e ssh -i "$key" /etc/ssh/ "${user}@${destination_server}":/etc/ssh/
+      wait_for_network
+      create_service "${fp_rsync_cmd_run_ssh[*]}" "Final Phase SSH"
+      if "${fp_rsync_cmd_run_ssh[@]}"; then
+        remove_service
+      else
+        die "restore failed"
+      fi
       info '%s\n' " " \
         "${yellow}Finalizing!" \
         "${grey}Remote server will be rebooted shortly...${reset}" " "
