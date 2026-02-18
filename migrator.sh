@@ -621,9 +621,9 @@ run_migrate_rsync() {
         sshpass -p "$pass" rsync --relative "${rsync_opts[@]}" "/${migrate}" "${user}@${destination_server}:/"
       )
       rsycn_cmd_run1=(
-        rsync --relative "${rsync_opts[@]} -e ssh -i "$key"" "/${migrate}" "${user}@${destination_server}:/"
+        rsync --relative "${rsync_opts[@]} -e ssh -i "${key:-}"" "/${migrate}" "${user}@${destination_server}:/"
       )
-      if [[ ! -s "$key" ]]; then
+      if [[ ! -s "${key:-}" ]]; then
         wait_for_network
         create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
         if "${rsync_cmd_run[@]}"; then
