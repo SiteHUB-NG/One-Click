@@ -105,9 +105,9 @@ select_profile() {
 switch_profile() {
   local old
   old="$profile"
-  select_profile || { warn "No profiles available"; continue; }
+  select_profile || { warn "No profiles available"; return; }
     profile="$selected_profile"
-    load_profile "$profile" || { warn "Failed to load profile"; continue; }
+    load_profile "$profile" || { warn "Failed to load profile"; return; }
     info "Profile switched to $profile."
     warn "$profile is now in use. $old is no longer the active profile" 
     run_menu
@@ -424,15 +424,29 @@ backup() {
         warn "Backup of data files to remote storage now starting."
         tar -czf "$tmp_archive" -C "$dst_dir" "$(basename "$latest_snapshot")"
         if [[ "$req" == "y" || "$req" == "yes" ]]; then
-          rsync -av --partial --append-verify --progress \
+          rsync_cmd_run='rsync -av --partial --append-verify --progress \
             -e "ssh -i $key -o StrictHostKeyChecking=no -p $ssh_port" \
             "$tmp_archive" \
-            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
+            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"'
+          wait_for_network
+          create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
+          if "${rsync_cmd_run[@]}"; then
+            remove_service
+          else
+            die "restore failed"
+          fi
         else
-          rsync -av --partial --append-verify --progress \
+          rsync_cmd_run='rsync -av --partial --append-verify --progress \
             -e "sshpass -p '${d_pass}' ssh -o StrictHostKeyChecking=no -p $ssh_port" \
             "$tmp_archive" \
-            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"
+            "${backup_user}@${backup_ip}:${dst_dir}/rsync/${snapshot_date}/"'
+          wait_for_network
+          create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
+          if "${rsync_cmd_run[@]}"; then
+            remove_service
+          else
+            die "restore failed"
+          fi
         fi
         ln -sfn "$latest_snapshot" "$dst_dir/rsync/latest"
         success "Remote snapshot completed: ${backup_ip}:${dst_dir}/${snapshot_date}"
@@ -594,22 +608,24 @@ restore_remote_backs() {
     || die "Invalid backup format"
   remote_snap="${remote_base}/${backup_date}"
   info "Restoring snapshot: $backup_date"
-  local rsync_cmd_run="rsync -a --partial --append-verify --progress \
-    -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
-    "${backup_user}@${backup_ip}:${remote_snap}/" \
-    "$restore_path/"
+  local rsync_cmd_run=(
+    rsync -a --partial --append-verify --progress \
+      -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
+      "${backup_user}@${backup_ip}:${remote_snap}/" \
+      "$restore_path/"
+    )
   if [[ "$req" == "y" || "$req" == "yes" ]]; then
     wait_for_network
-    create_service "${rsync_cmd_run}" "Remote Backup Restore"
-    if "${rsync_cmd_run}"; then
+    create_service "${rsync_cmd_run[*]}" "Remote Backup Restore"
+    if "${rsync_cmd_run[@]}"; then
       remove_service
     else
       die "restore failed"
     fi
   else
     wait_for_network
-    create_service "sshpass -p $d_pass ${rsync_cmd_run}" "Remote Backup Restore"
-    if sshpass -p "$d_pass" "${rsync_cmd_run}"; then
+    create_service "sshpass -p $d_pass ${rsync_cmd_run[*]}" "Remote Backup Restore"
+    if sshpass -p "$d_pass" "${rsync_cmd_run[@]}"; then
       remove_service
     else
       die "restore_failed"
@@ -689,7 +705,9 @@ restore_menu() {
   case "$restore_from" in
     # ==== LOCAL ====
     l)
-      local rsync_cmd_run="rsync -a --partial --append-verify --progress $src_snap/ $restore_path/"
+      local rsync_cmd_run=(
+        rsync -a --partial --append-verify --progress "$src_snap/" "$restore_path/"
+      )
       mapfile -t local_snaps < <(
         ls -1 "$dst_dir" 2>/dev/null | grep -E '^[0-9]{4}-' | sort
       )
@@ -701,8 +719,8 @@ restore_menu() {
 
       info "Restoring local snapshot: $selected_snapshot"
       wait_for_network
-      create_service "${rsync_cmd_run}" "Local Snapshot Restore"
-      if "${rsync_cmd_run}"; then
+      create_service "${rsync_cmd_run[*]}" "Local Snapshot Restore"
+      if "${rsync_cmd_run[@]}"; then
         remove_service
       else
         die "restore failed"
@@ -731,23 +749,28 @@ restore_menu() {
         || die "Restore cancelled"
       remote_snap="${remote_base}/${selected_snapshot}"
       info "Restoring remote snapshot: $selected_snapshot"
-      local rsync_cmd_run="rsync -a --partial --append-verify --progress \
+      local rsync_cmd_run=(
+        rsync -a --partial --append-verify --progress \
           -e "ssh -i $key -p $ssh_port -o StrictHostKeyChecking=no" \
           "${backup_user}@${backup_ip}:${remote_snap}/" \
           "$restore_path/"
+        )
       if [[ "$req" == "y" || "$req" == "yes" ]]; then
         wait_for_network
-        create_service "${rsync_cmd_run}" "Remote Snapshot Restore"
-        if "${rsync_cmd_run}"; then
+        create_service "${rsync_cmd_run[*]}" "Remote Snapshot Restore"
+        if "${rsync_cmd_run[@]}"; then
           remove_service
         else
           die "restore failed"
         fi
       else
         wait_for_network
-        create_service "${rsync_cmd_run}" "Remote Snapshot Restore"
-        if sshpass -p "$d_pass" "$rsync_cmd_run" \
-          || die "Remote restore failed"
+        create_service "${rsync_cmd_run[*]}" "Remote Snapshot Restore"
+        if sshpass -p "$d_pass" "${rsync_cmd_run[@]}"; then
+          remove_service
+        else
+          die "restore failed"
+        fi
       fi
       success "Remote restore completed"
       restore_databases
