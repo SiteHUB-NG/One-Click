@@ -601,7 +601,7 @@ geekbench_table() {
     if [[ "${arch:-}" == *aarch64* || "${arch:-}" == *arm* ]]; then
       gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
     else
-      GB_URL="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
+      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
     fi
     gb_cmd="geekbench5"
     gb_run="True"
@@ -621,9 +621,13 @@ geekbench_table() {
   printf "${yellow}│ %-96s${reset}\r" "Preparing Geekbench $version..."
   # ==== Download (if needed) ====
   if ! command -v "$gb_cmd" &>/dev/null; then
-    $dl_cmd "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null
+    #$dl_cmd "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null
+	if ! { $dl_cmd "$gb_url" | tar xz --strip-components=1 -C "$gb_path"; } &>/dev/null; then
+      printf "${red}│ %-96s${reset}\n" "Download failed for Geekbench $version"
+      return
+    fi
   else
-    gb_path=$(dirname "$(command -v "$GB_CMD")")
+    gb_path=$(dirname "$(command -v "$gb_cmd")")
   fi
   printf "${yellow}│ %-96s${reset}\r" "Running Geekbench $version benchmark..."
   test_url=$("$gb_path/$gb_cmd" --upload 2>/dev/null | grep https://browser | head -1)
