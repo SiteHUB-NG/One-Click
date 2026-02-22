@@ -19,6 +19,12 @@ install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 clear
 start=$(date +%s)
 cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
+ram="${ram:-}"
+swap="${swap:-}"
+uptime="${uptime:-}"
+cpu_cores="${cpu_cores:-}"
+freq="${freq:-}"
+init() {
 if [[ "${#ram}" -eq 4 ]]; then
   ram="$(awk '/Mem/{print $2}' <(free -h))B                                                                           │"
 elif [[ "${#ram}" -eq 5 ]]; then
@@ -74,11 +80,12 @@ if egrep -q '(vmx|svm)' /proc/cpuinfo; then
 else
     x_v="${red}✖ No${reset}${blue}                                                                         │"
 fi
+}
 print_table() {
   # Hardcoded widths
   local key_width=15
   local val_width=95
-  if [[ "$cpu_cores" -gt 1 ]]; then
+  if [[ "${cpu_cores:-}" -gt 1 ]]; then
     core_plural="cores                                                                        │"
   else
     core_plural="core                                                                         │"
@@ -112,7 +119,9 @@ print_table() {
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
 run_ocb() {
+  init
   print_table
+  expand_country "${country:-}"
   fio_cpu_benchmark
   fio_disk_benchmark
   iperf_table "IPv4"
