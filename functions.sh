@@ -587,7 +587,9 @@ geekbench_table() {
   gb_url=""
   gb_cmd=""
   gb_run="False"
-  [[ -n "${local_curl:-}" ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
+  #[[ -n "${local_curl:-}" ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
+  use_curl=false
+  command -v curl >/dev/null 2>&1 && use_curl=true
   # ==== Detect package ====
   if [[ $version == "6" ]]; then
     if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
@@ -620,14 +622,16 @@ geekbench_table() {
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
   printf "${yellow}│ %-96s${reset}\r" "Preparing Geekbench $version..."
   # ==== Download (if needed) ====
-  if ! command -v "$gb_cmd" &>/dev/null; then
-    #$dl_cmd "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null
-	if ! { $dl_cmd "$gb_url" | tar xz --strip-components=1 -C "$gb_path"; } &>/dev/null; then
+  if $use_curl; then
+    if ! curl -sL "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null; then
       printf "${red}│ %-96s${reset}\n" "Download failed for Geekbench $version"
       return
     fi
   else
-    gb_path=$(dirname "$(command -v "$gb_cmd")")
+    if ! wget -qO- "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null; then
+      printf "${red}│ %-96s${reset}\n" "Download failed for Geekbench $version"
+      return
+    fi
   fi
   printf "${yellow}│ %-96s${reset}\r" "Running Geekbench $version benchmark..."
   test_url=$("$gb_path/$gb_cmd" --upload 2>/dev/null | grep https://browser | head -1)
