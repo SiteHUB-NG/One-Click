@@ -623,13 +623,13 @@ geekbench_table() {
   printf "${yellow}│ %-96s${reset}\r" "Preparing Geekbench $version..."
   # ==== Download (if needed) ====
   if $use_curl; then
-    if ! curl -sL "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null; then
-      printf "${red}│ %-96s${reset}\n" "Download failed for Geekbench $version"
+    if ! curl -sL "$gb_url" | tar -xz --strip-components=1 -C "$gb_path" &>/dev/null; then
+      printf "${red}│ %-96s${reset}\n" "Download failed using curl for Geekbench $version                                                      │"
       return
     fi
   else
-    if ! wget -qO- "$gb_url" | tar xz --strip-components=1 -C "$gb_path" &>/dev/null; then
-      printf "${red}│ %-96s${reset}\n" "Download failed for Geekbench $version"
+    if ! wget -qO- "$gb_url" | tar -xz --strip-components=1 -C "$gb_path" &>/dev/null; then
+      printf "${red}│ %-96s${reset}\n" "Download failed using wget for Geekbench $version                                                      |"
       return
     fi
   fi
