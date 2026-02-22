@@ -52,6 +52,7 @@ build_vars() {
   recovery_banner="BOOT#BACKUP#AND#RECOVERY#TOOL"
   cron_banner="AUTOMATE#CRON#JOBS#EASILY"
   log_banner="LOG#BROWSER"
+  ocb_banner="ONE-CLICK#BENCHMARK#SCRIPT"
   trap=(
     $(basename "$reinstall")
     reinstall.log
@@ -119,6 +120,21 @@ EOF
 |_| \_|\___|\__| \_/\_/ \___/|_|  |_|\_\ |_| \_\___| .__/ \__,_|_|_|
                                                    |_|
 
+EOF
+  )
+  ocb_header=$(cat <<'EOF'
+  ___                    ____ _ _      _    
+ / _ \ _ __   ___       / ___| (_) ___| | __
+| | | | '_ \ / _ \_____| |   | | |/ __| |/ /
+| |_| | | | |  __/_____| |___| | | (__|   < 
+ \___/|_| |_|\___|      \____|_|_|\___|_|\_\
+                                            
+         ____                  _     
+        | __ )  ___ _ __   ___| |__  
+        |  _ \ / _ \ '_ \ / __| '_ \ 
+        | |_) |  __/ | | | (__| | | |
+        |____/ \___|_| |_|\___|_| |_|
+                             
 EOF
   )
   recovery_header=$(cat <<'EOF'
