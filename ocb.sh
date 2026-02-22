@@ -13,6 +13,7 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== OCB Module ==== 
+collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 clear
