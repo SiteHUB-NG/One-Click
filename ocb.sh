@@ -121,8 +121,8 @@ print_table() {
 run_ocb() {
   header_notice "$ocb_header" "$ocb_banner" "62" "197"
   init
-  print_table
   expand_country "${country:-}"
+  print_table
   fio_cpu_benchmark
   fio_disk_benchmark
   iperf_table "IPv4"
