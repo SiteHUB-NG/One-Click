@@ -387,165 +387,165 @@ expand_country() {
     GA) country="Gabon"                              ;;
     GM) country="Gambia"                             ;;
     GE) country="Georgia"                            ;;
-    DE) country="Germany" ;;
-    GH) country="Ghana" ;;
-    GI) country="Gibraltar" ;;
-    GR) country="Greece" ;;
-    GL) country="Greenland" ;;
-    GD) country="Grenada" ;;
-    GP) country="Guadeloupe" ;;
-    GU) country="Guam" ;;
-    GT) country="Guatemala" ;;
-    GG) country="Guernsey" ;;
-    GN) country="Guinea" ;;
-    GW) country="Guinea-Bissau" ;;
-    GY) country="Guyana" ;;
-    HT) country="Haiti" ;;
-    HN) country="Honduras" ;;
-    HK) country="Hong Kong" ;;
-    HU) country="Hungary" ;;
-    IS) country="Iceland" ;;
-    IN) country="India" ;;
-    ID) country="Indonesia" ;;
-    IR) country="Iran" ;;
-        IQ) country="Iraq" ;;
-        IE) country="Ireland" ;;
-        IM) country="Isle of Man" ;;
-        IL) country="Israel" ;;
-        IT) country="Italy" ;;
-        JM) country="Jamaica" ;;
-        JP) country="Japan" ;;
-        JE) country="Jersey" ;;
-        JO) country="Jordan" ;;
-        KZ) country="Kazakhstan" ;;
-        KE) country="Kenya" ;;
-        KI) country="Kiribati" ;;
-        KW) country="Kuwait" ;;
-        KG) country="Kyrgyzstan" ;;
-        LA) country="Laos" ;;
-        LV) country="Latvia" ;;
-        LB) country="Lebanon" ;;
-        LS) country="Lesotho" ;;
-        LR) country="Liberia" ;;
-        LY) country="Libya" ;;
-        LI) country="Liechtenstein" ;;
-        LT) country="Lithuania" ;;
-        LU) country="Luxembourg" ;;
-        MO) country="Macau" ;;
-        MG) country="Madagascar" ;;
-        MW) country="Malawi" ;;
-        MY) country="Malaysia" ;;
-        MV) country="Maldives" ;;
-        ML) country="Mali" ;;
-        MT) country="Malta" ;;
-        MH) country="Marshall Islands" ;;
-        MQ) country="Martinique" ;;
-        MR) country="Mauritania" ;;
-        MU) country="Mauritius" ;;
-        YT) country="Mayotte" ;;
-        MX) country="Mexico" ;;
-        FM) country="Micronesia" ;;
-        MD) country="Moldova" ;;
-        MC) country="Monaco" ;;
-        MN) country="Mongolia" ;;
-        ME) country="Montenegro" ;;
-        MS) country="Montserrat" ;;
-        MA) country="Morocco" ;;
-        MZ) country="Mozambique" ;;
-        MM) country="Myanmar" ;;
-        NA) country="Namibia" ;;
-        NR) country="Nauru" ;;
-        NP) country="Nepal" ;;
-        NL) country="Netherlands" ;;
-        NC) country="New Caledonia" ;;
-        NZ) country="New Zealand" ;;
-        NI) country="Nicaragua" ;;
-        NE) country="Niger" ;;
-        NG) country="Nigeria" ;;
-        NU) country="Niue" ;;
-        KP) country="North Korea" ;;
-        MK) country="North Macedonia" ;;
-        MP) country="Northern Mariana Islands" ;;
-        NO) country="Norway" ;;
-        OM) country="Oman" ;;
-        PK) country="Pakistan" ;;
-        PW) country="Palau" ;;
-        PS) country="Palestine" ;;
-        PA) country="Panama" ;;
-        PG) country="Papua New Guinea" ;;
-        PY) country="Paraguay" ;;
-        PE) country="Peru" ;;
-        PH) country="Philippines" ;;
-        PN) country="Pitcairn Islands" ;;
-        PL) country="Poland" ;;
-        PT) country="Portugal" ;;
-        PR) country="Puerto Rico" ;;
-        QA) country="Qatar" ;;
-        RE) country="Réunion" ;;
-        RO) country="Romania" ;;
-        RU) country="Russia" ;;
-        RW) country="Rwanda" ;;
-        BL) country="Saint Barthélemy" ;;
-        SH) country="Saint Helena" ;;
-        KN) country="Saint Kitts and Nevis" ;;
-        LC) country="Saint Lucia" ;;
-        MF) country="Saint Martin" ;;
-        PM) country="Saint Pierre and Miquelon" ;;
-        VC) country="Saint Vincent and the Grenadines" ;;
-        WS) country="Samoa" ;;
-        SM) country="San Marino" ;;
-        ST) country="Sao Tome and Principe" ;;
-        SA) country="Saudi Arabia" ;;
-        SN) country="Senegal" ;;
-        RS) country="Serbia" ;;
-        SC) country="Seychelles" ;;
-        SL) country="Sierra Leone" ;;
-        SG) country="Singapore" ;;
-        SX) country="Sint Maarten" ;;
-        SK) country="Slovakia" ;;
-        SI) country="Slovenia" ;;
-        SB) country="Solomon Islands" ;;
-        SO) country="Somalia" ;;
-        ZA) country="South Africa" ;;
-        KR) country="South Korea" ;;
-        SS) country="South Sudan" ;;
-        ES) country="Spain" ;;
-        LK) country="Sri Lanka" ;;
-        SD) country="Sudan" ;;
-        SR) country="Suriname" ;;
-        SE) country="Sweden" ;;
-        CH) country="Switzerland" ;;
-        SY) country="Syria" ;;
-        TW) country="Taiwan" ;;
-        TJ) country="Tajikistan" ;;
-        TZ) country="Tanzania" ;;
-        TH) country="Thailand" ;;
-        TL) country="Timor-Leste" ;;
-        TG) country="Togo" ;;
-        TO) country="Tonga" ;;
-        TT) country="Trinidad and Tobago" ;;
-        TN) country="Tunisia" ;;
-        TR) country="Turkey" ;;
-        TM) country="Turkmenistan" ;;
-        TC) country="Turks and Caicos Islands" ;;
-        TV) country="Tuvalu" ;;
-        UG) country="Uganda" ;;
-        UA) country="Ukraine" ;;
-        AE) country="United Arab Emirates" ;;
-        GB) country="United Kingdom" ;;
-        US) country="United States" ;;
-        UY) country="Uruguay" ;;
-        UZ) country="Uzbekistan" ;;
-        VU) country="Vanuatu" ;;
-        VA) country="Vatican City" ;;
-    VE) country="Venezuela" ;;
-    VN) country="Vietnam" ;;
-    WF) country="Wallis and Futuna" ;;
-    EH) country="Western Sahara" ;;
-    YE) country="Yemen" ;;
-    ZM) country="Zambia" ;;
-    ZW) country="Zimbabwe" ;;
-    *) country="$code" ;;  
+    DE) country="Germany"                            ;;
+    GH) country="Ghana"                              ;;
+    GI) country="Gibraltar"                          ;;
+    GR) country="Greece"                             ;;
+    GL) country="Greenland"                          ;;
+    GD) country="Grenada"                            ;;
+    GP) country="Guadeloupe"                         ;;
+    GU) country="Guam"                               ;;
+    GT) country="Guatemala"                          ;;
+    GG) country="Guernsey"                           ;;
+    GN) country="Guinea"                             ;;
+    GW) country="Guinea-Bissau"                      ;;
+    GY) country="Guyana"                             ;;
+    HT) country="Haiti"                              ;;
+    HN) country="Honduras"                           ;;
+    HK) country="Hong Kong"                          ;;
+    HU) country="Hungary"                            ;;
+    IS) country="Iceland"                            ;;
+    IN) country="India"                              ;;
+    ID) country="Indonesia"                          ;;
+    IR) country="Iran"                               ;;
+    IQ) country="Iraq"                               ;;
+    IE) country="Ireland"                            ;;
+    IM) country="Isle of Man"                        ;;
+    IL) country="Israel"                             ;;
+    IT) country="Italy"                              ;;
+    JM) country="Jamaica"                            ;;
+    JP) country="Japan"                              ;;
+    JE) country="Jersey"                             ;;
+    JO) country="Jordan"                             ;;
+    KZ) country="Kazakhstan"                         ;;
+    KE) country="Kenya"                              ;;
+    KI) country="Kiribati"                           ;;
+    KW) country="Kuwait"                             ;;
+    KG) country="Kyrgyzstan"                         ;;
+    LA) country="Laos"                               ;;
+    LV) country="Latvia"                             ;;
+    LB) country="Lebanon"                            ;;
+    LS) country="Lesotho"                            ;;
+    LR) country="Liberia"                            ;;
+    LY) country="Libya"                              ;;
+    LI) country="Liechtenstein"                      ;;
+    LT) country="Lithuania"                          ;;
+    LU) country="Luxembourg"                         ;;
+    MO) country="Macau"                              ;; 
+    MG) country="Madagascar"                         ;;
+    MW) country="Malawi"                             ;;
+    MY) country="Malaysia"                           ;;
+    MV) country="Maldives"                           ;;
+    ML) country="Mali"                               ;;
+    MT) country="Malta"                              ;;
+    MH) country="Marshall Islands"                   ;;
+    MQ) country="Martinique"                         ;;
+    MR) country="Mauritania"                         ;;
+    MU) country="Mauritius"                          ;;
+    YT) country="Mayotte"                            ;;
+    MX) country="Mexico"                             ;;
+    FM) country="Micronesia"                         ;;
+    MD) country="Moldova"                            ;;
+    MC) country="Monaco"                             ;;
+    MN) country="Mongolia"                           ;;
+    ME) country="Montenegro"                         ;;
+    MS) country="Montserrat"                         ;;
+    MA) country="Morocco"                            ;;
+    MZ) country="Mozambique"                         ;;
+    MM) country="Myanmar"                            ;;
+    NA) country="Namibia"                            ;;
+    NR) country="Nauru"                              ;;
+    NP) country="Nepal"                              ;;
+    NL) country="Netherlands"                        ;;
+    NC) country="New Caledonia"                      ;;
+    NZ) country="New Zealand"                        ;;
+    NI) country="Nicaragua"                          ;;
+    NE) country="Niger"                              ;;
+    NG) country="Nigeria"                            ;;
+    NU) country="Niue"                               ;;
+    KP) country="North Korea"                        ;;
+    MK) country="North Macedonia"                    ;;
+    MP) country="Northern Mariana Islands"           ;;
+    NO) country="Norway"                             ;;
+    OM) country="Oman"                               ;;
+    PK) country="Pakistan"                           ;;
+    PW) country="Palau"                              ;;
+    PS) country="Palestine"                          ;;
+    PA) country="Panama"                             ;;
+    PG) country="Papua New Guinea"                   ;;
+    PY) country="Paraguay"                           ;;
+    PE) country="Peru"                               ;;
+    PH) country="Philippines"                        ;;
+    PN) country="Pitcairn Islands"                   ;;
+    PL) country="Poland"                             ;;
+    PT) country="Portugal"                           ;;
+    PR) country="Puerto Rico"                        ;;
+    QA) country="Qatar"                              ;;
+    RE) country="Réunion"                            ;;
+    RO) country="Romania"                            ;;
+    RU) country="Russia"                             ;;
+    RW) country="Rwanda"                             ;;
+    BL) country="Saint Barthélemy"                   ;;
+    SH) country="Saint Helena"                       ;;
+    KN) country="Saint Kitts and Nevis"              ;;
+    LC) country="Saint Lucia"                        ;;
+    MF) country="Saint Martin"                       ;;
+    PM) country="Saint Pierre and Miquelon"          ;;
+    VC) country="Saint Vincent and the Grenadines"   ;;
+    WS) country="Samoa"                              ;;
+    SM) country="San Marino"                         ;;
+    ST) country="Sao Tome and Principe"              ;;
+    SA) country="Saudi Arabia"                       ;;
+    SN) country="Senegal"                            ;;
+    RS) country="Serbia"                             ;;
+    SC) country="Seychelles"                         ;;
+    SL) country="Sierra Leone"                       ;;
+    SG) country="Singapore"                          ;;
+    SX) country="Sint Maarten"                       ;;
+    SK) country="Slovakia"                           ;;
+    SI) country="Slovenia"                           ;;
+    SB) country="Solomon Islands"                    ;;
+    SO) country="Somalia"                            ;;
+    ZA) country="South Africa"                       ;;
+    KR) country="South Korea"                        ;;
+    SS) country="South Sudan"                        ;;
+    ES) country="Spain"                              ;;
+    LK) country="Sri Lanka"                          ;;
+    SD) country="Sudan"                              ;;
+    SR) country="Suriname"                           ;;
+    SE) country="Sweden"                             ;;
+    CH) country="Switzerland"                        ;;
+    SY) country="Syria"                              ;;
+    TW) country="Taiwan"                             ;;
+    TJ) country="Tajikistan"                         ;;
+    TZ) country="Tanzania"                           ;;
+    TH) country="Thailand"                           ;;
+    TL) country="Timor-Leste"                        ;;
+    TG) country="Togo"                               ;;
+    TO) country="Tonga"                              ;;
+    TT) country="Trinidad and Tobago"                ;;
+    TN) country="Tunisia"                            ;;
+    TR) country="Turkey"                             ;;
+    TM) country="Turkmenistan"                       ;;
+    TC) country="Turks and Caicos Islands"           ;;
+    TV) country="Tuvalu"                             ;;
+    UG) country="Uganda"                             ;;
+    UA) country="Ukraine"                            ;; 
+	AE) country="United Arab Emirates"               ;;
+    GB) country="United Kingdom"                     ;;
+    US) country="United States"                      ;;
+    UY) country="Uruguay"                            ;;
+    UZ) country="Uzbekistan"                         ;;
+    VU) country="Vanuatu"                            ;;
+    VA) country="Vatican City"                       ;;
+    VE) country="Venezuela"                          ;;
+    VN) country="Vietnam"                            ;;
+    WF) country="Wallis and Futuna"                  ;;
+    EH) country="Western Sahara"                     ;;
+    YE) country="Yemen"                              ;;
+    ZM) country="Zambia"                             ;;
+    ZW) country="Zimbabwe"                           ;;
+    *) country="$code"                               ;;  
   esac
 }
 fio_cpu_benchmark() {
@@ -582,7 +582,7 @@ fio_cpu_benchmark() {
 geekbench_table() {
   local version gb_path url gb_url gb_run gb_cmd local_curl test_url scores single multi
   version="$1"
-  gb_path="placeholder/geekbench_$version"
+  gb_path="/etc/one-click/ocb/geekbench_$version"
   mkdir -p "$gb_path"
   gb_url=""
   gb_cmd=""
@@ -590,7 +590,7 @@ geekbench_table() {
   [[ -n "${local_curl:-}" ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
   # ==== Detect package ====
   if [[ $version == "6" ]]; then
-    if [[ $arch == *aarch64* || $ARCH == *arm* ]]; then
+    if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
       gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz"
     else
       gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-Linux.tar.gz"
@@ -598,7 +598,7 @@ geekbench_table() {
     gb_cmd="geekbench6"
     gb_run="True"
   elif [[ $version == "5" ]]; then
-    if [[ $arch == *aarch64* || $arch == *arm* ]]; then
+    if [[ "${arch:-}" == *aarch64* || "${arch:-}" == *arm* ]]; then
       gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
     else
       GB_URL="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
@@ -608,16 +608,15 @@ geekbench_table() {
   else
     return
   fi
-  [[ $gb_run != "True" ]] && return
+  [[ "${gb_run:-}" != "True" ]] && return
   # ==== Print table header ====
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
   printf "${blue}%-20s %-20s %-54s${reset}\n" \
-    "│Benchmark" "Version" "Result                                                      │"
-
+    "│Benchmark" "Version" "Result                                                     │"
   printf "${yellow}%s${reset}\n" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
-    "│ Geekbench Benchmark $version                                                                           │" \
+    "│ Geekbench Benchmark $version                                                                            │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
   printf "${yellow}│ %-96s${reset}\r" "Preparing Geekbench $version..."
   # ==== Download (if needed) ====
