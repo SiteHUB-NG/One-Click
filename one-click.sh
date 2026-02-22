@@ -34,6 +34,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     " " "$(tput smul)Options:$(tput rmul)                $(tput smul)Description$(tput rmul)" \
     "  reinstall               OS reinstallation" \
     "  backup                  Backup with rsync + rclone" \
+    "  bench                   Benchmarking tool automates the execution of tests" \
     "  migrator                System migration tool. Rsync + DD options." \
     "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
     "  repair                  Repair network (Includes snapshots and backup of network files)" \
@@ -522,6 +523,7 @@ if [[ $# -gt 0 ]]; then
         " " "$(tput smul)Options:$(tput rmul)                $(tput smul)Description$(tput rmul)" \
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
+        "  bench                   Benchmarking tool automates the execution of tests" \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  repair                  Repair network (Includes snapshots and backup of network files)" \
