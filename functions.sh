@@ -571,7 +571,7 @@ geekbench_table() {
   gb_url=""
   gb_cmd=""
   gb_run="False"
-  [[ -n $local_curl ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
+  [[ -n "${local_curl:-}" ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
   # ==== Detect package ====
   if [[ $version == "6" ]]; then
     if [[ $arch == *aarch64* || $ARCH == *arm* ]]; then
