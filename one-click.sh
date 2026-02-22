@@ -163,6 +163,7 @@ yellow=$(tput setaf 11)
 grey="$(tput setaf 8)"
 green="$(tput setaf 2)"
 warning="$(tput setaf 3)"
+orange=$(tput setaf 208)
 bold="$(tput bold)"
 reset="$(tput sgr 0)"
 ul="$(tput smul)"
@@ -295,6 +296,17 @@ load_backup() {
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
+# ==== One-Click Bench ====
+load_ocb() {
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/ocb.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/ocb.sh"
+  local cache_dir="/var/cache/one-click"
+  local cache_file="${cache_dir}/ocb.sh"
+  collect_sysinfo
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
+}
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 # ==== System Info Dashboard - Skip TMUX and root checks ====
 if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "system-info" || "${1:-}" == "system" ]]; then
@@ -348,6 +360,7 @@ _one_click() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   COMPREPLY=( $(compgen -W "
     backup
+    bench
     cron
     migrator
     net-repair
@@ -368,6 +381,7 @@ map_one_click() {
   for i in "$@"; do
     case "$i" in
       backup)      echo "--backup"    ;;
+      bench)       echo "--bench"     ;;
       migrator)    echo "--migrator"  ;;
       net-repair)  echo "--repair"    ;;
       reinstall)   echo "--reinstall" ;;
@@ -444,6 +458,11 @@ if [[ $# -gt 0 ]]; then
     -b|--backup)
       load_backup
       rsync_rclone
+      shift
+      ;;
+    -c|--bench)
+      load_ocb
+      run_ocb
       shift
       ;;
     -d|--pv-drain)
