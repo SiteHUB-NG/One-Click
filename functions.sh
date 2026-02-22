@@ -6,11 +6,12 @@
 # Server System status available for basic server performance insight + stats. #
 # Please note this tool will install numerous required dependencies automatic. #
 # Network repair script *************************** OS install feature use tool#
-# available fo DD where * ONE-CLICK FUNCTION MODE * reinstall by ~bin456789 to #
+# available fo DD where * ONE-CLICK MULTI TOOLBOX * reinstall by ~bin456789 to #
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
-# ========================== #================================================ #
-# ==== One-Click Backup ==== #
+# ============================================================================ #
+# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# ====== One-Click ====== #
 mkdir -p "${log_dir:-}"
 touch "${log_error_file:-}" "${log_file:-}"
 # ==== Build Essential Variables ====
@@ -565,7 +566,7 @@ fio_cpu_benchmark() {
 geekbench_table() {
   local version gb_path url gb_url gb_run gb_cmd local_curl test_url scores single multi
   version="$1"
-  gb_path="$YABS_PATH/geekbench_$version"
+  gb_path="placeholder/geekbench_$version"
   mkdir -p "$gb_path"
   gb_url=""
   gb_cmd=""
@@ -960,7 +961,6 @@ iperf_table() {
   printf "${blue}%s${reset}\n" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
-expand_country "$country"
 is_online() {
   if ping -4 -c 1 -W 2 8.8.8.8 &>/dev/null; then
     return 0  # online
