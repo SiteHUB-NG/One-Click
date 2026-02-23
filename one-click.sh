@@ -62,29 +62,28 @@ elif command -v apt-get >/dev/null 2>&1; then
   pkg_mgr="apt"
 fi
 install_dep() {
-  local dep_name
-  local check_cmd
-  local pkg_name
-  local pkg_manager
-  local fatal
+  local dep_name check_cmd pkg_name pkg_manager fatal
   dep_name="${1:-}"
   check_cmd="$2"
   pkg_name="${3:-$dep_name}"
   pkg_manager="$4"
-  fatal="${5:-}"
+  fatal="${5:-false}"
   # ==== Check if dependency is already installed ====
-  if ! eval "$check_cmd" &> /dev/null; then
-    echo "Installing dependency ${dep_name}"
-    for ((i=0;i<4;i++)); do printf '.'; sleep 0.3; done
-    echo -e '\n'
-    sleep 0.5
-    if ! $pkg_manager -y install "$pkg_name" &> /dev/null; then
-      if [[ "$fatal" == true ]]; then
-        echo "Dependency ${dep_name} failed to install"
-      else
-        echo "Dependency ${dep_name} failed to install"
-      fi
-    fi
+  if eval "$check_cmd" &>/dev/null; then
+    printf "%-40s [OK]\n" "Checking ${dep_name}"
+    return
+  fi
+  printf "%-40s" "Installing ${dep_name}"
+  for ((i=0;i<4;i++)); do
+    printf "."
+    sleep 0.3
+  done
+  # ==== Attempt installation ====
+  if $pkg_manager -y install "$pkg_name" &>/dev/null; then
+    printf "\r%-40s [DONE]\n" "Installing ${dep_name}"
+  else
+    printf "\r%-40s [FAILED]\n" "Installing ${dep_name}"
+    [[ "$fatal" == true ]] && return 1
   fi
 }
 install_dependancies() {
