@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== OCB Module ==== 
 collect_sysinfo
@@ -26,25 +26,25 @@ cpu_cores="${cpu_cores:-}"
 freq="${freq:-}"
 init() {
 if [[ "${#ram}" -eq 4 ]]; then
-  ram="$(awk '/Mem/{print $2}' <(free -h))B                                                                           │"
+  ram="$(awk '/Mem/{print $2}' <(free -h))B"
 elif [[ "${#ram}" -eq 5 ]]; then
-  ram="$(awk '/Mem/{print $2}' <(free -h))B                                                                          │"
+  ram="$(awk '/Mem/{print $2}' <(free -h))B"
 elif [[ "${#ram}" -eq 6 ]]; then
-  ram="$(awk '/Mem/{print $2}' <(free -h))B                                                                         │"
+  ram="$(awk '/Mem/{print $2}' <(free -h))B"
 elif [[ "${#ram}" -eq 7 ]]; then
-  ram="$(awk '/Mem/{print $2}' <(free -h))B                                                                        │"
+  ram="$(awk '/Mem/{print $2}' <(free -h))B"
 fi
 if [[ "${#swap}" -eq 4 ]]; then
-  swap="$(awk '/Swap/{print $2}' <(free -h))B                                                                           │"
+  swap="$(awk '/Swap/{print $2}' <(free -h))B"
 elif [[ "${#swap}" -eq 5 ]]; then
-  swap="$(awk '/Swap/{print $2}' <(free -h))B                                                                          │"
+  swap="$(awk '/Swap/{print $2}' <(free -h))B"
 elif [[ "${#swap}" -eq 6 ]]; then
-  swap="$(awk '/Swap/{print $2}' <(free -h))B                                                                         │"
+  swap="$(awk '/Swap/{print $2}' <(free -h))B"
 elif [[ "${#swap}" -eq 7 ]]; then
-  swap="$(awk '/Swap/{print $2}' <(free -h))B                                                                        │"
+  swap="$(awk '/Swap/{print $2}' <(free -h))B"
 fi
 if [[ "${#uptime}" -eq 19 ]]; then
-  uptime="${uptime}                                                            │"
+  uptime="${uptime}"
 fi
 if command -v systemd-detect-virt &>/dev/null; then
   virt=$(systemd-detect-virt)
@@ -56,14 +56,14 @@ else
     virt="Unknown"
 fi
 if is_online; then
-  ipv4="${green}✔ IPv4: Online${reset}"
+  ipv4="${green}✔ IPv4: Online${blue}"
 else
-  ipv4="${red}✖ IPv4: Offline${reset}"
+  ipv4="${red}✖ IPv4: Offline${blue}"
 fi
 if is_v6_online; then
-  ipv6="${green}✔ IPv6: Online                                                ${blue}│${reset}"
+  ipv6="${green}✔ IPv6: Online${blue}"
 else
-  ipv6="${red}✖ IPv6: Offline                                               ${blue}│${reset}"
+  ipv6="${red}✖ IPv6: Offline${blue}"
 fi
 if [[ "$ipv4" == "✔ IPv4: Online" ]]; then
   primary=IPv4
@@ -71,67 +71,114 @@ else
   primary=IPv6
 fi
 if grep -q aes /proc/cpuinfo; then
-    aes="${green}✔ Yes${reset}${blue}                                                                          │"
+    aes="${green}✔ Yes${blue}"
 else
-    aes="${red}✖ No${reset}${blue}                                                                         │"
+    aes="${red}✖ No${blue}"
 fi
 if egrep -q '(vmx|svm)' /proc/cpuinfo; then
-    x_v="${green}✔ Yes${reset}${blue}                                                                          │"
+    x_v="${green}✔ Yes${blue}"
 else
-    x_v="${red}✖ No${reset}${blue}                                                                         │"
+    x_v="${red}✖ No${blue}"
 fi
 }
+print_row() {
+  local key_width val_width key val cleaned visible pad
+  key_width="$1"
+  val_width="$2"
+  key="$3"
+  val="$4"
+  cleaned=$(sed -r 's/\x1B\[[0-9;]*[mK]//g' <<< "$val")
+  visible=$(printf "%s" "$cleaned" | wc -m)
+  pad=$((val_width - visible))
+  case "$key" in
+    "AES-NI"|"VM-x/AMD-V"|"Connectivity"|"Disk") pad=$((pad + 2)) ;;
+    "Connectivity")                              pad=$((pad + 6)) ;;
+ #   "Disk")                                      pad=$((pad + 1)) ;;                                     
+  esac
+  (( pad < 0 )) && pad=0
+  printf "${blue}│ %-*s │ %s%*s │${reset}\n" \
+    "$key_width" "$key" \
+    "$val" "$pad" ""
+}
 print_table() {
-  # Hardcoded widths
-  local key_width=15
-  local val_width=95
+  local key_width val_width total_width inner_width border core_plural
+  key_width=15
+  val_width=78
   if [[ "${cpu_cores:-}" -gt 1 ]]; then
-    core_plural="cores                                                                        │"
+    core_plural="cores"
   else
-    core_plural="core                                                                         │"
+    core_plural="core"
   fi
-  # Top border and header
-  printf "${blue}%s${reset}\n" \
-    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-    "│ Basic System Information                                                                         │" \
-    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
-  # Table rows (key │ value │)
-  printf "${blue}│ %-*s │ %-*s${reset}\n" \
-    "$key_width" "Uptime" "$val_width" "$uptime                                           │" \
-    "$key_width" "Processor" "$val_width" "$cpu_model @ $freq                       │" \
-    "$key_width" "Cores" "$val_width" "$cpu_cores $core_plural" \
-    "$key_width" "AES-NI" "$val_width" "$aes" \
-    "$key_width" "VM-x/AMD-V" "$val_width" "$x_v" \
-    "$key_width" "RAM" "$val_width" "$ram" \
-    "$key_width" "Swap" "$val_width" "$swap" \
-    "$key_width" "Disk" "$val_width" "${disk[*]}                                                                  ${blue}│${reset}" \
-    "$key_width" "Distro" "$val_width" "$distro                                                 │" \
-    "$key_width" "Kernel" "$val_width" "$kernel                                                            │" \
-    "$key_width" "VM Type" "$val_width" "$virt                                                                            │" \
-    "$key_width" "Connectivity" "$val_width" "$ipv4 / $ipv6" \
-    "$key_width" "ISP" "$val_width" "$ip_upstream                                                                        │" \
-    "$key_width" "ASN" "$val_width" "${ip_asn:-Unknown}                                                                        │" \
-    "$key_width" "Hostname" "$val_width" "$HOSTNAME                                                                        │" \
-    "$key_width" "Location" "$val_width" "$location                                                                          │"  \
-    "$key_width" "Country" "$val_width" "$country                                                                        │"
-  # Bottom border
-  printf "${blue}%s${reset}\n" \
-    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  total_width=$((key_width + val_width + 7))
+  inner_width=$((total_width - 2))
+  border=$(printf '─%.0s' $(seq 1 "$inner_width"))
+  printf "${blue}┌%s┐${reset}\n" "$border"
+  printf "${blue}│ %-*s │${reset}\n" "$((total_width-4))" "Basic System Information"
+  printf "${blue}├%s┤${reset}\n" "$border"
+  print_row "$key_width" "$val_width" "Uptime" "$uptime"
+  print_row "$key_width" "$val_width" "Processor" "$cpu_model @ $freq"
+  print_row "$key_width" "$val_width" "Cores" "$cpu_cores $core_plural"
+  print_row "$key_width" "$val_width" "AES-NI" "$aes"
+  print_row "$key_width" "$val_width" "VM-x/AMD-V" "$x_v"
+  print_row "$key_width" "$val_width" "RAM" "$ram"
+  print_row "$key_width" "$val_width" "Swap" "$swap"
+  print_row "$key_width" "$val_width" "Disk" "${disk[*]}"
+  print_row "$key_width" "$val_width" "Distro" "$distro"
+  print_row "$key_width" "$val_width" "Kernel" "$kernel"
+  print_row "$key_width" "$val_width" "VM Type" "$virt"
+  print_row "$key_width" "$val_width" "Connectivity" "$ipv4 / $ipv6"
+  print_row "$key_width" "$val_width" "ISP" "$ip_upstream"
+  print_row "$key_width" "$val_width" "ASN" "${ip_asn:-Unknown}"
+  print_row "$key_width" "$val_width" "Hostname" "$HOSTNAME"
+  print_row "$key_width" "$val_width" "Location" "$location"
+  print_row "$key_width" "$val_width" "Country" "$country"
+  printf "${blue}└%s┘${reset}\n" "$border"
 }
 run_ocb() {
-  header_notice "$ocb_header" "$ocb_banner" "62" "197"
+  local version gb_path gb_url
+  version="${1:-6}"
+  gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+  if [[ $version == "6" ]]; then
+    if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
+      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz"
+    else
+      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-Linux.tar.gz"
+    fi
+    gb_cmd="geekbench6"
+    gb_run="True"
+  elif [[ $version == "5" ]]; then
+    if [[ "${arch:-}" == *aarch64* || "${arch:-}" == *arm* ]]; then
+      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
+    else
+      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
+    fi
+    gb_cmd="geekbench5"
+    gb_run="True"
+  fi
+  install_geekbench "$gb_url" "$gb_path" "$version"
+  header_notice "$ocb_header" "$ocb_banner" "3" "62"
   init
   expand_country "${country:-}"
   print_table
   fio_cpu_benchmark
   fio_disk_benchmark
-  iperf_table "IPv4"
+  if ping -4 -c1 google.com &> /dev/null; then
+    iperf_table "IPv4"
+  else
+     printf "${red}%s${reset}\n" \
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ No IPv4 connectivity detected. Skipping IPv4 iperf tests.                                        │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  fi
   if ping -6 -c1 google.com &>/dev/null; then
     iperf_table "IPv6"
   else
-    printf '%s\n' "No IPv6 connectivity detected. Skipping IPv6 iperf tests."
+    printf "${red}%s${reset}\n" \
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ No IPv6 connectivity detected. Skipping IPv6 iperf tests.                                        │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
   fi
-  geekbench_table 6
+  geekbench_table "${version:-6}" "$gb_path"
   end=$(date +%s)
   total_time "start" "end"
 }
