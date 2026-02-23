@@ -42,7 +42,13 @@ sys_info() {
     print_section "==================== NETWORK INFO ==========================│"
     print_row "IP Address" "$whois_ip"
     print_row "Gateway" "$sys_gw"
-    print_row "IP Country" "$ip_country"
+    if command -v wg showconf wg0 &> /dev/null; then
+      print_row "Cross-Site IP" "$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s)
+)"
+      print_row "Cross-Site Endpoint" "$(awk -F"[=: ]" '/Endpoint/{print $4}' <(wg showconf wg0))"
+    fi
+    expand_country $ip_country
+    print_row "IP Country" "$country"
     print_row "Provider" "$ip_upstream"
     print_row "ASN Number" "$ip_asn"
     for n in "${ns[@]}"; do
@@ -59,14 +65,20 @@ sys_info() {
     print_row "Load" "$(cut -d' ' -f1-3 /proc/loadavg)"
     print_row "CPU" "$cpu_model"
     print_row "Cores" "$cpu"
+    if command -v mpstat &> /dev/null; then
+      steal=$(mpstat -P ALL | awk '{for (i=1;i<NF;i++) if ($i=="%steal") steal=i;}NR==4{print $steal}')
+      print_row "Steal" "$steal"
+    fi
     printf "└─────────────────────────────────────────────────────────────┘\n"
     print_section "======================= MEMORY =============================│"
     print_row "RAM Usage" "$(awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { printf "%.2f / %.2f GB", (t-a)/1024/1024, t/1024/1024 }' /proc/meminfo)"
+    print_row "Swap Usage" "$(awk '$1=="Swap:" {print $3" / "$2"B"}' <(free -h))"
     printf "└─────────────────────────────────────────────────────────────┘\n"
     print_section "===================== DISK HEALTH ==========================│"
     print_row "Disk Used" "$(awk '$NF == "/" {print $3" / "$2}' <(df -h))"
     print_row "Disk Capacity" "$drive_cap"
-    print_row "Disk IO" "$(iostat -xz | awk '$1 ~ /^[svn][vd][ma]/{print $3}')"
+    print_row "Disk IO" "$(awk '{for (i=1;i<NF;i++) if ($i=="%iowait") steal=i;}NR==4{ print $steal}' <(iostat -x 1 1))"
+    #print_row "Disk IO" "$(iostat -xz | awk '$1 ~ /^[svn][vd][ma]/{print $3}')"
     printf "└─────────────────────────────────────────────────────────────┘\n"
   }
   i=0
