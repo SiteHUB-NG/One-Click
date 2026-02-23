@@ -49,10 +49,10 @@ build_vars() {
   wizard="WELCOME#TO#THE#ONE-CLICK#MIGRATION#WIZARD"
   os_reinstall="REINSTALL#ANY#OS#EASILY#-#REINSTALL"
   r_backup="ONE#CLICK#BACKUP#-#RSYNC#+#RCLONE"
-  recovery_banner="BOOT#BACKUP#AND#RECOVERY#TOOL"
-  cron_banner="AUTOMATE#CRON#JOBS#EASILY"
-  log_banner="LOG#BROWSER"
-  ocb_banner="ONE-CLICK#BENCHMARK#SCRIPT"
+  recovery_banner="ONE#CLICK#BOOT#BACKUP#AND#RECOVERY#TOOL"
+  cron_banner="ONE#CLICK#CRON#AUTOMATION"
+  log_banner="ONE#CLICK#LOG#BROWSER"
+  ocb_banner="ONE#CLICK#SYSTEM#PERFORMANCE#BENCHMARK"
   trap=(
     $(basename "$reinstall")
     reinstall.log
@@ -66,6 +66,7 @@ build_vars() {
     /etc/resolv.conf.migrator-backup
     /etc/hosts.migrator-backup
     one-click.sh
+	/tmp/net-test.txt
   )
   os_title=$(cat <<'EOF'
   ___                ____ _ _      _       ___  ____  
@@ -109,8 +110,8 @@ EOF
   net_repair_title=$(cat <<'EOF'
              ___                    ____ _ _      _
             / _ \ _ __   ___       / ___| (_) ___| | __
-           | | | | '_ \ / _ \_____| |   | | |/ __| |/ /
-           | |_| | | | |  __/_____| |___| | | (__|   <
+           | | | | '_ \ / _ \     | |   | | |/ __| |/ /
+           | |_| | | | |  __/     | |___| | | (__|   <
             \___/|_| |_|\___|      \____|_|_|\___|_|\_\
 
  _   _      _                      _      ____                  _
@@ -125,8 +126,8 @@ EOF
   ocb_header=$(cat <<'EOF'
   ___                    ____ _ _      _    
  / _ \ _ __   ___       / ___| (_) ___| | __
-| | | | '_ \ / _ \_____| |   | | |/ __| |/ /
-| |_| | | | |  __/_____| |___| | | (__|   < 
+| | | | '_ \ / _ \     | |   | | |/ __| |/ /
+| |_| | | | |  __/     | |___| | | (__|   < 
  \___/|_| |_|\___|      \____|_|_|\___|_|\_\
                                             
          ____                  _     
@@ -198,7 +199,7 @@ collect_sysinfo() {
   kernel=$(uname -r)
   ram=$(awk '/Mem/{print $2}' <(free -h))B
   swap=$(awk '/Swap/{print $2}' <(free -h))B
-  disk=($(awk -v blue="$blue" -v yellow=$(tput setaf 11) -v reset="$reset" 'NR != 1 && $NF !~ /dev|run|tmp/{sub("/.*/","",$1);print yellow $1 blue " - " $2"iB" reset}' <(df -h) | column -t))
+  disk=($(awk -v blue="$blue" -v yellow=$(tput setaf 11) -v reset="$reset" 'NR != 1 && $NF !~ /dev|run|tmp/{sub("/.*/","",$1);print yellow $1 blue " - " $2"iB"}' <(df -h) | column -t))
   HOSTNAME="$(hostname)"
 }
 _log_write() { printf "[%s] %s\n" "${yellow}[${reset}$(date '+%F %T')${yellow}]${reset}" "$*" >> "$log_file"; }
@@ -289,6 +290,7 @@ dir_contents() {
 # ==== Trap Cleanup ====
 cleanup() {
   rm -f "${trap[@]}"
+  rm -rf /etc/one-click/ocb/geekbench_*
   systemctl daemon-reexec
   systemctl daemon-reload
   if [[ -n "${TMUX:-}" ]]; then
@@ -549,8 +551,8 @@ expand_country() {
   esac
 }
 fio_cpu_benchmark() {
-  local duration=10
-  local threads
+  local duration threads output usr_cpu sys_cpu
+  duration=10
   threads=$(nproc)
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -560,7 +562,6 @@ fio_cpu_benchmark() {
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
     "│ Fio CPU Benchmark                                                                                │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
-  local output
   output=$(fio \
     --name=cpu-test \
     --ioengine=cpuio \
@@ -571,7 +572,6 @@ fio_cpu_benchmark() {
     --runtime="$duration" \
     --group_reporting \
     --output-format=json)
-  local usr_cpu sys_cpu
   usr_cpu=$(echo "$output" | awk -F: '/"usr_cpu"/ {gsub(/[ ,]/, "", $2); print $2; exit}')
   sys_cpu=$(echo "$output" | awk -F: '/"sys_cpu"/ {gsub(/[ ,]/, "", $2); print $2; exit}')
   printf "${blue}%-20s %-15s %-15s %-15s${reset}\n" \
@@ -579,17 +579,36 @@ fio_cpu_benchmark() {
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
+install_geekbench() {
+  local url path archive gb_cmd
+  url="$1"
+  path="$2"
+  version="$3"
+  gb_cmd="geekbench${version}"
+  archive="/tmp/geekbench_${version}.tar.gz"
+  (
+    mkdir -p "$path"
+    curl -sL "$url" -o "$archive" || exit 1
+    tar -xzf "$archive" --strip-components=1 -C "$path" &> /dev/null || exit 1
+        chmod +x "$path/$gb_cmd"
+  ) &    
+  gb_pid="$!"
+}
 geekbench_table() {
-  local version gb_path url gb_url gb_run gb_cmd local_curl test_url scores single multi
+  local version gb_path url gb_url gb_run gb_cmd local_curl test_url scores single multi dl_cmd
+  if command -v curl >/dev/null 2>&1; then
+    dl_cmd="curl -sL"
+  elif command -v wget >/dev/null 2>&1; then
+    dl_cmd="wget -qO-"
+  else
+    error "Neither curl nor wget found."
+    return
+  fi
   version="$1"
-  gb_path="/etc/one-click/ocb/geekbench_$version"
-  mkdir -p "$gb_path"
+  gb_path="$2"
   gb_url=""
   gb_cmd=""
   gb_run="False"
-  #[[ -n "${local_curl:-}" ]] && dl_cmd="curl -s" || dl_cmd="wget -qO-"
-  use_curl=false
-  command -v curl >/dev/null 2>&1 && use_curl=true
   # ==== Detect package ====
   if [[ $version == "6" ]]; then
     if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
@@ -620,38 +639,49 @@ geekbench_table() {
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
     "│ Geekbench Benchmark $version                                                                            │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
-  printf "${yellow}│ %-96s${reset}\r" "Preparing Geekbench $version..."
-  # ==== Download (if needed) ====
-  if $use_curl; then
-    if ! curl -sL "$gb_url" | tar -xz --strip-components=1 -C "$gb_path" &>/dev/null; then
-      printf "${red}│ %-96s${reset}\n" "Download failed using curl for Geekbench $version                                                      │"
-      return
-    fi
-  else
-    if ! wget -qO- "$gb_url" | tar -xz --strip-components=1 -C "$gb_path" &>/dev/null; then
-      printf "${red}│ %-96s${reset}\n" "Download failed using wget for Geekbench $version                                                      |"
+  printf "${green}│ %-96s${reset}\r" "Preparing Geekbench $version..."
+  # ==== Check earlier download ====
+  if [[ -n "$gb_pid" ]]; then
+    if ! wait "$gb_pid"; then
+      printf "${red}%s${reset}\n" \
+        "│ Geekbench failed to install                                                                      │"
+      printf "${yellow}%s${reset}\n" \
+        "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
       return
     fi
   fi
-  printf "${yellow}│ %-96s${reset}\r" "Running Geekbench $version benchmark..."
-  test_url=$("$gb_path/$gb_cmd" --upload 2>/dev/null | grep https://browser | head -1)
+  if [[ ! -x "$gb_path/$gb_cmd" ]]; then
+    printf "${red}%s${reset}\n" \
+      "│ Geekbench binary missing or not executable: $gb_path/$gb_cmd                                     │"
+	printf "${yellow}%s${reset}\n" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+    return
+  fi
+  printf "${yellow}│ %-96s${reset}\r" "${green}Running GB$version benchmark...${yellow}"
+  test_url=$("$gb_path/$gb_cmd" --upload 2>/dev/null | grep -m1 https://browser | xargs)
   if [[ -z "$test_url" ]]; then
     printf "${blue}%-20s %-20s %-54s${reset}\n" \
-      "│Geekbench" "GB${version}" "${red}Failed${blue}                                                     │"
+      "│Geekbench" "GB${version}" "${red}Failed${blue}                                                    │"
     printf "${blue}%s${reset}\n" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
     return
   fi
-  sleep 8
-  scores=$($dl_cmd "$test_url" | grep "div class=\"score\"")
-  single=$(echo "$scores" | awk -F'[><]' '{print $3}' | head -1)
-  multi=$(echo "$scores" | awk -F'[><]' '{print $3}' | tail -1)
-  printf "${blue}│${green}%-20s %-20s %-54s${reset}\n" \
-    "Single Core" "GB$version" "$single                                                         ${blue}│"
-  printf "${green}%-20s %-20s %-54s${reset}\n" \
-    "Multi Core" "GB$version" "$multi                                                          ${blue}│"
-  printf "${cyan}%-20s %-20s %-54s${reset}\n" \
-    "Result URL" "GB$version" "$test_url                                                        ${blue}│"
+  wait "$gb_pid"
+  sleep 2
+  scores=$(sed -En \
+    "/<div class='score-container score-container-1 desktop'>|<div class='score-container desktop'>/ {
+	  n;
+	  s/[^>]*>([0-9]+).*/\1/p
+	}" <($dl_cmd "$test_url")
+  )
+  single=$(head -1 <<< "$scores")
+  multi=$(tail -1 <<<  "$scores")
+  printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
+    "Single Core" "GB$version" "$single"
+  printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
+    "Multi Core" "GB$version" "$multi"
+  printf "${blue}│${cyan}%-20s %-20s %-56s${blue}│${reset}\n" \
+    "Result URL" "GB$version" "$test_url"
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
@@ -741,21 +771,21 @@ score_iops() {
   esac
 }
 fio_disk_benchmark() {
-  local fio_file size duration
+  local fio_file size duration real disk_type
   fio_file="/var/cache/one-click/fio-test.img"
   size="512M"
   duration=10
   mkdir -p /var/cache/one-click
   truncate -s "$size" "$fio_file"
-  real_dev=$(df -P "$fio_file" | awk 'NR==2 {print $1}')
-  disk_type=$(detect_disk_type "$real_dev")
+  real=$(df -P "$fio_file" | awk 'NR==2 {print $1}')
+  disk_type=$(detect_disk_type "$real")
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
   printf "${blue}%-12s %-22s %-22s %-22s %-22s${reset}\n" \
     "│Block" "4k" "64k" "512k" "1m                 │"
   printf "${yellow}%s${reset}\n" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
-    "│ Fio Sequential Disk Benchmark (${cyan}${disk_type}${reset})                                                              │" \
+    "│ Fio Sequential Disk Benchmark (${blue}Performance Based Guess: ${cyan}${disk_type}${yellow})                                     │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
   human_bw() {
     local mb value unit
@@ -905,17 +935,17 @@ fio_disk_benchmark() {
   rm -f "$fio_file"
 }
 iperf_locs=( \
-    "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
-    "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
-    "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Leaseweb" "Singapore, SG (10G)" "IPv4|IPv6" \
-    "la.speedtest.clouvider.net" "5200-5209" "Clouvider" "Los Angeles, CA, US (10G)" "IPv4|IPv6" \
-    "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
-    "fremont.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Fremont, CA, US (1G)" "IPv4|IPv6" \
-    "slc.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "SLC, UT, US (10G)" "IPv4|IPv6" \
-    "lagos.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Ikeja, Lagos, NG (2G)" "IPv4|IPv6" \
-    "speedtest.uztelecom.uz" "5200-5209" "Uztelecom" "Tashkent, UZ (10G)" "IPv4|IPv6" \
-    "speedtest.sao1.edgoo.net" "9204-9240" "Edgoo" "Sao Paulo, BR (1G)" "IPv4|IPv6" \
-    "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
+  "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
+  "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
+  "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Leaseweb" "Singapore, SG (10G)" "IPv4|IPv6" \
+  "la.speedtest.clouvider.net" "5200-5209" "Clouvider" "Los Angeles, CA, US (10G)" "IPv4|IPv6" \
+  "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
+  "fremont.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Fremont, CA, US (1G)" "IPv4|IPv6" \
+  "slc.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "SLC, UT, US (10G)" "IPv4|IPv6" \
+  "lagos.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Ikeja, Lagos, NG (2G)" "IPv4|IPv6" \
+  "speedtest.uztelecom.uz" "5200-5209" "Uztelecom" "Tashkent, UZ (10G)" "IPv4|IPv6" \
+  "speedtest.sao1.edgoo.net" "9204-9240" "Edgoo" "Sao Paulo, BR (1G)" "IPv4|IPv6" \
+  "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
 )
 iperf_locs_num=$((${#iperf_locs[@]} / 5))
 iperf_cmd=$(command -v iperf3 || echo "iperf3") 
@@ -937,8 +967,9 @@ iperf_test() {
   echo "$val $unit"
 }
 iperf_table() {
-  local mode flags
+  local mode flags host portsprovider loc send recv test_clr
   mode=$1
+  test_clr=$(tput setaf 206)
   [[ "$mode" == "IPv6" ]] && flags="-6" || flags="-4"
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -946,36 +977,35 @@ iperf_table() {
     "│Provider" "Location (Link)" "Send Speed" "Recv Speed" "Ping        │"
   printf "${yellow}%s${reset}\n" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
-    "│ iperf3 Network Speed Tests (${cyan}${mode}${reset})                                                                │" \
+    "│ iperf3 Network Speed Tests (${cyan}${mode}${yellow})                                                                │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
   for (( i = 0; i < iperf_locs_num; i++ )); do
-    [[ "${iperf_locs[i*5+4]}" != *"$mode"* ]] && continue
-    local host="${iperf_locs[i*5]}"
-    local ports="${iperf_locs[i*5+1]}"
-    local provider="${iperf_locs[i*5+2]}"
-    local loc="${iperf_locs[i*5+3]}"
-    printf "\r${yellow}│ Running iperf3 test to %-70s${reset}" "$loc"
+    host="${iperf_locs[i*5]}"
+    ports="${iperf_locs[i*5+1]}"
+    provider="${iperf_locs[i*5+2]}"
+    loc="${iperf_locs[i*5+3]}"
+    printf "\r${green}│ Running iperf3 test to %-70s${reset}" "$loc"
     send=$(iperf_test "$host" "$ports" "$flags" "send")
     recv=$(iperf_test "$host" "$ports" "$flags" "recv")
     ping_val=$(awk '/time=/{gsub(/.*time=/,""); print}' <(ping -c1 "$host" 2>/dev/null))
     [[ -z $ping_val ]] && ping_val="-- ms"
     print_row() {
-      printf "\r${blue}%-15s %-30s %-20s %-20s %-15s${reset}\n" \
+      printf "\r${blue}%-15s ${test_clr}%-30s ${blue}%-20s %-20s %-15s${reset}\n" \
         "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
     }
     if [[ "$send" =~ "busy" && "$recv" =~ "busy" ]]; then
       print_row() {
-        printf "\r${blue}%-15s %-30s ${red}%-20s %-20s ${blue}%-15s${reset}\n" \
+        printf "\r${blue}%-15s ${test_clr}%-30s ${red}%-20s %-20s ${blue}%-15s${reset}\n" \
           "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
       }
     elif [[ "$send" =~ "busy" ]]; then
       print_row() {
-        printf "\r${blue}%-15s %-30s ${red}%-20s ${blue}%-20s %-15s${reset}\n" \
+        printf "\r${blue}%-15s ${test_clr}%-30s ${red}%-20s ${blue}%-20s %-15s${reset}\n" \
           "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
       }
     elif [[ "$recv" =~ "busy" ]]; then
       print_row() {
-        printf "\r${blue}%-15s %-30s %-20s ${red}%-20s ${blue}%-15s${reset}\n" \
+        printf "\r${blue}%-15s ${test_clr}%-30s ${blue}%-20s ${red}%-20s ${blue}%-15s${reset}\n" \
           "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
       }
     fi
@@ -999,21 +1029,27 @@ is_v6_online() {
   fi
 }
 total_time() {
+  local key_width val_width start_time end_time total_width inner_width border msg msg1 min sec time_taken
+  key_width=15
+  val_width=78
   start_time=$1
   end_time=$2
+  total_width=$((key_width + val_width + 7))
+  inner_width=$((total_width - 2))
+  border=$(printf '─%.0s' $(seq 1 "$inner_width"))
   time_taken=$(( end_time - start_time ))
+  msg1="One-Click Bench completed in ${time_taken} sec"
   if (( ${time_taken} > 60 )); then
 	min=$(( time_taken / 60 ))
     sec=$(( time_taken % 60 ))
-    printf "${blue}%s${reset}\n" \
-      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ One-Click Bench completed in ${min} min ${sec} sec                                                           │" \
-      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+	msg="One-Click Bench completed in ${min} min ${sec} sec"
+	printf "${blue}┌%s┐${reset}\n" "$border"
+    printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg"
+    printf "${blue}└%s┘${reset}\n" "$border"
   else
-    printf "${blue}%s${reset}\n" \
-      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ One-Click Bench completed in ${time_taken} sec                                                             │" \
-      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+    printf "${blue}┌%s┐${reset}\n" "$border"
+    printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg1"
+    printf "${blue}└%s┘${reset}\n" "$border"
   fi
 }
 # ==== End One-Click Bench ==== #
