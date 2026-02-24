@@ -70,19 +70,19 @@ install_dep() {
   fatal="${5:-false}"
   # ==== Check if dependency is already installed ====
   if eval "$check_cmd" &>/dev/null; then
-    printf "%-40s [OK]\n" "Checking ${dep_name}"
+    printf "%-40s ${blue}[OK]${reset}\n" "${blue}[DEPENDANCY CHECK]: ${reset}Checking ${dep_name}"
     return
   fi
-  printf "%-40s" "Installing ${dep_name}"
-  for ((i=0;i<4;i++)); do
+  printf "%-40s" "${yellow}[INSTALLING DEP]: ${reset}Installing ${dep_name}"
+  for ((i=0;i<7;i++)); do
     printf "."
     sleep 0.3
   done
   # ==== Attempt installation ====
   if $pkg_manager -y install "$pkg_name" &>/dev/null; then
-    printf "\r%-40s [DONE]\n" "Installing ${dep_name}"
+    printf "\r%-40s ${green}[DONE]${reset}\n" "${green}[COMPLETE]: ${reset}Installing ${dep_name}"
   else
-    printf "\r%-40s [FAILED]\n" "Installing ${dep_name}"
+    printf "\r%-40s ${red}[FAILED]${reset}\n" "${red}[INCOMPLETE]: ${reset}Installing ${dep_name}"
     [[ "$fatal" == true ]] && return 1
   fi
 }
