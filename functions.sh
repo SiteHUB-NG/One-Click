@@ -184,7 +184,7 @@ collect_sysinfo() {
   api_response=$(curl -sL http://ip-api.com/json/${whois_ip})
   sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
   sys_gw="$(awk '$1 == "default" {print $3}' <(ip r))"
-  ip_upstream="$(awk '$1 == "NetName:" || $1 == "netname:" {print $2}' <(whois "$whois_ip" | tac) | head -1)"
+  ip_upstream="$(jq -r '.isp' <<< $api_response)"
   ip_country="$(jq -r '.country' <<< $api_response)"
   ip_asn="$(jq -r '.as' <<< $api_response)"
   drive_cap="$(awk 'NR==2' <(lsblk -o size))"
@@ -194,7 +194,7 @@ collect_sysinfo() {
   cpu_cores=$(nproc)
   freq=$(awk -F: '/cpu MHz/ {freq=$2} END {print freq " MHz"}' /proc/cpuinfo | sed 's/^[ \t]*//')
   location=$(jq -r '.regionName' <<< $api_response)
-  country="ip_country"
+  country="$ip_country"
   uptime=$(sed 's/up //' <(uptime -p))
   distro=$(awk -F= '/PRETTY_NAME/{print $2}' /etc/os-release)
   kernel=$(uname -r)
