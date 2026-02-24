@@ -57,6 +57,7 @@ backup | Create incremental or compressed backups locally or remotely.
 boot-recovery | Create or restore boot and root partition snapshots.
 repair | Repair or restore network configurations.
 migrate | Migrate entire systems using block-level or file-level methods.
+bench | Run system benchmark suite (OCB).
 sys-info | Display live system statistics.
 cron | Configure scheduled automation tasks.
 uninstall | Remove one-click and all associated files.
@@ -569,6 +570,89 @@ When migrating remote systems, verify network reliability to avoid incomplete tr
 .IP \(bu 2
 Block-level cloning overwrites all target disk contents – use with caution.
 
+.SH BENCH
+
+The
+.B bench
+command (also referred to as
+.BR "one-click bench" " (OCB)" )
+runs a comprehensive system benchmark suite designed to evaluate
+server performance across CPU, memory, disk, and network subsystems.
+
+.PP
+OCB is intended for:
+
+.IP \(bu 2
+VPS performance validation
+
+.IP \(bu 2
+Dedicated server benchmarking
+
+.IP \(bu 2
+Cloud instance comparison
+
+.IP \(bu 2
+Pre-deployment verification
+
+.IP \(bu 2
+Post-migration performance checks
+
+.PP
+Benchmark components include:
+
+.IP \(bu 2
+CPU performance – multi-threaded and single-threaded computational tests
+
+.IP \(bu 2
+Memory performance – sequential read and write bandwidth measurements
+
+.IP \(bu 2
+Disk performance – sequential and random I/O throughput and latency
+
+.IP \(bu 2
+Network latency – multi-target latency testing and sorting by lowest response time
+
+.IP \(bu 2
+System inspection – kernel, virtualization detection, CPU model, and architecture
+
+.PP
+Operation details:
+
+.IP \(bu 2
+Targets are latency-tested first and sorted by lowest round-trip time before bandwidth tests are executed
+
+.IP \(bu 2
+Tests are executed sequentially in ranked order for consistency
+
+.IP \(bu 2
+Results are displayed in a structured table format
+
+.IP \(bu 2
+Optional color-coded scoring for quick performance assessment
+
+.IP \(bu 2
+Non-destructive and safe for production systems
+
+.PP
+OCB automatically installs required dependencies if missing and runs within a
+.BR tmux (1)
+session when executed interactively to prevent interruption.
+
+.PP
+The benchmark does not modify system configuration and does not persist changes.
+
+.PP
+Example:
+
+.RS
+.B one-click bench
+.RE
+
+.PP
+The
+.B bench
+command provides a fast, consistent method of evaluating infrastructure quality and identifying performance bottlenecks.
+
 .SH SYS-INFO/SYSTEM
 
 The
@@ -767,6 +851,7 @@ Chike Egbuna
 .BR rsync (1),
 .BR rclone (1),
 .BR tmux (1),
+.BR sysbench (1),
 .BR cron (8),
 .BR dd (1),
 .BR top (1),
