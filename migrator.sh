@@ -367,8 +367,8 @@ EOF
     for id in "${ids[@]}"; do
       if [[ "$id" == "debian" || "$ID" == "debian" ]]; then
         if ! sshpass -p "$pass" ssh -T -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no "${user}@${destination_server}" "if ! type rsync &> /dev/null; then apt -y install rsync; fi" &> /dev/null; then
-          error "Rsync failed — possible SSH timeout or connection error" 
-          return 1
+          error "SSH Credential Failed! — possible SSH timeout, connection error or wrong credentials passed" 
+          return 
         else
           echo
           success "${green}SSH credentials are valid${reset}" 
@@ -376,15 +376,15 @@ EOF
       elif [[ "$id" == "rhel" ]]; then
         if [[ ! -s "$key" ]]; then
           if ! sshpass -p "$pass" ssh -T -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no "${user}@${destination_server}" "if ! type rsync &> /dev/null; then dnf -y install rsync; fi" &> /dev/null; then
-            error " " "Rsync failed — possible SSH timeout or connection error"
-            return 1
+            error "SSH Credential Failed! — possible SSH timeout, connection error or wrong credentials passed"
+            return
           else
             success "${green}SSH credentials are valid${reset}"
           fi
         else
           if ! ssh -i "$key" -T -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no "${user}@${destination_server}" "if ! type rsync &> /dev/null; then dnf -y install rsync; fi" &> /dev/null; then
-            error " " "Rsync failed — possible SSH timeout or connection error"
-            return 1
+            error "SSH Credential Failed! — possible SSH timeout, connection error or wrong credentials passed"
+            return
           else
             success "${green}SSH credentials are valid${reset}"
           fi
@@ -438,7 +438,8 @@ set_pass() {
 # ==== Rsync Migration Script ====
 run_migrate_rsync() {
   v4
-  ssh-keygen -f '/root/.ssh/known_hosts' -R "$destination_server"
+  touch '/root/.ssh/known_hosts'
+  ssh-keygen -f '/root/.ssh/known_hosts' -R "$destination_server" &> /dev/null
   set_pass
   check_rsync
   info "The following directories and all content will be included in the migration: "
@@ -913,6 +914,7 @@ run_migrate() {
   v_run
   destination_server=${destination_server:-}
   banner_len="${#destination_server}"
+  touch '/root/.ssh/known_hosts'
   ssh-keygen -f '/root/.ssh/known_hosts' -R "${destination_server:-}" &> /dev/null
   v_check
   v6
