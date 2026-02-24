@@ -69,6 +69,7 @@ one-click [COMMAND]
 | migrator     | System migration tool supporting both rsync and dd modes |
 | recovery     | Boot partition backup and recovery tool (BIOS, UEFI, GRUB) |
 | repair       | Network repair module including configuration snapshot and restore |
+| bench        | One-Click Bench (OCB) performance benchmark suite |
 | sys-info     | Display system information |
 | system       | Display system information (alias of sys-info) |
 | logs         | Interactive system log browser |
@@ -100,6 +101,10 @@ one-click migrator
 **Run recovery tool:**
 ```
 one-click recovery
+```
+**Run performance benchmark (OCB):**
+```
+one-click bench
 ```
 **View system information:**
 ```
@@ -169,6 +174,47 @@ Designed for systems that fail to boot after disk or migration operations.
 - Safe rollback model
 
 Built for remote recovery scenarios where SSH access may be unstable.
+
+## One-Click Bench (OCB)
+
+One-Click Bench (OCB) is the integrated performance benchmarking module
+designed to evaluate infrastructure quality and detect bottlenecks.
+
+It provides a structured, repeatable benchmarking workflow suitable for:
+
+- VPS validation
+- Dedicated server verification
+- Cloud instance comparison
+- Pre-deployment testing
+- Post-migration performance checks
+
+### Benchmark Coverage
+
+OCB evaluates multiple subsystems:
+
+- **CPU performance** – single and multi-threaded computational workloads  
+- **Memory performance** – sequential read/write bandwidth tests  
+- **Disk performance** – sequential and random I/O throughput and latency  
+- **Network latency** – multi-target latency measurement with automatic sorting  
+- **System profiling** – virtualization detection, CPU model, kernel, architecture  
+
+### Network Test Logic
+
+- All test targets are ping-tested first  
+- Targets are sorted by lowest round-trip latency  
+- Bandwidth or extended tests run in ranked order  
+- Ensures consistency and fair comparison across environments  
+
+### Design Characteristics
+
+- Non-destructive and safe for production systems  
+- Automatic dependency handling  
+- Structured table output with optional color scoring  
+- Runs inside managed tmux session to prevent interruption  
+- No persistent system changes  
+
+OCB is designed for engineers who need fast, reproducible performance metrics
+without installing heavy benchmarking suites manually.
 
 ## Log Management Console
 
