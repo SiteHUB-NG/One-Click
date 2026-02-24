@@ -77,6 +77,7 @@ service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
 tab_complete="/etc/bash_completion.d/one-click"
+tab_complete2="/usr/share/bash-completion/completions/one-click"
 one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
 # ==== Alt Mirror ====
 #one_click_1="https://as214354.network/one-click.1"
@@ -356,8 +357,9 @@ if [ "$EUID" -ne 0 ]; then
   die "This script must be run as root."
 fi
 # ==== Module Tab Complete ====
-if [[ ! -f "$tab_complete" ]]; then
-  cat <<'EOF'> "$tab_complete"
+if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
+  if [[ ! -f "$tab_complete" ]]; then
+    cat <<'EOF'> "$tab_complete"
 _one_click() {
   local cur
   COMPREPLY=()
@@ -380,6 +382,33 @@ _one_click() {
 }
 complete -F _one_click one-click
 EOF
+  fi
+elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
+  if [[ ! -f "$tab_complete2" ]]; then
+    cat <<'EOF'> "$tab_complete2"
+_one_click() {
+  local cur
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  COMPREPLY=( $(compgen -W "
+    backup
+    bench
+    cron
+    migrator
+    net-repair
+    reinstall
+    recovery
+    system
+    system-info
+    logs
+    log-browser
+    help
+    uninstall
+  " -- "$cur") )
+}
+complete -F _one_click one-click
+EOF
+  fi
 fi
 map_one_click() {
   for i in "$@"; do
