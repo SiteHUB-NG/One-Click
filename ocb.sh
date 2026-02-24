@@ -16,14 +16,20 @@
 collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
+install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
 clear
 start=$(date +%s)
+disk=($(ls -1 /sys/block/))
 cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
-ram="${ram:-}"
-swap="${swap:-}"
-uptime="${uptime:-}"
-cpu_cores="${cpu_cores:-}"
-freq="${freq:-}"
+size="$ram"
+read_ram=$(sysbench memory --memory-block-size=1M --memory-total-size="$size" --memory-oper=read run)
+write_ram=$(sysbench memory --memory-block-size=1M --memory-total-size="$size" --memory-oper=write run)
+throughput=($(awk -F'[)(]' '/MiB/{print $2}' <<< "$read_ram"))
+total=$(awk '/transferred/{print $1}' <<< "$read_ram")
+ops=$(awk '/operations:/{print $3}' <<< "$read_ram")
+write_throughput=($(awk -F'[)(]' '/MiB/{print $2}' <<< "$write_ram"))
+write_total=$(awk '/transferred/{print $1}' <<< "$write_ram")
+write_ops=$(awk '/operations:/{print $3}' <<< "$write_ram")
 init() {
 if [[ "${#ram}" -eq 4 ]]; then
   ram="$(awk '/Mem/{print $2}' <(free -h))B"
@@ -122,7 +128,10 @@ print_table() {
   print_row "$key_width" "$val_width" "VM-x/AMD-V" "$x_v"
   print_row "$key_width" "$val_width" "RAM" "$ram"
   print_row "$key_width" "$val_width" "Swap" "$swap"
-  print_row "$key_width" "$val_width" "Disk" "${disk[*]}"
+  for d in ${disk[*]}; do
+    print_row "$key_width" "$val_width" "Disk$((++i))" "${d}"
+    print_row "$key_width" "$val_width" "Disk Name" "$(cat /sys/block/${d}/device/{model,modalias} 2> /dev/null)"
+  done
   print_row "$key_width" "$val_width" "Distro" "$distro"
   print_row "$key_width" "$val_width" "Kernel" "$kernel"
   print_row "$key_width" "$val_width" "VM Type" "$virt"
@@ -138,6 +147,7 @@ run_ocb() {
   local version gb_path gb_url
   version="${1:-6}"
   gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+  mkdir -p "$gb_path"
   if [[ $version == "6" ]]; then
     if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
       gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz"
@@ -162,6 +172,21 @@ run_ocb() {
   print_table
   fio_cpu_benchmark
   fio_disk_benchmark
+  # ==== RAM BENCH ====
+  printf "${blue}%s${reset}\n" \
+    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "Test" "Total MiB" "MiB/sec" "Ops/sec"
+  printf "${yellow}%s${reset}\n" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
+    "│ RAM Bandwidth Benchmark                                                                          │" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
+
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "Read" "$total" "${throughput[0]}" "$ops" \
+    "Write" "$write_total" "${write_throughput[0]}" "$write_ops"
+  printf "${blue}%s${reset}\n" \
+    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
   if ping -4 -c1 google.com &> /dev/null; then
     iperf_table "IPv4"
   else
