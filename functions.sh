@@ -181,19 +181,20 @@ EOF
 # ==== End Essential Variables ==== #
 collect_sysinfo() {
   whois_ip="$(sed -En '/inet /{s,^[^/]* ([^/]*).*,\1,p}' <(ip a s "$nic"))"
+  api_response=$(curl -sL http://ip-api.com/json/${whois_ip})
   sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
   sys_gw="$(awk '$1 == "default" {print $3}' <(ip r))"
   ip_upstream="$(awk '$1 == "NetName:" || $1 == "netname:" {print $2}' <(whois "$whois_ip" | tac) | head -1)"
-  ip_country="$(awk '$1 == "Country:" || $1 == "country:" {print $2}' <(whois "$whois_ip" | tac) | head -1)"
-  ip_asn="$(awk '$1 == "Origin:" || $1 == "origin:" {print $2}' <(whois "$whois_ip" | tac) | head -1)"
+  ip_country="$(jq -r '.country' <<< $api_response)"
+  ip_asn="$(jq -r '.as' <<< $api_response)"
   drive_cap="$(awk 'NR==2' <(lsblk -o size))"
   ns=($(awk '$1 !~ "#" && /nameserver/ {print $2}' /etc/resolv.conf ))
   cpu_model="$(lscpu | awk -F: '/Model name/ {print $2}' | sed 's/^ *//')"
   cpu="$(nproc)"
   cpu_cores=$(nproc)
   freq=$(awk -F: '/cpu MHz/ {freq=$2} END {print freq " MHz"}' /proc/cpuinfo | sed 's/^[ \t]*//')
-  location=$(awk '/City/{print $2}' <(whois "$whois_ip" | tac ) | head -1)
-  country=$(awk '/Country/{print $2}' <(whois "$whois_ip" | tac ) | head -1)
+  location=$(jq -r '.regionName' <<< $api_response)
+  country="ip_country"
   uptime=$(sed 's/up //' <(uptime -p))
   distro=$(awk -F= '/PRETTY_NAME/{print $2}' /etc/os-release)
   kernel=$(uname -r)
