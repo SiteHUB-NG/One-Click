@@ -456,7 +456,7 @@ fi
 # ==== Install dependancies ====
 #dependancies
 mkdir -p "${log_dir:-}" "${base:-}"
-touch "$secret_key" "$manpage" "$tab_complete" "${log_error_file:-}" "${log_file:-}"
+touch "$secret_key" "$manpage" "${log_error_file:-}" "${log_file:-}"
 chmod 640 "${log_file:-}" "${log_error_file:-}"
 build_vars
 init_secret_key
