@@ -51,7 +51,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
   exit 0
 fi
-# ==== Install Dependancies ====
+# ==== Confirm Package Manager ====
 if command -v dnf >/dev/null 2>&1; then
   pkg_mgr="dnf"
 elif command -v yum >/dev/null 2>&1; then
@@ -61,6 +61,45 @@ elif command -v zypper >/dev/null 2>&1; then
 elif command -v apt-get >/dev/null 2>&1; then
   pkg_mgr="apt"
 fi
+# ==== Initialize these variables and functions immediately ====
+rsync_backup_dir="${base}/backup-tool"
+profiles="${rsync_backup_dir}/profiles/"
+log_dir="/var/log/one-click"
+log_file="${log_dir}/one-click.log"
+log_error_file="${log_dir}/one-click-error.log"
+recovery_base="${base}/boot-recovery-tool"
+recovery_config="${recovery_base}/structure.conf"
+secret_key="${base}/.backup_secret.key"
+nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
+updated="Feb 2026"
+version="1.0.0"
+service_name="resumable-rsync-$(date +%s)"
+service_file="/etc/systemd/system/${service_name}.service"
+man_dir="/usr/local/share/man/man1/"
+tab_complete="/etc/bash_completion.d/one-click"
+one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
+# ==== Alt Mirror ====
+#one_click_1="https://as214354.network/one-click.1"
+manpage="${man_dir}one-click.1"
+kern="$(uname -r)"
+blue="$(tput setaf 4)"
+cyan="$(tput setaf 6)"
+red="$(tput setaf 1)"
+yellow=$(tput setaf 11)
+grey="$(tput setaf 8)"
+green="$(tput setaf 2)"
+warning="$(tput setaf 3)"
+orange=$(tput setaf 208)
+bold="$(tput bold)"
+reset="$(tput sgr 0)"
+ul="$(tput smul)"
+ul_reset="$(tput rmul)"
+spinner_frames=( '\' '-' '/' '|' )
+r1=( '|' '/' '-' '\' )
+r2=( '-' '/' '|' '\' )
+r3=( '|' '\' '-' '/' )
+sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$path"
+# ==== Install Dependancies ====
 install_dep() {
   local dep_name check_cmd pkg_name pkg_manager fatal
   dep_name="${1:-}"
@@ -137,44 +176,6 @@ if [[ ! -f "$deps_ok" ]]; then
   touch "$deps_ok"
 fi
 # ==== End Of Dependancies ==== #
-# ==== Initialize these variables and functions immediately ====
-rsync_backup_dir="${base}/backup-tool"
-profiles="${rsync_backup_dir}/profiles/"
-log_dir="/var/log/one-click"
-log_file="${log_dir}/one-click.log"
-log_error_file="${log_dir}/one-click-error.log"
-recovery_base="${base}/boot-recovery-tool"
-recovery_config="${recovery_base}/structure.conf"
-secret_key="${base}/.backup_secret.key"
-nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
-updated="Feb 2026"
-version="1.0.0"
-service_name="resumable-rsync-$(date +%s)"
-service_file="/etc/systemd/system/${service_name}.service"
-man_dir="/usr/local/share/man/man1/"
-tab_complete="/etc/bash_completion.d/one-click"
-one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
-# ==== Alt Mirror ====
-#one_click_1="https://as214354.network/one-click.1"
-manpage="${man_dir}one-click.1"
-kern="$(uname -r)"
-blue="$(tput setaf 4)"
-cyan="$(tput setaf 6)"
-red="$(tput setaf 1)"
-yellow=$(tput setaf 11)
-grey="$(tput setaf 8)"
-green="$(tput setaf 2)"
-warning="$(tput setaf 3)"
-orange=$(tput setaf 208)
-bold="$(tput bold)"
-reset="$(tput sgr 0)"
-ul="$(tput smul)"
-ul_reset="$(tput rmul)"
-spinner_frames=( '\' '-' '/' '|' )
-r1=( '|' '/' '-' '\' )
-r2=( '-' '/' '|' '\' )
-r3=( '|' '\' '-' '/' )
-sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$path"
 # ==== Load Source Body ====
 warn() {
   printf "$yellow[WARN]:$reset %s\n" "$@" >&2;
