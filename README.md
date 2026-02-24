@@ -277,12 +277,79 @@ One-Click is engineered for environments where:
 - Downtime must be minimized
 - Recovery must be deterministic
 
+## Security Notice
+
+One-Click uses standard, widely available system binaries and does not build,
+compile, or embed third-party executable code.
+
+Core operations rely on tools such as:
+
+- curl
+- tmux
+- rsync
+- rclone
+- dd
+- sgdisk
+- standard GNU/Linux utilities
+
+No custom binaries are downloaded or compiled during normal operation.
+
+### Remote Script Delivery
+
+The initial bootstrap script is retrieved over HTTPS from a public repository
+or mirror. While HTTPS provides transport security, fetching and executing
+remote scripts always carries inherent risk.
+
+Users are strongly encouraged to:
+
+- Review the script before execution
+- Verify repository integrity
+- Pin to a specific commit when deploying in production
+- Maintain internal mirrors for controlled environments
+- Restrict execution to trusted networks
+
+### Operational Scope
+
+Certain modules (e.g., reinstall, migration, recovery) perform privileged
+operations including disk modification and bootloader changes.
+
+Security posture depends on:
+
+- Proper access control
+- Use of SSH keys instead of passwords
+- Limiting root access
+- Reviewing destructive confirmations before execution
+
+One-Click does not include telemetry, external reporting, or hidden background
+services.
+
+All actions are explicit and user-initiated.
+
 ## Requirements
 
 - Bash 4+
 - curl
 - sudo or root access
 Additional packages are installed automatically as required by specific modules.
+
+## Acknowledgements
+
+Portions of design inspiration, benchmarking logic, and implementation
+patterns were influenced by the following open-source projects:
+
+- [YABS – Yet Another Bench Script](https://github.com/masonr/yet-another-bench-script)  
+  Contributed inspiration for structured benchmarking workflows,
+  network test sequencing, and formatted performance output.
+
+- [reinstall by bin456789](https://github.com/bin456789/reinstall)  
+  Influenced aspects of OS deployment methodology and reinstall logic.
+
+One-Click does may embed these projects directly or incorporates concepts,
+ideas, and selected implementation approaches adapted to fit its modular
+architecture.
+
+Credit and appreciation are extended to the maintainers and contributors of
+these projects for their work in advancing open infrastructure tooling.
 
 ## Disclaimer
 
