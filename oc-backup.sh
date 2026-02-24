@@ -536,7 +536,7 @@ configure_backup() {
       echo
     }
     check_ssh
-    if [[ "${pass2:-}" != "" && "${pass:-}" != "{pass2:-}" ]]; then
+    if [[ "${pass2:-}" != "" && "${pass:-}" != "${pass2:-}" ]]; then
       error "The passwords do not match!"
       info "Please try again."
       check_ssh
