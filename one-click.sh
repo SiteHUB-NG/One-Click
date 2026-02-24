@@ -446,7 +446,13 @@ if ! command -v 'one-click' >/dev/null 2>&1; then
     exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
-source "$tab_complete"
+if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
+  source "$tab_complete"
+elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
+  source "$tab_complete2"
+else
+  die "Dependancy not handled"
+fi
 # ==== Install dependancies ====
 #dependancies
 mkdir -p "${log_dir:-}" "${base:-}"
