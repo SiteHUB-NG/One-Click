@@ -104,6 +104,7 @@ install_dependancies() {
         install_dep "whois" "type whois" "whois" "$pkg_mgr"
         install_dep "tree" "type tree" "tree" "$pkg_mgr" 
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
+        install_dep "jq" "type jq" "jq" "$pkg_mgr"
         ;;
       rhel|centos|fedora)
         pkg_mgr="dnf"
@@ -122,6 +123,7 @@ install_dependancies() {
         install_dep "whois" "type whois" "whois" "$pkg_mgr"
         install_dep "tree" "type tree" "tree" "$pkg_mgr" 
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
+        install_dep "jq" "type jq" "jq" "$pkg_mgr"
         ;;
       *)
         printf '%s\n' "Unknown OS: $id"
@@ -180,11 +182,12 @@ warn() {
 }
 # ==== Loader Body ====
 load_body() {
-  local url=${1:-}
-  local backup_url=${2:-}
-  local cache_dir="${3:-}"
-  local cache_file="${4:-}"
-  local ttl=$((24 * 3600))
+  local url backup cache_dir cache_file ttl cache_age
+  url=${1:-}
+  backup_url=${2:-}
+  cache_dir="${3:-}"
+  cache_file="${4:-}"
+  ttl=$((24 * 3600))
   mkdir -p "$cache_dir"
   local now
   now=$(date +%s)
