@@ -70,6 +70,7 @@ decrypt_cron() {
   fi
   success "Cron job successfully installed" \
   "${grey}Your backup is scheduled to run on ${cyan}${dow_str}, ${day_str} ${month_str} ${grey}at ${cyan}${time_str} (${tz_val:-UTC}). ${green}[SUCCESS]${reset}"
+  return
 }
 select_timezone() {
   check=${1:-}
