@@ -110,6 +110,8 @@ print_table() {
   local key_width val_width total_width inner_width border core_plural
   key_width=15
   val_width=78
+  i=0
+  n=0
   if [[ "${cpu_cores:-}" -gt 1 ]]; then
     core_plural="cores"
   else
@@ -128,10 +130,20 @@ print_table() {
   print_row "$key_width" "$val_width" "VM-x/AMD-V" "$x_v"
   print_row "$key_width" "$val_width" "RAM" "$ram"
   print_row "$key_width" "$val_width" "Swap" "$swap"
-  for d in ${disk[*]}; do
-    print_row "$key_width" "$val_width" "Disk$((++i))" "${d}"
-    print_row "$key_width" "$val_width" "Disk Name" "$(cat /sys/block/${d}/device/{model,modalias} 2> /dev/null)"
-  done
+  lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}' | while read -r d; do
+    print_row "$key_width" "$val_width" "Disk$((++i))" "${yellow}${d}${blue} - $size"
+    if [[ -r /sys/block/$d/device/modalias ]]; then
+      name=$(< /sys/block/$d/device/modalias)
+    elif [[ -r /sys/block/$d/device/model ]]; then
+      name=$(< /sys/block/$d/device/model)
+    elif [[ -r /sys/block/$d/device/vendor ]]; then
+      vendor=$(< /sys/block/$d/device/vendor)
+      name="$vendor VirtIO Disk"
+    else
+        name="Unknown Disk"
+    fi
+    print_row "$key_width" "$val_width" "Disk Name$((++n))" "$(tput setaf 214)$name${blue}"
+  done 
   print_row "$key_width" "$val_width" "Distro" "$distro"
   print_row "$key_width" "$val_width" "Kernel" "$kernel"
   print_row "$key_width" "$val_width" "VM Type" "$virt"
