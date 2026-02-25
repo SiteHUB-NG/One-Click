@@ -190,6 +190,66 @@ Built for remote recovery scenarios where SSH access may be unstable.
 
 `rule-engine` is a **human-readable firewall rule parser and executor** integrated into the One-Click toolkit. It allows administrators to manage firewall rules using **intuitive, plain-language commands**, which are automatically translated into the appropriate backend commands for `iptables`, `ip6tables`, `nftables`, `ufw`, or `firewalld`.
 
+### Firewall Backup, Restore, and Delete
+
+One-Click supports **full firewall configuration management** through the `rule-engine` module. Users can **backup**, **restore**, and **delete** firewall rules safely, with interactive tables and confirmations.  
+
+The commands can be triggered using natural language variants:
+
+- **Backup / Save / Retain**:  
+  `(backup|save|retain|copy|export|dump|snapshot)([[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy))?`
+- **Restore / Reinstate / Revive**:  
+  `(restore|revive|recreate|regenerate|repair|import|reinstate)([[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy))?`
+- **Delete / Remove**:  
+  `(delete|remove|purge)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy)`
+
+These commands automatically create and manage backups in: 
+`/etc/one-click/rule-engine/`
+
+### Backup Firewall
+
+Backups are timestamped and stored in `/etc/one-click/rule-engine/`.  
+
+**Examples:**
+
+```
+one-click rule-engine "backup"
+one-click rule-engine "save firewall"
+one-click rule-engine "retain ruleset"
+```
+**What happens:**
+
+- Creates the backup directory if it doesn’t exist.
+- Detects the active firewall backend (iptables, nftables, ufw, firewalld).
+- Saves the current configuration to a timestamped file.
+- Permissions set to 600 to restrict access.
+
+Sample Output:
+`[INFO]: Firewall configuration saved to /etc/one-click/rule-engine/iptables-2026-02-25-144512.backup`
+
+### Restore Firewall
+
+Users can restore from one or more existing backups.
+If multiple backups exist, a table is displayed for selection.
+
+Examples:
+```
+one-click rule-engine "restore"
+one-click rule-engine "reinstate firewall"
+one-click rule-engine "import ruleset"
+```
+
+### Delete Firewall Backup
+
+Old backups can be safely removed using an interactive selection table.
+
+Examples:
+```
+one-click rule-engine "delete firewall"
+one-click rule-engine "remove configuration"
+one-click rule-engine "purge firewall ruleset"
+```
+
 ### Key Capabilities
 
 - Human-readable rule parsing (`open`, `close`, `allow`, `block`, `drop`, `delete`)  
@@ -293,23 +353,23 @@ Built for fast diagnostics in headless environments.
 
 Core dependencies installed during initial execution include:
 
-- curl
-- tmux
 - core shell utilities
+- curl
 - epel-release
+- fzf
+- iostat
+- iptables
+- psutil
+- pv
 - rclone
 - sgdisk
 - sshpass
-- psutil
-- pv
-- iostat
+- tmux
 - whois
-- fzf
 
 Additional dependencies may be installed depending on distribution and module usage.
 
 This staged model ensures minimal base footprint while maintaining full functionality.
-
 
 ## Architecture Highlights
 
@@ -340,7 +400,7 @@ One-Click is engineered for environments where:
 ## Security Notice
 
 One-Click uses standard, widely available system binaries and does not build,
-compile, or embed third-party executable code.
+compile, or embed third-party executable code outside of Geekbench.
 
 Core operations rely on tools such as:
 
@@ -352,7 +412,7 @@ Core operations rely on tools such as:
 - sgdisk
 - standard GNU/Linux utilities
 
-No custom binaries are downloaded or compiled during normal operation.
+No custom binaries are downloaded or compiled during normal operation outside of Geekbench.
 
 ### Remote Script Delivery
 
