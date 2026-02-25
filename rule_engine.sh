@@ -22,7 +22,7 @@ rule_engine() {
     shift
   fi
   if [[ -z "$rule" ]]; then
-    die "Usage: one-click rule-engine [--dry-run] <rule in human words>"
+    die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
   sensitive_ports=(22 3389 80 443)
   rule_lower=${rule,,}
