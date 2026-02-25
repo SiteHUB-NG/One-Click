@@ -1440,7 +1440,7 @@ delete_firewall_backups() {
   local engine_backup_dir backups selected bak_num file_name
   engine_backup_dir="/etc/one-click/rule-engine"
   # ==== List Backup Files ====
-  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.{backup,backup} 2>/dev/null)
+  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.backup 2>/dev/null)
   if [[ ${#backups[@]} -eq 0 ]]; then
     warn "No firewall backups found in $engine_backup_dir"
     return 1
@@ -1471,14 +1471,14 @@ delete_firewall_backups() {
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
     rm -f "$selected" && success "Deleted firewall backup: $(basename "$selected")" || warn "Failed to delete $selected"
   else
-    warn "Deletion cancelled."
+    die "Deletion cancelled."
   fi
 }
 restore_firewall() {
   local engine_backup_dir backups selected bak_num backend file_name
   engine_backup_dir="/etc/one-click/rule-engine"
   # ==== List Backup Files ====
-  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.{backup,backup} 2>/dev/null)
+  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.backup 2>/dev/null)
   if [[ ${#backups[@]} -eq 0 ]]; then
     warn "No firewall backups found in $engine_backup_dir"
     return 1
@@ -1547,6 +1547,8 @@ restore_firewall() {
     esac
     success "Firewall restored successfully from $(basename "$selected")"
     exit 0
+  else
+    die "Restore not confirmed" "Aborting..."
   fi  
 }
 parse_firewall_command() {
