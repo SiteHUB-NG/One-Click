@@ -1433,8 +1433,46 @@ backup_firewall() {
   esac
   outfile="${engine_backup_dir}${ext}"
   chmod 600 "${outfile}" 2>/dev/null
-  info "Firewall configuration saved to ${outfile}"
-  return 0
+  success "Firewall configuration saved to ${outfile}"
+  exit 0
+}
+delete_firewall_backups() {
+  local engine_backup_dir backups selected bak_num file_name
+  engine_backup_dir="/etc/one-click/rule-engine"
+  # ==== List Backup Files ====
+  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.{backup,backup} 2>/dev/null)
+  if [[ ${#backups[@]} -eq 0 ]]; then
+    warn "No firewall backups found in $engine_backup_dir"
+    return 1
+  fi
+  # ==== Show Backups ====
+  echo
+  echo -e "\e[34m┌───────────────────────────────────────────┐\e[0m"
+  echo -e "\e[34m│ $(tput setaf 203)Available Firewall Backups \e[34m               │\e[0m"
+  echo -e "\e[34m├─────┬─────────────────────────────────────┤\e[0m"
+  printf "\e[34m│ %-3s │ %-35s │\e[0m\n" "No." "File"
+  echo -e "\e[34m├─────┼─────────────────────────────────────┤\e[0m"
+  for i in "${!backups[@]}"; do
+    file_name="$(basename "${backups[$i]}")"
+    printf "\e[34m│ %-3s │ %-35s │\e[0m\n" "$((++i))" "$file_name"
+  done
+  echo -e "\e[34m└─────┴─────────────────────────────────────┘\e[0m"
+  echo
+  # ==== Select Backup ====
+  read -rp "${cyan}[USER]: ${reset}Enter the number of the backup you want to delete: " bak_num
+  if ! [[ "$bak_num" =~ ^[0-9]+$ ]] || (( bak_num < 1 || bak_num > ${#backups[@]} )); then
+    warn "Invalid selection."
+    return 1
+  fi
+  selected="${backups[$((bak_num-1))]}"
+  # ==== Confirm Deletion ====
+  read -rp "${cyan}[USER]: ${reset}Are you sure you want to permanently delete $(basename "$selected")? (y|n): " confirm
+  confirm="${confirm,,}"
+  if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
+    rm -f "$selected" && success "Deleted firewall backup: $(basename "$selected")" || warn "Failed to delete $selected"
+  else
+    warn "Deletion cancelled."
+  fi
 }
 restore_firewall() {
   local engine_backup_dir backups selected bak_num backend file_name
@@ -1459,7 +1497,7 @@ restore_firewall() {
     done
     echo -e "\e[34m└─────┴─────────────────────────────────────┘\e[0m"
     echo
-    read -rp "Enter the number of the backup you want to restore: " bak_num
+    read -rp "${cyan}[USER]: ${reset}Enter the number of the backup you want to restore: " bak_num
     if ! [[ "$bak_num" =~ ^[0-9]+$ ]] || (( bak_num < 1 || bak_num > ${#backups[@]} )); then
       warn "Invalid selection."
       return 1
@@ -1481,7 +1519,7 @@ restore_firewall() {
   esac
   # ==== Restore ====
   warn "Restoring firewall from $selected ..."
-  read -rp  "Please confirm you'd like to proceed: " fw_confirm
+  read -rp  "${cyan}[USER]: ${reset}Please confirm you'd like to proceed: " fw_confirm
   fw_confirm="${fw_confirm,,}"
   if [[ "$fw_confirm" == "y" || "$fw_confirm" == "yes" ]]; then
     case "$backend" in
@@ -1508,7 +1546,7 @@ restore_firewall() {
         ;;
     esac
     success "Firewall restored successfully from $(basename "$selected")"
-    return 0
+    exit 0
   fi  
 }
 parse_firewall_command() {
@@ -1529,14 +1567,19 @@ parse_firewall_command() {
   del_line=""
   rule_lower="${rule,,}"
   # ==== Detect Backup ====
-  if [[ "$rule_lower" =~ (backup|save|retain|copy|export|dump|snapshot)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy) ]]; then
+  if [[ "$rule_lower" =~ (backup|save|retain|copy|export|dump|snapshot)([[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy))? ]]; then
     backup_firewall
-    return 0
+    exit 0
   fi
   # ==== Detect Restore ====
-  if [[ "$rule_lower" =~ (restore|revive|recreate|regenerate|repair|import|reinstate)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy) ]]; then
+  if [[ "$rule_lower" =~ (restore|revive|recreate|regenerate|repair|import|reinstate)([[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy))? ]]; then
     restore_firewall
-    return 0
+    exit 0
+  fi
+  # ==== Detect Delete Backup ====
+  if [[ "$rule_lower" =~ (delete|remove|purge)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy) ]]; then
+    delete_firewall_backups
+    exit 0
   fi
   # ==== Detect Table ====
   if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
@@ -1560,11 +1603,6 @@ parse_firewall_command() {
   fi
   # ==== Detect Control ====
   if grep -Eqi "\b(list|show|open|display)\b.*\biptables\b" <<< "$rule_lower"; then
-    info "Listing $table table"
-    iptables -t "$table" -L -n -v
-    return 0
-  fi
-  if grep -Eqi "\b(open|show|list)\b.*\btable\b" <<< "$rule_lower"; then
     info "Listing $table table"
     iptables -t "$table" -L -n -v
     exit 0
@@ -1816,7 +1854,6 @@ parse_firewall_command() {
         port="$can_port"
     fi
   fi
-  
   # ==== Detect Port/Range ====
   if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
     port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
@@ -1838,7 +1875,7 @@ parse_firewall_command() {
     for sp in "${sensitive_ports[@]}"; do
       if [[ "$port" == "$sp" ]]; then
         warn "You are blocking sensitive port $sp. This may lock you out."
-        read -rp "Are you absolutely sure? (yes/no): " confirm
+        read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
         [[ "$confirm" != "yes" ]] && die "Aborted."
       fi
     done
@@ -1929,7 +1966,7 @@ log_browser_menu() {
     printf "║ %-46s ║\n" " [3]. Exit"
     echo "╚════════════════════════════════════════════════╝"
     tput sgr0
-    read -rp "Select option: " choice
+    read -rp "${cyan}[USER]: ${reset}Select option: " choice
     case "$choice" in
       1) browse_files   ;;
       2) browse_journal ;;
@@ -1945,7 +1982,7 @@ browse_files() {
     )
     [[ ${#logs[@]} -eq 0 ]] && {
         warn "No logs found."
-        read -rp "Press Enter to return..."
+        read -rp "${cyan}[USER]: ${reset}Press Enter to return..."
         return
   }
   list=()
@@ -1982,7 +2019,7 @@ browse_files() {
     line=$(echo "$selected" | tail -n1)
     file=$(echo "$line" | awk -F'\t' '{print $3}')
     if [[ "$key" == "ctrl-d" ]]; then
-      read -rp "Delete $(basename "$file")? [y/N]: " confirm
+      read -rp "${cyan}[USER]: ${reset}Delete $(basename "$file")? [y/N]: " confirm
       if [[ "$confirm" =~ ^[Yy]$ ]]; then
         sudo rm -f "$file"
         error "Deleted."
