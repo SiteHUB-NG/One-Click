@@ -1397,7 +1397,9 @@ check_firewall_available() {
     if ! command -v iptables >/dev/null 2>&1; then
       warn "$firewall_backend installed. Installing iptables compatibility layer..."
       install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
-      install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+	  if [[ "$pkg_mgr" == "dnf" ]]; then
+        install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+	  fi
       firewall_backend="iptables"
     fi
     return 0
@@ -1406,7 +1408,9 @@ check_firewall_available() {
     confirm="${confirm,,}"
     if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
       install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
-      install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+      if [[ "$pkg_mgr" == "dnf" ]]; then
+        install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+	  fi
       firewall_backend="iptables"
     else
       die "Firewall required." "No firewall installed."
@@ -1415,21 +1419,21 @@ check_firewall_available() {
 }
 backup_firewall() {
   local backend timestamp outfile engine_backup_dir
-  engine_backup_dir="/etc/one-click/rule-engine"
-  outfile="${engine_backup_dir}/iptables."
+  engine_backup_dir="/etc/one-click/rule-engine/"
   mkdir -p "$engine_backup_dir"
-  backend="$(detect_firewall_backend)"
+  backend="$firewall_backend"
   timestamp="$(date +%Y-%m-%d-%H%M%S)"
   case "$backend" in
-    nft)       ext="nft-$timestamp.backup"; nft list ruleset > "${outfile}${ext}" 2>/dev/null || return 1     ;;
-    iptables)  ext="iptables-$timestamp.backup";iptables-save > "${outfile}${ext}" 2>/dev/null || return 1    ;;
-    ufw)       ext="ufw-$timestamp.backup"; ufw status verbose > "${outfile}${ext}" 2>/dev/null || return 1   ;;
+    nft)       ext="nft-$timestamp.backup"; nft list ruleset > "${engine_backup_dir}${ext}" 2>/dev/null || return 1     ;;
+    iptables)  ext="iptables-$timestamp.backup";iptables-save > "${engine_backup_dir}${ext}" 2>/dev/null || return 1    ;;
+    ufw)       ext="ufw-$timestamp.backup"; ufw status verbose > "${engine_backup_dir}${ext}" 2>/dev/null || return 1   ;;
     firewalld) ext="firewalld-$timetamp.backup"; firewall-cmd --runtime-to-permanent >/dev/null 2>&1
-               firewall-cmd --permanent --list-all --zone=public > "${outfile}${ext}" 2>/dev/null || return 1 ;;
-    *)         die "Unsupported firewall backend."                                                            ;;
+               firewall-cmd --permanent --list-all --zone=public > "${engine_backup_dir}${ext}" 2>/dev/null || return 1 ;;
+    *)         die "Unsupported firewall backend."                                                                      ;;
   esac
-  chmod 600 "${outfile}${ext}" 2>/dev/null
-  info "Firewall configuration saved to ${outfile}${ext}"
+  outfile="${engine_backup_dir}${ext}"
+  chmod 600 "${outfile}" 2>/dev/null
+  info "Firewall configuration saved to ${outfile}"
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
