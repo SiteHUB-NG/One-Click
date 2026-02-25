@@ -1434,6 +1434,82 @@ backup_firewall() {
   outfile="${engine_backup_dir}${ext}"
   chmod 600 "${outfile}" 2>/dev/null
   info "Firewall configuration saved to ${outfile}"
+  return 0
+}
+restore_firewall() {
+  local engine_backup_dir backups selected bak_num backend file_name
+  engine_backup_dir="/etc/one-click/rule-engine"
+  # ==== List Backup Files ====
+  mapfile -t backups < <(ls -1 "$engine_backup_dir"/*.{backup,backup} 2>/dev/null)
+  if [[ ${#backups[@]} -eq 0 ]]; then
+    warn "No firewall backups found in $engine_backup_dir"
+    return 1
+  fi
+  # ==== Show Backups ====
+  if [[ ${#backups[@]} -gt 1 ]]; then
+    echo
+    echo -e "\e[34m┌───────────────────────────────────────────┐\e[0m"
+    echo -e "\e[34m│ $(tput setaf 203)Available Firewall Backups \e[34m               │\e[0m"
+    echo -e "\e[34m├─────┬─────────────────────────────────────┤\e[0m"
+    printf "\e[34m│ %-3s │ %-35s │\e[0m\n" "No." "File"
+    echo -e "\e[34m├─────┼─────────────────────────────────────┤\e[0m"
+    for i in "${!backups[@]}"; do
+      file_name="$(basename "${backups[$i]}")"
+      printf "\e[34m│ %-3s │ %-35s │\e[0m\n" "$((++i))" "$file_name"
+    done
+    echo -e "\e[34m└─────┴─────────────────────────────────────┘\e[0m"
+    echo
+    read -rp "Enter the number of the backup you want to restore: " bak_num
+    if ! [[ "$bak_num" =~ ^[0-9]+$ ]] || (( bak_num < 1 || bak_num > ${#backups[@]} )); then
+      warn "Invalid selection."
+      return 1
+    fi
+    selected="${backups[$((bak_num-1))]}"
+  else
+    selected="${backups[0]}"
+    info "One backup found: $(basename "$selected")"
+  fi
+  # ==== Determine Backend ====
+  backend="$firewall_backend" 
+  select=$(basename "$selected")
+  case "$select" in
+    nft-*)       backend="nft"       ;;
+    iptables-*)  backend="iptables"  ;;
+    ufw-*)       backend="ufw"       ;;
+    firewalld-*) backend="firewalld" ;;
+    *) die "Unknown backup type."    ;;
+  esac
+  # ==== Restore ====
+  warn "Restoring firewall from $selected ..."
+  read -rp  "Please confirm you'd like to proceed: " fw_confirm
+  fw_confirm="${fw_confirm,,}"
+  if [[ "$fw_confirm" == "y" || "$fw_confirm" == "yes" ]]; then
+    case "$backend" in
+      nft)
+        nft flush ruleset
+        nft -f "$selected" || return 1
+        ;;
+      iptables)
+        iptables-restore < "$selected" || return 1
+        ;;
+      ufw)
+        ufw disable >/dev/null 2>&1
+        while IFS= read -r rule; do
+          ufw $rule >/dev/null 2>&1
+        done < "$selected"
+        ufw enable >/dev/null 2>&1
+        ;;
+      firewalld)
+        firewall-cmd --permanent --load-config="$selected" || return 1
+        firewall-cmd --reload >/dev/null 2>&1
+        ;;
+      *)
+        die "Unsupported firewall backend."
+        ;;
+    esac
+    success "Firewall restored successfully from $(basename "$selected")"
+    return 0
+  fi  
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
@@ -1453,8 +1529,13 @@ parse_firewall_command() {
   del_line=""
   rule_lower="${rule,,}"
   # ==== Detect Backup ====
-  if [[ "$rule_lower" =~ (backup|save|retain)[[:space:]]+(firewall|config|configuration|file) ]]; then
+  if [[ "$rule_lower" =~ (backup|save|retain|copy|export|dump|snapshot)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy) ]]; then
     backup_firewall
+    return 0
+  fi
+  # ==== Detect Restore ====
+  if [[ "$rule_lower" =~ (restore|revive|recreate|regenerate|repair|import|reinstate)[[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy) ]]; then
+    restore_firewall
     return 0
   fi
   # ==== Detect Table ====
@@ -1488,7 +1569,7 @@ parse_firewall_command() {
     iptables -t "$table" -L -n -v
     exit 0
   fi
-    # ==== Detect Chain ====
+  # ==== Detect Chain ====
   case "$table" in
     filter)         chain="INPUT"      ;;
     nat|mangle|raw) chain="PREROUTING" ;;
@@ -1535,7 +1616,7 @@ parse_firewall_command() {
     [[ "$action" == "ACCEPT" ]] && mode="-I"
     [[ "$action" == "DELETE" ]] && mode="-D"
   fi
-  # ==== Special ICMP enable/disable handling ====
+  # ==== ICMP enable/disable handling ====
   if grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
     if [[ "$ip_version" == "ipv6" ]]; then
       proto="icmpv6"
