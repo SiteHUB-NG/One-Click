@@ -200,7 +200,7 @@ collect_sysinfo() {
   kernel=$(uname -r)
   ram=$(awk '/Mem/{print $2}' <(free -h))B
   swap=$(awk '/Swap/{print $2}' <(free -h))B
-  disk=($(awk -v blue="$blue" -v yellow=$(tput setaf 11) -v reset="$reset" 'NR != 1 && $NF !~ /dev|run|tmp/{sub("/.*/","",$1);print yellow $1 blue " - " $2"iB"}' <(df -h) | column -t))
+  disk=($(awk -v blue="$blue" -v yellow=$(tput setaf 11) -v reset="$reset" 'NR != 1 && $1 ~ /vd|sd|nvme|xvd|mmcblk/{sub("/.*/","",$1);print yellow $1 blue " - " $2"iB#"}' <(df -h) | column -t))
   HOSTNAME="$(hostname)"
 }
 _log_write() { printf "[%s] %s\n" "${yellow}[${reset}$(date '+%F %T')${yellow}]${reset}" "$*" >> "$log_file"; }
@@ -936,17 +936,21 @@ fio_disk_benchmark() {
   rm -f "$fio_file"
 }
 iperf_locs=( \
-  "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
-  "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
-  "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Leaseweb" "Singapore, SG (10G)" "IPv4|IPv6" \
+  "1500.mtu.he.net" "5201-5205" "HE Net" "San Jose, CA, US (10G)" "IPv4|IPv6" \
   "la.speedtest.clouvider.net" "5200-5209" "Clouvider" "Los Angeles, CA, US (10G)" "IPv4|IPv6" \
-  "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
   "fremont.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Fremont, CA, US (1G)" "IPv4|IPv6" \
+  "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
   "slc.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "SLC, UT, US (10G)" "IPv4|IPv6" \
+  "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
+  "speedtest.milkywan.fr" "9200-9240" "Milkywan" "Île-de-France, FR (40G)" "IPv4|IPv6" \
+  "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
+  "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
   "lagos.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Ikeja, Lagos, NG (2G)" "IPv4|IPv6" \
+  "iperf.angolacables.co.ao" "9200-9240" "Angola Cable" "Luanda, Angola, AO (10G)" "IPv4|IPv6" \
+  "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Leaseweb" "Singapore, SG (10G)" "IPv4|IPv6" \
+  "154.31.113.6" "5201-5210" "DMIT" "Shinagawa, TY, JP (10G)" "IPv4|IPv6" \
   "speedtest.uztelecom.uz" "5200-5209" "Uztelecom" "Tashkent, UZ (10G)" "IPv4|IPv6" \
   "speedtest.sao1.edgoo.net" "9204-9240" "Edgoo" "Sao Paulo, BR (1G)" "IPv4|IPv6" \
-  "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
 )
 iperf_locs_num=$((${#iperf_locs[@]} / 5))
 iperf_cmd=$(command -v iperf3 || echo "iperf3") 
@@ -989,7 +993,7 @@ iperf_table() {
     send=$(iperf_test "$host" "$ports" "$flags" "send")
     recv=$(iperf_test "$host" "$ports" "$flags" "recv")
     ping_val=$(awk '/time=/{gsub(/.*time=/,""); print}' <(ping -c1 "$host" 2>/dev/null))
-    [[ -z $ping_val ]] && ping_val="-- ms"
+    [[ -z $ping_val ]] && ping_val="-- "
     print_row() {
       printf "\r${blue}%-15s ${test_clr}%-30s ${blue}%-20s %-20s %-15s${reset}\n" \
         "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
@@ -1604,7 +1608,7 @@ parse_firewall_command() {
     table="filter"
   fi
   # ==== Detect Control ====
-  if grep -Eqi "\b(list|show|open|display)\b.*\biptables\b" <<< "$rule_lower"; then
+  if grep -Eqi "\b(list|show|open|display)\b(.*\b(iptables|firewall|rules|ruleset\b)?" <<< "$rule_lower"; then
     info "Listing $table table"
     iptables -t "$table" -L -n -v
     exit 0
@@ -1715,9 +1719,9 @@ parse_firewall_command() {
   # ==== Detect Destination IP ====
   if [[ "$rule_lower" =~ (to|dst|destination)[[:space:]]+(address[[:space:]]+)?([0-9./]+) ]]; then
     dst_ip="${BASH_REMATCH[3]}"
-    if valid_ip "$src_ip"; then
+    if valid_ip "$dst_ip"; then
       ip_version="ipv4"
-    elif valid_ipv6 "$src_ip"; then
+    elif valid_ipv6 "$dst_ip"; then
       ip_version="ipv6"
       fw_bin="ip6tables"
     else
@@ -1861,14 +1865,12 @@ parse_firewall_command() {
     port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
     proto=${proto:-tcp}
     valid_range "$port_range" || die "Invalid port range"
-  #elif sed -En '/[0-9]+[:-][0-9]+/!{/[0-9]{1,5}/}' <<< "$rule_lower"; then
   elif [[ "$rule_lower" =~ port[[:space:]]*([0-9]{1,5}) ]]; then
     port="${BASH_REMATCH[1]}"
     valid_port "$port" || die "Invalid port"
   fi
   if grep -Eq "\bmultiport\b" <<< "$rule_lower"; then
     proto=${proto:-tcp}
-    # parse ports from the rule text
     if [[ "$rule_lower" =~ ([0-9,]+) ]]; then
       ports="${BASH_REMATCH[1]}"
     fi
@@ -1878,7 +1880,7 @@ parse_firewall_command() {
       if [[ "$port" == "$sp" ]]; then
         warn "You are blocking sensitive port $sp. This may lock you out."
         read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
-        [[ "$confirm" != "yes" ]] && die "Aborted."
+        [[ "$confirm" != "yes" || "$confirm" != "y" ]] && die "Aborted."
       fi
     done
   fi
@@ -1901,18 +1903,18 @@ parse_firewall_command() {
     [[ -n "$ports" ]] && fw_cmd+=(-m multiport --dports "$ports")
     # Only add ports for tcp/udp
     if [[ "$proto" == "tcp" || "$proto" == "udp" ]]; then
-        if [[ -n "$port_range" ]]; then
-          fw_cmd+=(--dport "$port_range")
-        elif [[ -n "$port" ]]; then
-          fw_cmd+=(--dport "$port")
-        fi
+      if [[ -n "$port_range" ]]; then
+        fw_cmd+=(--dport "$port_range")
+      elif [[ -n "$port" ]]; then
+        fw_cmd+=(--dport "$port")          
+	  fi
     fi
     # ==== Allow Ports For NAT ====
     if [[ "$action" == "DNAT" || "$action" == "SNAT" ]]; then
       [[ -n "$dst_ip" ]] && fw_cmd+=(-j "$action" --to-destination "$dst_ip")
       [[ -n "$src_ip" ]] && fw_cmd+=(-j "$action" --to-source "$src_ip")
     fi
-    # ==== Generic P22 Coverage
+    # ==== Generic P22 Coverage ====
     if [[ "$port" == 22 && "$action" == "ACCEPT" ]]; then
       fw_cmd+=(-m state --state NEW,ESTABLISHED -m recent --name SSH --set)
     fi
