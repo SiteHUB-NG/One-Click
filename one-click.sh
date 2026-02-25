@@ -312,6 +312,16 @@ load_ocb() {
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
+load_rule_engine() {
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/rule_engine.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/rule_engine.sh"
+  local cache_dir="/var/cache/one-click"
+  local cache_file="${cache_dir}/rule_engine.sh"
+  collect_sysinfo
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
+}
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 # ==== System Info Dashboard - Skip TMUX and root checks ====
 if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "system-info" || "${1:-}" == "system" ]]; then
@@ -331,6 +341,15 @@ done
 if [[ "$1" == "--version" ]]; then
   echo "$version"
   exit 0
+fi
+# ==== Check root ====
+if [ "$EUID" -ne 0 ]; then
+  die "This script must be run as root."
+fi
+# ==== Firewall Rule Engine - Skip TMUX ====
+if [[ "${1:-}" == "rule-engine" || "${1:-}" == "engine" || "${1:-}" == "firewall" ]]; then
+  load_rule_engine
+  rule_engine "${2:-}"
 fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
@@ -352,10 +371,6 @@ elif [[ "${flag:-}" == "-y" ]] && (( ${non_interactive:-} )); then              
   exit 0                                                                                    ##
 fi                                                                                          ##
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
-# ==== Check root ====
-if [ "$EUID" -ne 0 ]; then
-  die "This script must be run as root."
-fi
 # ==== Module Tab Complete ====
 if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
   if [[ ! -f "$tab_complete" ]]; then
@@ -368,16 +383,19 @@ _one_click() {
     backup
     bench
     cron
+    engine
     migrator
     net-repair
     reinstall
     recovery
+    rule-engine
     system
     system-info
     logs
     log-browser
     help
     uninstall
+    --version
   " -- "$cur") )
 }
 complete -F _one_click one-click
@@ -391,19 +409,22 @@ _one_click() {
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
   COMPREPLY=( $(compgen -W "
-    backup
+        backup
     bench
     cron
+    engine
     migrator
     net-repair
     reinstall
     recovery
+    rule-engine
     system
     system-info
     logs
     log-browser
     help
     uninstall
+    --version
   " -- "$cur") )
 }
 complete -F _one_click one-click
@@ -415,10 +436,12 @@ map_one_click() {
     case "$i" in
       backup)      echo "--backup"    ;;
       bench)       echo "--bench"     ;;
+      engine)      echo "$i"          ;;
       migrator)    echo "--migrator"  ;;
       net-repair)  echo "--repair"    ;;
       reinstall)   echo "--reinstall" ;;
       recovery)    echo "--recovery"  ;;
+      rule-engine) echo "$i"          ;;
       cron)        echo "--cron"      ;;
       logs)        echo "--log"       ;;
       log-browser) echo "--log"       ;;
@@ -509,6 +532,10 @@ if [[ $# -gt 0 ]]; then
       load_pv_drain
       shift
       ;;
+    -e|--engine)
+      load_rule_engine
+      rule_engine
+      ;;
     -i|--reinstall)
       load_reinstall
       os_reinstall_run
@@ -574,9 +601,11 @@ if [[ $# -gt 0 ]]; then
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
         "  bench                   Benchmarking tool automates the execution of tests" \
+        "  engine                  Converts human-readable commands into iptables commands" \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  repair                  Repair network (Includes snapshots and backup of network files)" \
+        "  rule-engine             Converts human-readable commands into iptables commands" \
         "  sys-info                System Information" \
         "  system                  System Information" \
         "  logs                    System Log File Browswer" \
