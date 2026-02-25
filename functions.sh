@@ -1350,6 +1350,439 @@ password_strength() {
   return 0
 }
 # ==== End Of Secure Password ==== #
+# ==== RuleEngine ====
+detect_firewall_backend() {
+  if command -v iptables >/dev/null 2>&1; then
+    firewall_backend="iptables"
+  elif command -v nft >/dev/null 2>&1; then
+    firewall_backend="nft"
+  elif command -v ufw > /dev/null 2>&1; then
+    firewall_backend="ufw"
+  elif command -v firewalld &> /dev/null; then
+    firewall_backend="firewalld"
+  else
+    firewall_backend="none"
+  fi
+  if command -v ip6tables >/dev/null 2>&1; then
+    ipv6_available=1
+  else
+    ipv6_available=0
+  fi
+}
+valid_ipv6() {
+  [[ $1 =~ ^([0-9a-fA-F:]+:+)+[0-9a-fA-F]+(/[0-9]{1,3})?$ ]]
+}
+valid_ip() {
+  [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]
+}
+valid_port() {
+  [[ $1 =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+valid_range() {
+  local start end
+  if [[ $1 =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]]; then
+    start="${BASH_REMATCH[1]}"
+    end="${BASH_REMATCH[2]}"
+    valid_port "$start" || return 1
+    valid_port "$end"   || return 1
+    (( start <= end )) || return 1
+    return 0
+  fi
+  return 1
+}
+check_firewall_available() {
+  if [[ "$firewall_backend" == "none" ]]; then
+    warn "No firewall is installed on this system."
+    read -rp "Would you like to install iptables now? (y/n): " confirm
+    confirm="${confirm,,}"
+    if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
+      install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
+      install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+    elif [[ "$firewall_backend" != "iptables" || "$firewall_backend" != "nft" ]]; then
+      die "Your firewall is $firewall_backend." "$firewall_backend is not currently supported"
+    fi
+  fi
+}
+parse_firewall_command() {
+  local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
+  fw_bin="iptables"
+  ip_version="ipv4"
+  rule="$1"
+  action="" 
+  port=""
+  ports=""
+  port_range="" 
+  src_ip="" 
+  dst_ip="" 
+  proto="tcp" 
+  chain="" 
+  mode="-I" 
+  table="filter" 
+  del_line=""
+  rule_lower="${rule,,}"
+  # ==== ICMP Enable/Disable Handling ====
+  if grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
+    proto="icmp"
+    chain=${chain:-INPUT}
+    if [[ -z "$action" ]]; then
+      if grep -Eq "\benable\b" <<< "$rule_lower"; then
+        action="ACCEPT"
+        mode="-I"
+      elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
+        action="DROP"
+        mode="-A"
+      fi
+    fi
+    # ==== Build Command ====
+    fw_cmd=(iptables -t "$table" "$mode" "$chain" -p icmp -j "$action")
+    generated_cmds+=("${fw_cmd[*]}")
+    return
+  fi
+  # ==== Detect Table ====
+  if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
+    table="nat"
+  elif grep -Eqi "\bmangle\b" <<< "$rule_lower"; then
+    table="mangle"
+  elif grep -Eqi "\braw\b" <<< "$rule_lower"; then
+    table="raw"
+  elif grep -Eqi "\bsecurity\b" <<< "$rule_lower"; then
+    table="security"
+  elif grep -Eq "\blog\b" <<< "$rule_lower"; then
+    action="LOG"
+  elif grep -Eq "\bmasquerade\b" <<< "$rule_lower"; then
+    action="MASQUERADE"
+  elif grep -Eq "\bsnat\b" <<< "$rule_lower"; then
+    action="SNAT"
+  elif grep -Eq "\bdnat\b" <<< "$rule_lower"; then
+    action="DNAT"
+  else
+    table="filter"
+  fi
+  # ==== Detect Control ====
+  if grep -Eqi "\b(list|show|open|display)\b.*\biptables\b" <<< "$rule_lower"; then
+    info "Listing $table table"
+    iptables -t "$table" -L -n -v
+    return 0
+  fi
+  if grep -Eqi "\b(open|show|list)\b.*\btable\b" <<< "$rule_lower"; then
+    info "Listing $table table"
+    iptables -t "$table" -L -n -v
+    exit 0
+  fi
+    # ==== Detect Chain ====
+  case "$table" in
+    filter)         chain="INPUT"      ;;
+    nat|mangle|raw) chain="PREROUTING" ;;
+    security)       chain="INPUT"      ;;
+  esac
+  if grep -Eqi "\boutput\b" <<< "$rule_lower"; then
+    chain="OUTPUT"
+  fi
+  if grep -Eqi "\bforward\b" <<< "$rule_lower"; then
+    chain="FORWARD"
+  fi
+  if grep -Eqi "\bprerouting\b" <<< "$rule_lower"; then
+    chain="PREROUTING"
+  fi
+  if grep -Eqi "\bpostrouting\b" <<< "$rule_lower"; then
+    chain="POSTROUTING"
+  fi
+  # ==== Detect Action ====
+  if grep -Eq "\b(drop|deny|block|stop|close|exclude)\b" <<< "$rule_lower"; then
+    action="DROP"; mode="-A"
+  elif grep -Eq "\b(reject|decline|bounce)\b" <<< "$rule_lower"; then
+    action="REJECT"
+  elif grep -Eq "\b(open|allow|permit|accept|add|include)\b" <<< "$rule_lower"; then
+    action="ACCEPT"; mode="-I"
+  elif grep -Eq "\b(masquerade|mask|hide)\b" <<< "$rule_lower"; then
+    action="MASQUERADE"
+  elif grep -Eq "\b(log)\b" <<< "$rule_lower"; then
+    action="LOG"
+  elif grep -Eq "\b(snat)\b" <<< "$rule_lower"; then
+    action="SNAT"
+  elif grep -Eq "\b(dnat)\b" <<< "$rule_lower"; then
+    action="DNAT"
+  elif grep -Eq "\b(mark)\b" <<< "$rule_lower"; then
+    action="MARK"
+  elif grep -Eq "\b(redirect)\b" <<< "$rule_lower"; then
+    action="REDIRECT"
+  elif grep -Eq "\b(tcpmss)\b" <<< "$rule_lower"; then
+    action="TCPMSS"
+  elif grep -Eq "\b(delete|remove)\b" <<< "$rule_lower"; then
+    action="DELETE"; mode="-D"
+  elif [[ -n "$last_action" ]]; then
+    action="$last_action"
+    [[ "$action" == "DROP" ]] && mode="-A"
+    [[ "$action" == "ACCEPT" ]] && mode="-I"
+    [[ "$action" == "DELETE" ]] && mode="-D"
+  fi
+  # ==== Special ICMP enable/disable handling ====
+  if grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
+    if [[ "$ip_version" == "ipv6" ]]; then
+      proto="icmpv6"
+    else
+      proto="icmp"
+	fi
+    chain=${chain:-INPUT}
+    if grep -Eq "\benable\b" <<< "$rule_lower"; then
+      action="ACCEPT"
+      mode="-I"
+    elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
+      action="DROP"
+      mode="-A"
+    fi
+  fi
+  # ==== Detect Protocol ====
+  #proto="tcp"
+  if grep -Eqi "\budp\b" <<< "$rule_lower"; then
+    proto="udp"
+  elif grep -Eqi "\btcp\b" <<< "$rule_lower"; then
+    proto="tcp"
+  elif grep -Eqi "\bicmp\b" <<< "$rule_lower" || grep -Eqi "\becho\b" <<< "$rule_lower"; then
+    proto="icmp"
+  elif grep -Eq "\bmultiport\b" <<< "$rule_lower"; then
+    proto="tcp"
+  fi
+  # ==== Detect connection state ====
+  conn_state=""
+  if grep -Eqi "\bestablished\b" <<< "$rule_lower"; then
+    conn_state="ESTABLISHED"
+    proto="tcp"
+  elif grep -Eqi "\bnew\b" <<< "$rule_lower"; then
+    conn_state="NEW"
+    proto="tcp"
+  fi
+  if grep -Eqi "\brelated\b" <<< "$rule_lower"; then
+    conn_state="RELATED"
+  elif grep -Eqi "\binvalid\b" <<< "$rule_lower"; then
+    conn_state="INVALID"
+  fi
+  # ==== Detect Source IP ====
+  if [[ "$rule_lower" =~ (from|src|source)[[:space:]]+(address[[:space:]]+)?([0-9a-fA-F:./]+) ]]; then
+    src_ip="${BASH_REMATCH[3]}"
+    if valid_ip "$src_ip"; then
+      ip_version="ipv4"
+    elif valid_ipv6 "$src_ip"; then
+      ip_version="ipv6"
+      fw_bin="ip6tables"
+    else
+      die "Invalid source IP"
+    fi
+  fi
+  if [[ "$ip_version" == "ipv6" && "$proto" == "icmp" ]]; then
+    proto="icmpv6"
+  fi
+  # ==== Detect Destination IP ====
+  if [[ "$rule_lower" =~ (to|dst|destination)[[:space:]]+(address[[:space:]]+)?([0-9./]+) ]]; then
+    dst_ip="${BASH_REMATCH[3]}"
+    if valid_ip "$src_ip"; then
+      ip_version="ipv4"
+    elif valid_ipv6 "$src_ip"; then
+      ip_version="ipv6"
+      fw_bin="ip6tables"
+    else
+      die "Invalid destination IP"
+    fi
+  fi
+  # ==== Detect Delete Line ====
+  if [[ "$mode" == "-D" ]]; then
+    if [[ "$rule_lower" =~ (line|number)[^0-9]*([0-9]+) ]]; then
+      del_line="${BASH_REMATCH[2]}"
+    else
+      die "Delete requires line number."
+    fi
+  fi
+  # ==== Service Name Mapping ====
+  declare -A service_ports=(
+    [tcpmux]=1
+    [echo]=7
+    [discard]=9
+    [systat]=11
+    [daytime]=13
+    [qotd]=17
+    [chargen]=19
+    [ftp-data]=20
+    [ftp]=21
+    [ssh]=22
+    [telnet]=23
+    [smtp]=25
+    [time]=37
+    [whois]=43
+    [tacacs]=49
+    [dns]=53
+    [dhcp-server]=67
+    [dhcp-client]=68
+    [tftp]=69
+    [gopher]=70
+    [finger]=79
+    [http]=80
+    [kerberos]=88
+    [pop3]=110
+    [sunrpc]=111
+    [ident]=113
+    [nntp]=119
+    [ntp]=123
+    [imap]=143
+    [snmp]=161
+    [snmptrap]=162
+    [bgp]=179
+    [irc]=194
+    [ldap]=389
+    [https]=443
+    [microsoft-ds]=445
+    [smtps]=465
+    [syslog]=514
+    [ldaps]=636
+    [ftps-data]=989
+    [ftps]=990
+    [imaps]=993
+    [pop3s]=995
+    [rsync]=873
+    [mysql]=3306
+    [postgresql]=5432
+    [rdp]=3389
+    [vnc]=5900
+    [redis]=6379
+    [mongodb]=27017
+    [sip]=5060
+    [sips]=5061
+    [pptp]=1723
+    [l2tp]=1701
+    [ipsec-isakmp]=500
+    [openvpn]=1194
+    [docker]=2375
+    [docker-tls]=2376
+    [kubernetes-api]=6443
+    [etcd]=2379
+    [grafana]=3000
+    [prometheus]=9090
+    [elasticsearch]=9200
+    [kibana]=5601
+    [zabbix-agent]=10050
+    [zabbix-server]=10051
+    [jenkins]=8080
+    [tomcat]=8080
+    [http-alt]=8080
+    [https-alt]=8443
+    [webmin]=10000
+    [cockpit]=9090
+    [cassandra]=9042
+    [memcached]=11211
+    [rabbitmq]=5672
+    [amqp]=5672
+    [mqtt]=1883
+    [mqtts]=8883
+    [git]=9418
+    [svn]=3690
+    [teamspeak]=9987
+    [minecraft]=25565
+    [wireguard]=51820
+    [plex]=32400
+    [nfs]=2049
+    [samba]=137
+    [samba-nbt]=138
+    [samba-ssn]=139
+    [cups]=631
+    [tor]=9001
+    [tor-socks]=9050
+    [rdp-alt]=3390
+    [oracle]=1521
+    [ms-sql]=1433
+    [ms-sql-browser]=1434
+    [radius]=1812
+    [radius-acct]=1813
+    [freeipa-ldap]=7389
+    [freeipa-ldaps]=7636
+    [xmpp-client]=5222
+    [xmpp-server]=5269
+    [asterisk]=5038
+    [iscsi]=3260
+    [glusterfs]=24007
+    [vault]=8200
+    [consul]=8500
+  )
+  for service in "${!service_ports[@]}"; do
+    if grep -Eq "\b$service\b" <<< "$rule_lower"; then
+      port="${service_ports[$service]}"
+      if [[ -z "$proto" ]]; then
+        proto="tcp"
+      fi
+      break
+    fi
+  done
+  if [[ -z "$port" && "$rule_lower" =~ ([0-9]{1,5}) ]]; then
+    can_port="${BASH_REMATCH[1]}"
+    if valid_port "$can_port"; then
+        port="$can_port"
+    fi
+  fi
+  
+  # ==== Detect Port/Range ====
+  if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
+    port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
+    proto=${proto:-tcp}
+    valid_range "$port_range" || die "Invalid port range"
+  #elif sed -En '/[0-9]+[:-][0-9]+/!{/[0-9]{1,5}/}' <<< "$rule_lower"; then
+  elif [[ "$rule_lower" =~ port[[:space:]]*([0-9]{1,5}) ]]; then
+    port="${BASH_REMATCH[1]}"
+    valid_port "$port" || die "Invalid port"
+  fi
+  if grep -Eq "\bmultiport\b" <<< "$rule_lower"; then
+    proto=${proto:-tcp}
+    # parse ports from the rule text
+    if [[ "$rule_lower" =~ ([0-9,]+) ]]; then
+      ports="${BASH_REMATCH[1]}"
+    fi
+  fi
+  if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
+    for sp in "${sensitive_ports[@]}"; do
+      if [[ "$port" == "$sp" ]]; then
+        warn "You are blocking sensitive port $sp. This may lock you out."
+        read -rp "Are you absolutely sure? (yes/no): " confirm
+        [[ "$confirm" != "yes" ]] && die "Aborted."
+      fi
+    done
+  fi
+  for sensitive in "${sensitive_ports[@]}"; do
+    if [[ "$port" == "$sensitive" ]]; then
+      warn "Port $port is considered sensitive." 
+    fi
+  done
+  if [[ "$ip_version" == "ipv6" && "$ipv6_available" -ne 1 ]]; then
+    die "ip6tables not available on this system."
+  fi
+  # ==== build command ====
+  if [[ "$mode" == "-D" ]]; then
+    fw_cmd=("$fw_bin" -t "$table" -D "$chain" "$del_line")
+  else
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain")
+    [[ -n "$proto" ]] && fw_cmd+=(-p "$proto")
+    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
+    [[ -n "$ports" ]] && fw_cmd+=(-m multiport --dports "$ports")
+    # Only add ports for tcp/udp
+    if [[ "$proto" == "tcp" || "$proto" == "udp" ]]; then
+        if [[ -n "$port_range" ]]; then
+          fw_cmd+=(--dport "$port_range")
+        elif [[ -n "$port" ]]; then
+          fw_cmd+=(--dport "$port")
+        fi
+    fi
+    # ==== Allow Ports For NAT ====
+    if [[ "$action" == "DNAT" || "$action" == "SNAT" ]]; then
+      [[ -n "$dst_ip" ]] && fw_cmd+=(-j "$action" --to-destination "$dst_ip")
+      [[ -n "$src_ip" ]] && fw_cmd+=(-j "$action" --to-source "$src_ip")
+    fi
+    # ==== Generic P22 Coverage
+    if [[ "$port" == 22 && "$action" == "ACCEPT" ]]; then
+      fw_cmd+=(-m state --state NEW,ESTABLISHED -m recent --name SSH --set)
+    fi
+    [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
+    [[ "$action" != "DELETE" && -n "$action" ]] && fw_cmd+=(-j "$action")
+  fi
+  generated_cmds+=("${fw_cmd[*]}")
+}
+# ==== Enf Of Rule Engine ==== #
 # ==== Display Table For Boot Recovery ====
 print_blue_table() {
   local dir="$1"
