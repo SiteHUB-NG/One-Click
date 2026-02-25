@@ -108,6 +108,96 @@ Uninstall toolkit:
 .B one-click uninstall
 .RE
 
+.SH NAME
+One-Click-RuleEngine \- Human-readable firewall rule parser and executor for Linux
+
+.SH SYNOPSIS
+.B One-Click RuleEngine
+[\fI--dry-run\fR] "<human-readable rule>"
+
+.SH DESCRIPTION
+.B One-Click RuleEngine
+is a sub-tool of the
+.B One-Click
+suite designed to simplify firewall management on Linux systems.
+
+.PP
+It converts human-readable commands into fully-formed
+.BR iptables (8)
+or
+.BR ip6tables (8)
+rules, supporting both IPv4 and IPv6. 
+It is aimed to extend capability to work with multiple firewall backends including:
+.B nftables,
+.B ufw, and
+.B firewalld
+
+.PP
+Key features include:
+
+.IP \(bu 2
+Automatic detection of the system firewall backend
+
+.IP \(bu 2
+Parsing of natural language rules for actions such as open, allow, accept, drop, reject, block, or delete
+
+.IP \(bu 2
+Support for TCP, UDP, ICMP, and multiport specifications
+
+.IP \(bu 2
+Source and destination IP filtering, including CIDR ranges
+
+.IP \(bu 2
+Port and port-range detection, including service name mapping
+
+.IP \(bu 2
+Connection state filtering (NEW, ESTABLISHED)
+
+.IP \(bu 2
+Interactive preview with confirmation before applying rules
+
+.IP \(bu 2
+Dry-run mode for safe testing without modifying system firewall
+
+.IP \(bu 2
+Warnings for sensitive ports (e.g., 22, 80, 443, 3389) to prevent accidental lockout
+
+.SH COMMANDS
+.B one-click rule-engine
+accepts a single human-readable rule as an argument:
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+"open <service|port>" | Allow traffic to a specific service or port
+"close <port|range>" | Block traffic to a port or port range
+"delete <line number>" | Remove a rule from the current chain
+"list table <table>" | Display rules in a specific table (filter, nat, mangle, etc.)
+"enable icmp" | Accept ICMP traffic
+"disable icmp" | Drop ICMP traffic
+.TE
+
+.PP
+Rules can be chained using "and" or commas, e.g.:
+.RS
+.B one-click rule-engine "open ssh and allow http"
+.B one-click engine 'drop https and close ftp and enable icmp'
+.RE
+
+.SH OPTIONS
+.IP \(bu 2
+\fB--dry-run\fR
+Parse the rule and display the generated firewall commands without applying them. Useful for verification and testing.
+
+.SH EXAMPLES
+Allow SSH and HTTP traffic:
+.RS
+.B one-click rule-engine "open ssh and open http"
+.B one-click firewall 'Allow SSH and HTTP traffic'
+.RE
+
 .SH REINSTALL
 
 The
