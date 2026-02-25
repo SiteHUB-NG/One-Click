@@ -1391,17 +1391,45 @@ valid_range() {
   return 1
 }
 check_firewall_available() {
-  if [[ "$firewall_backend" == "none" ]]; then
-    warn "No firewall is installed on this system."
-    read -rp "Would you like to install iptables now? (y/n): " confirm
+  if [[ "$firewall_backend" == "iptables" ]]; then
+    return 0
+  elif [[ "$firewall_backend" == "nft" ]]; then
+    if ! command -v iptables >/dev/null 2>&1; then
+      warn "$firewall_backend installed. Installing iptables compatibility layer..."
+      install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
+      install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+      firewall_backend="iptables"
+    fi
+    return 0
+  else
+    read -rp "No firewall installed. Install iptables? (y|n): " confirm
     confirm="${confirm,,}"
     if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
       install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
       install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
-    elif [[ "$firewall_backend" != "iptables" || "$firewall_backend" != "nft" ]]; then
-      die "Your firewall is $firewall_backend." "$firewall_backend is not currently supported"
+      firewall_backend="iptables"
+    else
+      die "Firewall required." "No firewall installed."
     fi
   fi
+}
+backup_firewall() {
+  local backend timestamp outfile engine_backup_dir
+  engine_backup_dir="/etc/one-click/rule-engine"
+  outfile="${engine_backup_dir}/iptables."
+  mkdir -p "$engine_backup_dir"
+  backend="$(detect_firewall_backend)"
+  timestamp="$(date +%Y-%m-%d-%H%M%S)"
+  case "$backend" in
+    nft)       ext="nft-$timestamp.backup"; nft list ruleset > "${outfile}${ext}" 2>/dev/null || return 1     ;;
+    iptables)  ext="iptables-$timestamp.backup";iptables-save > "${outfile}${ext}" 2>/dev/null || return 1    ;;
+    ufw)       ext="ufw-$timestamp.backup"; ufw status verbose > "${outfile}${ext}" 2>/dev/null || return 1   ;;
+    firewalld) ext="firewalld-$timetamp.backup"; firewall-cmd --runtime-to-permanent >/dev/null 2>&1
+               firewall-cmd --permanent --list-all --zone=public > "${outfile}${ext}" 2>/dev/null || return 1 ;;
+    *)         die "Unsupported firewall backend."                                                            ;;
+  esac
+  chmod 600 "${outfile}${ext}" 2>/dev/null
+  info "Firewall configuration saved to ${outfile}${ext}"
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
@@ -1420,23 +1448,10 @@ parse_firewall_command() {
   table="filter" 
   del_line=""
   rule_lower="${rule,,}"
-  # ==== ICMP Enable/Disable Handling ====
-  if grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
-    proto="icmp"
-    chain=${chain:-INPUT}
-    if [[ -z "$action" ]]; then
-      if grep -Eq "\benable\b" <<< "$rule_lower"; then
-        action="ACCEPT"
-        mode="-I"
-      elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
-        action="DROP"
-        mode="-A"
-      fi
-    fi
-    # ==== Build Command ====
-    fw_cmd=(iptables -t "$table" "$mode" "$chain" -p icmp -j "$action")
-    generated_cmds+=("${fw_cmd[*]}")
-    return
+  # ==== Detect Backup ====
+  if [[ "$rule_lower" =~ (backup|save|retain)[[:space:]]+(firewall|config|configuration|file) ]]; then
+    backup_firewall
+    return 0
   fi
   # ==== Detect Table ====
   if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
