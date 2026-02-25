@@ -35,9 +35,11 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  reinstall               OS reinstallation" \
     "  backup                  Backup with rsync + rclone" \
     "  bench                   Benchmarking tool automates the execution of tests" \
+    "  engine                  Converts human-readable commands into iptables commands" \
     "  migrator                System migration tool. Rsync + DD options." \
     "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
     "  repair                  Repair network (Includes snapshots and backup of network files)" \
+    "  rule-engine             Converts human-readable commands into iptables commands" \
     "  sys-info                System Information" \
     "  system                  System Information" \
     "  logs                    System Log File Browswer" \
@@ -72,7 +74,7 @@ recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 updated="Feb 2026"
-version="1.0.0"
+version="1.1.0"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
@@ -572,11 +574,11 @@ if [[ $# -gt 0 ]]; then
         fi
       fi
       ;;
-    # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ==== ##
-    -x) backup_all_configs ;; ### ### ###  ### #   # ### # #               ##
-    -y) recovery_backup    ;; # # # # ###  #   #   # #   ##                ##
-    -z) backup             ;; ### # # ###  ### ### # ### # #               ##
-    # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ==== ##
+    # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ##
+    -x) backup_all_configs ;; ### ### ###  ### #   # ### # #          ##
+    -y) recovery_backup    ;; # # # # ###  #   #   # #   ##           ##
+    -z) backup             ;; ### # # ###  ### ### # ### # #          ##
+    # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ##
     *)
       if [[ "$1" == "setup" ]]; then
         printf '%s\n' \
@@ -616,7 +618,7 @@ if [[ $# -gt 0 ]]; then
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
-        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
+        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" 
       exit 1
       ;;
   esac
