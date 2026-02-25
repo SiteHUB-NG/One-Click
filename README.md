@@ -9,6 +9,8 @@ It provides structured, repeatable workflows for:
 - Boot recovery
 - Network repair
 - Log inspection
+- Firewall Wrapper
+- One-Click Benchmark
 
 Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
 
@@ -72,6 +74,7 @@ one-click [COMMAND]
 | bench        | One-Click Bench (OCB) performance benchmark suite |
 | sys-info     | Display system information |
 | system       | Display system information (alias of sys-info) |
+| rule-engine  | Human-Readable Firewall Management |
 | logs         | Interactive system log browser |
 | log-browser  | Interactive system log browser (alias of logs) |
 | cron         | Configure and manage cron jobs |
@@ -121,6 +124,14 @@ one-click cron
 **Remove One-Click completely:**
 ```
 one-click uninstall
+```
+**Run Performance Benchmark**
+```
+one-click-bench
+```
+**Configure iptables with words**
+```
+one-click engine 'open ssh and drop http,https and mask in nat table'
 ```
 
 # Core Capabilities
@@ -174,6 +185,55 @@ Designed for systems that fail to boot after disk or migration operations.
 - Safe rollback model
 
 Built for remote recovery scenarios where SSH access may be unstable.
+
+## RuleEngine – Human-Readable Firewall Management
+
+`rule-engine` is a **human-readable firewall rule parser and executor** integrated into the One-Click toolkit. It allows administrators to manage firewall rules using **intuitive, plain-language commands**, which are automatically translated into the appropriate backend commands for `iptables`, `ip6tables`, `nftables`, `ufw`, or `firewalld`.
+
+### Key Capabilities
+
+- Human-readable rule parsing (`open`, `close`, `allow`, `block`, `drop`, `delete`)  
+- TCP, UDP, ICMP, and multiport support  
+- Source and destination IP filtering with CIDR notation  
+- Connection state filters (NEW, ESTABLISHED)  
+- Service name to port mapping (e.g., `ssh` → 22)  
+- Automatic detection of active firewall backend  
+- Dry-run mode for safe testing  
+- Interactive preview and confirmation before applying rules  
+- Logs applied rules to `/var/log/one-click/ruleengine.log`  
+
+### Usage Examples
+
+**Open SSH port**
+- one-click rule-engine "open ssh"
+
+**Block MySQL port**
+- one-click rule-engine "close 3306"
+
+**Enable ICMP (ping)**
+- one-click rule-engine "enable icmp"
+
+**Delete the 3rd rule in the INPUT chain**
+- one-click rule-engine "delete line 3"
+
+**Preview rules without applying**
+- one-click rule-engine --dry-run "open https"
+
+## Operation Details
+
+1. Detects the active firewall backend automatically.
+2. Parses human-readable rules into validated firewall commands.
+3. Maps service names to standard ports automatically.
+4. Validates IP addresses, ports, and connection states.
+5. Displays a preview and requests confirmation before applying (unless in dry-run mode).
+6. Applies rules safely and logs actions.
+
+## Security Considerations
+
+- Root privileges are required to modify firewall rules.
+- Always review generated commands, especially when opening sensitive ports (22, 80, 443, 3389).
+- Use --dry-run for safe testing before applying rules.
+- Back up existing firewall rules to prevent accidental lockout.
 
 ## One-Click Bench (OCB)
 
