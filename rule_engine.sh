@@ -59,7 +59,7 @@ rule_engine() {
   for cmd in "${generated_cmds[@]}"; do
     read -r -a arr <<< "$cmd"
     # Skip if rule already exists in kernel
-    if [[ "$fw_bin" == "iptables" || "$fw_bin" == "ip6tables" ]]; then
+    if [[ "${fw_bin:-}" == "iptables" || "${fw_bin:-}" == "ip6tables" ]]; then
       if iptables -C "${arr[@]}" &>/dev/null; then
         info "Skipping duplicate rule already in kernel: $cmd"
         duplicate_skipped=1
