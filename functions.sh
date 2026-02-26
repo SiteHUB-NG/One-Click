@@ -1577,35 +1577,35 @@ get_existing_rules() {
   esac
 }
 apply_rule() {
-  local backend="$firewall_backend"
+  local backend="${firewall_backend:-}"
   for cmd_str in "${generated_cmds[@]}"; do
     read -r -a fw_cmd <<< "$cmd_str"
-    # ==== Only Iptables For Now ====
     if [[ "$backend" == "iptables" || "$backend" == "ip6tables" ]]; then
       if rule_exists_iptables "${fw_cmd[@]}"; then
         warn "Duplicate rule detected: ${fw_cmd[*]}"
-        continue  # skip without breaking flow
+        continue
       fi
     fi
-    # ==== Apply Rule ====
-    if "${fw_cmd[@]}"; then
-      info "Rule applied: ${fw_cmd[*]}"
-    else
-      warn "Failed to apply rule: ${fw_cmd[*]}"
+    # Apply only after confirmation
+    if [[ "$CONFIRM_APPLY" == "1" ]]; then
+      if "${fw_cmd[@]}"; then
+        success "Rule applied: ${fw_cmd[*]}"
+      else
+        warn "Failed to apply rule: ${fw_cmd[*]}"
+      fi
     fi
   done
 }
 rule_exists_iptables() {
-  local chain="" action="" proto="" port=""
-  local check_cmd=("$@")
-  # ==== Essential Parameters ====
-  for i in "${!check_cmd[@]}"; do
-    [[ "${check_cmd[$i]}" =~ ^-A$|-I$ ]] && chain="${check_cmd[$i+1]}"
-    [[ "${check_cmd[$i]}" == "-p" ]] && proto="${check_cmd[$i+1]}"
-    [[ "${check_cmd[$i]}" == "--dport" ]] && port="${check_cmd[$i+1]}"
-    [[ "${check_cmd[$i]}" == "-j" ]] && action="${check_cmd[$i+1]}"
-  done
-  if iptables -C "${@}" &>/dev/null; then
+  local cmd=("$@")
+  # ==== Check v4 or v6 ====
+  local fw_bin="${cmd[0]:-}"
+  [[ "$fw_bin" != "iptables" && "$fw_bin" != "ip6tables" ]] && fw_bin="iptables"
+  if [[ "${cmd[0]:-}" == "$fw_bin" ]]; then
+    cmd=("${cmd[@]:1}")
+  fi
+  # Check rule existence using iptables -C (works for all options)
+  if "$fw_bin" -C "${cmd[@]}" &>/dev/null; then
     return 0
   else
     return 1
@@ -1682,6 +1682,27 @@ parse_firewall_command() {
   table="filter" 
   del_line=""
   rule_lower="${rule,,}"
+  # ==== RAW IPTABLES MODE ====
+  if [[ "$rule_lower" =~ ^raw: ]]; then
+    local raw_cmd
+    raw_cmd="${rule#raw: }"
+    # ==== Detect ip6tables ====
+    if grep -Eq "\bip6tables\b" <<< "$raw_cmd"; then
+      fw_bin="ip6tables"
+    else
+      fw_bin="iptables"
+    fi
+    # ==== Split Into Array ====
+    read -r -a fw_cmd <<< "$raw_cmd"
+    # ==== Prevent Dups ====
+    if rule_exists_iptables "${fw_cmd[@]}"; then
+      warn "Duplicate raw rule detected: ${fw_cmd[*]}"
+      duplicate_skipped=1
+      return 0
+    fi
+    generated_cmds+=("${fw_cmd[*]}")
+    return 0
+  fi
   # ==== Detect Backup ====
   if [[ "$rule_lower" =~ (backup|save|retain|copy|export|dump|snapshot)([[:space:]]+(firewall|config|configuration|file|rules|ruleset|policy))? ]]; then
     backup_firewall
@@ -1812,7 +1833,7 @@ parse_firewall_command() {
     conn_state="INVALID"
   fi
   # ==== Detect Source IP ====
-  if [[ "$rule_lower" =~ (from|src|source)[[:space:]]+(address[[:space:]]+)?([0-9a-fA-F:./]+) ]]; then
+  if [[ "$rule_lower" =~ (via|from|src|source)[[:space:]]+(address[[:space:]]+)?([0-9a-fA-F:./]+) ]]; then
     src_ip="${BASH_REMATCH[3]}"
     if valid_ip "$src_ip"; then
       ip_version="ipv4"
