@@ -1577,7 +1577,7 @@ get_existing_rules() {
   esac
 }
 apply_rule() {
-  local backend="$firewall_backend
+  local backend="$firewall_backend"
   for cmd_str in "${generated_cmds[@]}"; do
     read -r -a fw_cmd <<< "$cmd_str"
     # ==== Only Iptables For Now ====
