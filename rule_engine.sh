@@ -92,7 +92,12 @@ rule_engine() {
   # ==== Preview & Confirm ====
   info "The following commands will be executed:"
   for cmd in "${unique_cmds[@]}"; do
-    cmd=$(sed -E 's/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;s/input|output|forward|prerouting/\U&/g' <<< "$cmd")
+    # ==== Capitalize RAW Display Entries ====
+    cmd=$(
+      sed -E '
+        s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
+        s/input|output|forward|prerouting/\U&/g
+    ' <<< "$cmd")
     printf "${green}[COMMAND]: %s${reset}\n" "$cmd"
   done
   echo
