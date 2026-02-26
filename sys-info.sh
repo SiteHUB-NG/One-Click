@@ -13,6 +13,9 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== System information widget ====
+cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
+ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
+ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
 sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -81,24 +84,9 @@ sys_info() {
     #print_row "Disk IO" "$(iostat -xz | awk '$1 ~ /^[svn][vd][ma]/{print $3}')"
     printf "└─────────────────────────────────────────────────────────────┘\n"
   }
- # i=0
- # while true; do
- #   print_table
- #   spinner="${spinner_frames[i % 4]}"
- #   printf "\r%s %s %s %s" \
- #     "${red}${r1[i]}" \
- #     "${blue}${r2[i]}" \
- #     "$(tput setaf 5)${r3[i]}" \
- #     "$spinner" \
- #     "${reset}"
- #   i=$(( (i + 1) % 4 ))
- #   sleep 2
- # done
-#}
-spinner_frames=('-' '\' '|' '/')
- i=0
+  spinner_frames=('-' '\' '|' '/')
+  i=0
   refresh=true
-
   # ==== Main loop ====
   while true; do
     if [[ "$refresh" = true ]]; then
@@ -106,21 +94,16 @@ spinner_frames=('-' '\' '|' '/')
       print_table
       i=$(( (i + 1) % 4 ))
     fi
-
-    # Show status line only if refreshing
     if [[ "$refresh" = true ]]; then
       spinner="${spinner_frames[i]}"
       printf "\rRefresh: ON %s" "$spinner"
     fi
-
-    # Check for keypress (non-blocking)
     if read -t 0.2 -n 1 key; then
       case "$key" in
         p)
           refresh=false
-          # Clear spinner/status line for clean static table
           printf "\r%-80s\r" ""
-          echo "Refresh PAUSED. Table frozen — you can copy/paste."
+          echo "Refresh PAUSED. Press$(tput 217) r$(tput sgr 0) to resume."
           ;;
         r)
           refresh=true
@@ -131,12 +114,9 @@ spinner_frames=('-' '\' '|' '/')
           ;;
       esac
     fi
-
-    # Only sleep if refreshing, so pause is truly static
     if [[ "$refresh" = true ]]; then
       sleep 1
     else
-      # When paused, just idle without clearing or redrawing
       sleep 0.2
     fi
   done
