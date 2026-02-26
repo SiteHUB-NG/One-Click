@@ -331,6 +331,7 @@ if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "sys-info" || 
   load_system
   sys_info
   shift
+  exit 0
 fi
 profile_arg=""
 for arg in "$@"; do
@@ -423,6 +424,7 @@ _one_click() {
     recovery
     rule-engine
     system
+    sys-info
     system-info
     logs
     log-browser
@@ -469,8 +471,8 @@ if [[ ! -s "$manpage" ]]; then
 fi
 # ==== Install ====
 if ! command -v 'one-click' >/dev/null 2>&1; then
-    install_self
-    exec 'one-click' "$@"
+  install_self
+  exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
 if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
@@ -503,7 +505,6 @@ if [[ -z "${!flag:-}" ]]; then
   for i in {1..13}; do printf '.'; sleep 0.3; done
   echo
   tmux new-session -s "$session" "env $flag=1 bash '${path}' '$arg'; exec bash"
-  #tmux new-session -s "$session" "env $flag=1 exec bash '${path}' '$arg'"
   printf '%s\n' \
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
     "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
