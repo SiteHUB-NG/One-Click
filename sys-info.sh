@@ -52,7 +52,7 @@ sys_info() {
     print_row "Provider" "$ip_upstream"
     print_row "ASN Number" "$ip_asn"
     for n in "${ns[@]}"; do
-      print_row "Nameserver" "$n"
+      print_row "Nameserver$((++i))" "$n"
     done
     print_row "Hostname" "$HOSTNAME"
     printf "└─────────────────────────────────────────────────────────────┘\n"
@@ -81,18 +81,64 @@ sys_info() {
     #print_row "Disk IO" "$(iostat -xz | awk '$1 ~ /^[svn][vd][ma]/{print $3}')"
     printf "└─────────────────────────────────────────────────────────────┘\n"
   }
-  i=0
+ # i=0
+ # while true; do
+ #   print_table
+ #   spinner="${spinner_frames[i % 4]}"
+ #   printf "\r%s %s %s %s" \
+ #     "${red}${r1[i]}" \
+ #     "${blue}${r2[i]}" \
+ #     "$(tput setaf 5)${r3[i]}" \
+ #     "$spinner" \
+ #     "${reset}"
+ #   i=$(( (i + 1) % 4 ))
+ #   sleep 2
+ # done
+#}
+spinner_frames=('-' '\' '|' '/')
+ i=0
+  refresh=true
+
+  # ==== Main loop ====
   while true; do
-    print_table
-    spinner="${spinner_frames[i % 4]}"
-    printf "\r%s %s %s %s" \
-      "${red}${r1[i]}" \
-      "${blue}${r2[i]}" \
-      "$(tput setaf 5)${r3[i]}" \
-      "$spinner" \
-      "${reset}"
-    i=$(( (i + 1) % 4 ))
-    sleep 2
+    if [[ "$refresh" = true ]]; then
+      clear
+      print_table
+      i=$(( (i + 1) % 4 ))
+    fi
+
+    # Show status line only if refreshing
+    if [[ "$refresh" = true ]]; then
+      spinner="${spinner_frames[i]}"
+      printf "\rRefresh: ON %s" "$spinner"
+    fi
+
+    # Check for keypress (non-blocking)
+    if read -t 0.2 -n 1 key; then
+      case "$key" in
+        p)
+          refresh=false
+          # Clear spinner/status line for clean static table
+          printf "\r%-80s\r" ""
+          echo "Refresh PAUSED. Table frozen — you can copy/paste."
+          ;;
+        r)
+          refresh=true
+          ;;
+        q)
+          clear
+          break
+          ;;
+      esac
+    fi
+
+    # Only sleep if refreshing, so pause is truly static
+    if [[ "$refresh" = true ]]; then
+      sleep 1
+    else
+      # When paused, just idle without clearing or redrawing
+      sleep 0.2
+    fi
   done
 }
 # ==== End Of System Info ==== #
