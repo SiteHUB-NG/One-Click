@@ -238,6 +238,7 @@ delete_cron_job() {
 }
 cron_menu() {
   header_notice "$cron_title" "$cron_banner" "18" "4"
+  install_dep "cron" "command -v cron" "cron" "$pkg_mgr" true
   while true; do
     clear
     echo
