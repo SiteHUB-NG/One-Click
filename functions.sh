@@ -1316,7 +1316,7 @@ is_ipv4() {
   return 0
 }
 v4() {
-  read -rp "Please enter the IP of the destination server: " destination_server
+  read -rp "${cyan}[USER]:${reset} Please enter the IP of the destination server: " destination_server
   if ! is_ipv4 "$destination_server"; then
     echo "The IP is ${red}INVALID${reset}! Please try again."
     v4
@@ -1409,7 +1409,7 @@ check_firewall_available() {
     fi
     return 0
   else
-    read -rp "No firewall installed. Install iptables? (y|n): " confirm
+    read -rp "${cyan}[USER]:${reset} No firewall installed. Install iptables? (y|n): " confirm
     confirm="${confirm,,}"
     if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
       install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
@@ -1576,46 +1576,94 @@ get_existing_rules() {
       ;;
   esac
 }
-rule_exists() {
-  local backend="$1"
-  local new_rule="$2"
-  local existing
-
-  existing=$(get_existing_rules "$backend")
-
-  # Simple substring match; can be enhanced per backend syntax
-  if grep -qF -- "$new_rule" <<< "$existing"; then
-    return 0  # rule exists
+apply_rule() {
+  local backend="$firewall_backend
+  for cmd_str in "${generated_cmds[@]}"; do
+    read -r -a fw_cmd <<< "$cmd_str"
+    # ==== Only Iptables For Now ====
+    if [[ "$backend" == "iptables" || "$backend" == "ip6tables" ]]; then
+      if rule_exists_iptables "${fw_cmd[@]}"; then
+        warn "Duplicate rule detected: ${fw_cmd[*]}"
+        continue  # skip without breaking flow
+      fi
+    fi
+    # ==== Apply Rule ====
+    if "${fw_cmd[@]}"; then
+      info "Rule applied: ${fw_cmd[*]}"
+    else
+      warn "Failed to apply rule: ${fw_cmd[*]}"
+    fi
+  done
+}
+rule_exists_iptables() {
+  local chain="" action="" proto="" port=""
+  local check_cmd=("$@")
+  # ==== Essential Parameters ====
+  for i in "${!check_cmd[@]}"; do
+    [[ "${check_cmd[$i]}" =~ ^-A$|-I$ ]] && chain="${check_cmd[$i+1]}"
+    [[ "${check_cmd[$i]}" == "-p" ]] && proto="${check_cmd[$i+1]}"
+    [[ "${check_cmd[$i]}" == "--dport" ]] && port="${check_cmd[$i+1]}"
+    [[ "${check_cmd[$i]}" == "-j" ]] && action="${check_cmd[$i+1]}"
+  done
+  if iptables -C "${@}" &>/dev/null; then
+    return 0
   else
-    return 1  # rule does not exist
+    return 1
   fi
 }
-apply_rule() {
-  local backend="$firewall_backend"
-  local rule_cmd="$1"
-
-  if rule_exists "$backend" "$rule_cmd"; then
-    warn "This rule already exists in $backend: $rule_cmd"
+clean_duplicate_rules() {
+  local tmpfile cleanfile
+  tmpfile=$(mktemp)
+  cleanfile=$(mktemp)
+  # ==== Save Rules ====
+  iptables-save | sed '/^\[.*\]$/d' > "$tmpfile"
+  # ==== Extract Duplicate ====
+  grep '^-A' "$tmpfile" | sort | uniq -c | awk '$1 > 1' > "$cleanfile"
+  cnt=$(awk '{print $1}' "$cleanfile" | head -1)
+  if [[ "$cnt" -eq 1 ]]; then
+    rule_plural=rule
+	msg="Would you like to remove the duplicate $rule_plural? (y|n): "
+  else
+    rule_plural=rules
+	msg="Would you like to clean the duplicate $rule_plural retaining one copy of each? (y|n): "
+  fi
+  if [[ ! -s "$cleanfile" ]]; then
+    success "No duplicate rules found."
+    rm -f "$tmpfile" "$cleanfile"
     return 0
   fi
-
-  # Otherwise, apply normally
-  case "$backend" in
-    nft)
-      nft "$rule_cmd" || return 1
-      ;;
-    iptables)
-      iptables $rule_cmd || return 1
-      ;;
-    ufw)
-      ufw $rule_cmd || return 1
-      ;;
-    firewalld)
-      firewall-cmd $rule_cmd || return 1
-      ;;
-  esac
-
-  info "Rule applied: $rule_cmd"
+  echo
+  warn "Duplicate "$rule_plural" detected:"
+  echo "========================================="
+  while read -r count rule; do
+    printf "  (%d copies) %s\n" "$count" "$rule"
+  done < "$cleanfile"
+  echo "========================================="
+  echo
+  read -rp "${cyan}[USER]:${reset} $msg" clean_rules
+  clean_rules="${clean_rules,,}"
+  [[ "$clean_rules" != "y" && "$clean_rules" != "yes" ]] && {
+    warn "Cleanup cancelled."
+    rm -f "$tmpfile" "$cleanfile"
+    return 0
+  }
+  warn "Rebuilding firewall without duplicates..."
+  # ==== Rebuild Ruleset ====
+  awk '
+    /^-A/ {
+        if (!seen[$0]++) print
+        next
+    }
+    { print }
+  ' "$tmpfile" > "${tmpfile}.deduped"
+  # ==== Attempt Restore ====
+  iptables-restore < "${tmpfile}.deduped" || {
+      warn "Restore failed." "Firewall has not been changed."
+      rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
+      return 1
+  }
+  rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
+  success "Duplicate cleanup complete." "Firewall reconfigured retaining one copy of each duplicate."
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
@@ -1671,7 +1719,7 @@ parse_firewall_command() {
   fi
   # ==== Detect Control ====
   if grep -Eqi "\b(list|show|open|display)\b(.*\b(iptables|firewall|rules|ruleset\b))?" <<< "$rule_lower"; then
-    info "Listing $table table"
+    info "${yellow}[ Listing $table table ]${reset}"
     iptables -t "$table" -L -n -v
     exit 0
   fi
@@ -1942,7 +1990,9 @@ parse_firewall_command() {
       if [[ "$port" == "$sp" ]]; then
         warn "You are blocking sensitive port $sp. This may lock you out."
         read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
-        [[ "$confirm" != "yes" || "$confirm" != "y" ]] && die "Aborted."
+        if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
+          die "Aborted."
+        fi
       fi
     done
   fi
@@ -1953,6 +2003,17 @@ parse_firewall_command() {
   done
   if [[ "$ip_version" == "ipv6" && "$ipv6_available" -ne 1 ]]; then
     die "ip6tables not available on this system."
+  fi
+  # ==== Duplicate Prevention ====
+  if [[ "$fw_bin" == "iptables" || "$fw_bin" == "ip6tables" ]]; then
+    if [[ "$mode" == "-A" || "$mode" == "-I" ]]; then
+      if rule_exists_iptables "${fw_cmd[@]}"; then
+        warn "The rule being added already exists." \
+		  "Skipping adding duplicate entry"
+        duplicate_skipped=1
+        return 0
+      fi
+    fi
   fi
   # ==== build command ====
   if [[ "$mode" == "-D" ]]; then
@@ -2038,42 +2099,33 @@ log_browser_menu() {
   done
 }
 browse_files() {
-
   mapfile -t logs < <(
     sudo find / \
       \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \
       -type f -name "*.log" -print 2>/dev/null
   )
-
   [[ ${#logs[@]} -eq 0 ]] && {
     warn "No logs found."
     read -rp "${cyan}[USER]: ${reset}Press Enter to return..."
     return
   }
-
   list=()
   total_size=0
-
   for file in "${logs[@]}"; do
     base=$(basename "$file")
     group="/$(echo "$file" | cut -d/ -f2)"
-
     size_bytes=$(sudo stat -c%s "$file" 2>/dev/null || echo 0)
     total_size=$((total_size + size_bytes))
     size_human=$(numfmt --to=iec --suffix=B "$size_bytes" 2>/dev/null)
-
     if [[ "$file" == /var/log/one-click/* ]]; then
       priority="0"
       group="\033[1;34m$group\033[0m"
     else
       priority="1"
     fi
-
     list+=("$priority\t$group\t$base\t$size_human\t$file")
   done
-
   total_human=$(numfmt --to=iec --suffix=B "$total_size")
-
   while true; do
     selected=$(
       printf "%b\n" "${list[@]}" \
@@ -2091,16 +2143,11 @@ browse_files() {
           --expect=enter,ctrl-e,ctrl-f,ctrl-a \
           --header="ENTER=open | CTRL-F=delete | CTRL-A=clean all | CTRL-E=back | Total: $total_human"
     )
-
     [[ -z "$selected" ]] && return
-
     key=$(echo "$selected" | head -n1)
     line=$(echo "$selected" | tail -n1)
-
     file=$(echo "$line" | awk -F'\t' '{print $4}')
-
     case "$key" in
-
       ctrl-f)
         read -rp "${cyan}[USER]: ${reset}Delete $(basename "$file")? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -2110,7 +2157,6 @@ browse_files() {
         fi
         continue
         ;;
-
       ctrl-a)
         read -rp "${yellow}[WARNING]: ${reset}Clear ALL ${#logs[@]} logs (~$total_human)? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -2122,11 +2168,9 @@ browse_files() {
         fi
         continue
         ;;
-
       ctrl-e)
         return
         ;;
-
       enter)
         clear
         sudo less -R "$file"
@@ -2136,12 +2180,9 @@ browse_files() {
   done
 }
 browse_journal() {
-
   while true; do
-
     # Get total journal disk usage
     journal_usage=$(journalctl --disk-usage 2>/dev/null | awk '{print $3,$4}')
-
     selection=$(
       systemctl list-units --type=service --no-legend \
         | awk '{print $1}' \
@@ -2153,20 +2194,15 @@ browse_journal() {
             --expect=enter,ctrl-e,ctrl-f,ctrl-a \
             --header="ENTER=view | CTRL-F=clear service | CTRL-A=vacuum all | CTRL-E=back | Journal: $journal_usage"
     )
-
     [[ -z "$selection" ]] && return
-
     key=$(echo "$selection" | head -n1)
     unit=$(echo "$selection" | tail -n1)
-
     case "$key" in
-
       enter)
         clear
         sudo journalctl -u "$unit" --no-pager | less -R
         clear
         ;;
-
       ctrl-f)
         read -rp "${yellow}[WARNING]: ${reset}Clear journal for $unit? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -2176,7 +2212,6 @@ browse_journal() {
           sleep 2
         fi
         ;;
-
       ctrl-a)
         read -rp "${yellow}[WARNING]: ${reset}Vacuum ALL journal logs ($journal_usage)? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -2186,7 +2221,6 @@ browse_journal() {
           sleep 2
         fi
         ;;
-
       ctrl-e)
         return
         ;;
