@@ -1612,13 +1612,19 @@ rule_exists_iptables() {
   fi
 }
 clean_duplicate_rules() {
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
+  elif [[ "$pkg_mgr" == "dnf" ]]; then
+    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
+    install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr" true
+  fi
   local tmpfile cleanfile
   tmpfile=$(mktemp)
   cleanfile=$(mktemp)
   # ==== Save Rules ====
   iptables-save | sed '/^\[.*\]$/d' > "$tmpfile"
   # ==== Extract Duplicate ====
-  grep '^-A' "$tmpfile" | sort | uniq -c | awk '$1 > 1' > "$cleanfile"
+  { grep '^-A' "$tmpfile" || true; } | sort -u | awk '$1 > 1' > "$cleanfile"
   cnt=$(awk '{print $1}' "$cleanfile" | head -1)
   if [[ "$cnt" -eq 1 ]]; then
     rule_plural=rule
