@@ -181,19 +181,20 @@ EOF
 # ==== End Essential Variables ==== #
 collect_sysinfo() {
   whois_ip="$(sed -En '/inet /{s,^[^/]* ([^/]*).*,\1,p}' <(ip a s "$nic"))"
-  api_response=$(curl -sL http://ip-api.com/json/${whois_ip})
+  api_response=$(curl -sL https://ipinfo.io/${whois_ip}/json)
+  api_response2=$(curl -sL http://ip-api.com/json/${whois_ip})
   sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
   sys_gw="$(awk '$1 == "default" {print $3}' <(ip r))"
-  ip_upstream="$(jq -r '.isp' <<< $api_response)"
+  ip_upstream="$(jq -r '.org' <<< $api_response)"
   ip_country="$(jq -r '.country' <<< $api_response)"
-  ip_asn="$(jq -r '.as' <<< $api_response)"
+  ip_asn="$(jq -r '.as' <<< $api_response2)"
   drive_cap="$(awk 'NR==2' <(lsblk -o size))"
   ns=($(awk '$1 !~ "#" && /nameserver/ {print $2}' /etc/resolv.conf ))
   cpu_model="$(lscpu | awk -F: '/Model name/ {print $2}' | sed 's/^ *//')"
   cpu="$(nproc)"
   cpu_cores=$(nproc)
   freq=$(awk -F: '/cpu MHz/ {freq=$2} END {print freq " MHz"}' /proc/cpuinfo | sed 's/^[ \t]*//')
-  location=$(jq -r '.regionName' <<< $api_response)
+  location=$(jq -r '.region' <<< $api_response)
   country="$ip_country"
   uptime=$(sed 's/up //' <(uptime -p))
   distro=$(awk -F= '/PRETTY_NAME/{print $2}' /etc/os-release)
@@ -993,7 +994,7 @@ iperf_table() {
     send=$(iperf_test "$host" "$ports" "$flags" "send")
     recv=$(iperf_test "$host" "$ports" "$flags" "recv")
     ping_val=$(awk '/time=/{gsub(/.*time=/,""); print}' <(ping -c1 "$host" 2>/dev/null))
-    [[ -z $ping_val ]] && ping_val="-- "
+    [[ -z $ping_val ]] && ping_val="--- "
     print_row() {
       printf "\r${blue}%-15s ${test_clr}%-30s ${blue}%-20s %-20s %-15s${reset}\n" \
         "│$provider" "$loc" "$send" "$recv" "${ping_val:0:4}ms      │"
@@ -1608,7 +1609,7 @@ parse_firewall_command() {
     table="filter"
   fi
   # ==== Detect Control ====
-  if grep -Eqi "\b(list|show|open|display)\b(.*\b(iptables|firewall|rules|ruleset\b)?" <<< "$rule_lower"; then
+  if grep -Eqi "\b(list|show|open|display)\b(.*\b(iptables|firewall|rules|ruleset\b))?" <<< "$rule_lower"; then
     info "Listing $table table"
     iptables -t "$table" -L -n -v
     exit 0
@@ -1979,28 +1980,42 @@ log_browser_menu() {
   done
 }
 browse_files() {
+
   mapfile -t logs < <(
     sudo find / \
       \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o \
       -type f -name "*.log" -print 2>/dev/null
-    )
-    [[ ${#logs[@]} -eq 0 ]] && {
-        warn "No logs found."
-        read -rp "${cyan}[USER]: ${reset}Press Enter to return..."
-        return
+  )
+
+  [[ ${#logs[@]} -eq 0 ]] && {
+    warn "No logs found."
+    read -rp "${cyan}[USER]: ${reset}Press Enter to return..."
+    return
   }
+
   list=()
+  total_size=0
+
   for file in "${logs[@]}"; do
     base=$(basename "$file")
     group="/$(echo "$file" | cut -d/ -f2)"
+
+    size_bytes=$(sudo stat -c%s "$file" 2>/dev/null || echo 0)
+    total_size=$((total_size + size_bytes))
+    size_human=$(numfmt --to=iec --suffix=B "$size_bytes" 2>/dev/null)
+
     if [[ "$file" == /var/log/one-click/* ]]; then
       priority="0"
       group="\033[1;34m$group\033[0m"
     else
       priority="1"
     fi
-    list+=("$priority\t$group\t$base\t$file")
+
+    list+=("$priority\t$group\t$base\t$size_human\t$file")
   done
+
+  total_human=$(numfmt --to=iec --suffix=B "$total_size")
+
   while true; do
     selected=$(
       printf "%b\n" "${list[@]}" \
@@ -2012,40 +2027,112 @@ browse_files() {
           --layout=reverse \
           --border \
           --delimiter=$'\t' \
-          --with-nth=1,2 \
-          --preview 'sudo tail -n 200 {3}' \
+          --with-nth=1,2,3 \
+          --preview 'sudo tail -n 200 {4}' \
           --preview-window=right:60%:wrap \
-          --expect=ctrl-d \
-          --header="ENTER=open | CTRL-D=delete | Type to search"
+          --expect=enter,ctrl-e,ctrl-f,ctrl-a \
+          --header="ENTER=open | CTRL-F=delete | CTRL-A=clean all | CTRL-E=back | Total: $total_human"
     )
+
     [[ -z "$selected" ]] && return
+
     key=$(echo "$selected" | head -n1)
     line=$(echo "$selected" | tail -n1)
-    file=$(echo "$line" | awk -F'\t' '{print $3}')
-    if [[ "$key" == "ctrl-d" ]]; then
-      read -rp "${cyan}[USER]: ${reset}Delete $(basename "$file")? [y/N]: " confirm
-      if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        sudo rm -f "$file"
-        error "Deleted."
-        sleep 1
-      fi
-      continue
-    fi
-    sudo less -R "$file"
+
+    file=$(echo "$line" | awk -F'\t' '{print $4}')
+
+    case "$key" in
+
+      ctrl-f)
+        read -rp "${cyan}[USER]: ${reset}Delete $(basename "$file")? [y|n]: " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+          sudo truncate -s 0 "$file"
+          success "Log cleared."
+          sleep 1
+        fi
+        continue
+        ;;
+
+      ctrl-a)
+        read -rp "${yellow}[WARNING]: ${reset}Clear ALL ${#logs[@]} logs (~$total_human)? [y|n]: " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+          for f in "${logs[@]}"; do
+            sudo truncate -s 0 "$f" 2>/dev/null
+          done
+          success "All logs cleared."
+          sleep 2
+        fi
+        continue
+        ;;
+
+      ctrl-e)
+        return
+        ;;
+
+      enter)
+        clear
+        sudo less -R "$file"
+        clear
+        ;;
+    esac
   done
 }
 browse_journal() {
+
   while true; do
-    unit=$(systemctl list-units --type=service --no-legend \
-      | awk '{print $1}' \
-      | fzf \
-        --height=85% \
-        --border \
-        --preview 'sudo journalctl -u {} -n 200 --no-pager' \
-        --preview-window=right:60%:wrap \
-        --header="ENTER=open | CTRL-C=back")
-    [[ -z "$unit" ]] && return
-    sudo journalctl -u "$unit" | less -R
+
+    # Get total journal disk usage
+    journal_usage=$(journalctl --disk-usage 2>/dev/null | awk '{print $3,$4}')
+
+    selection=$(
+      systemctl list-units --type=service --no-legend \
+        | awk '{print $1}' \
+        | fzf \
+            --height=85% \
+            --border \
+            --preview 'sudo journalctl -u {} -n 200 --no-pager' \
+            --preview-window=right:60%:wrap \
+            --expect=enter,ctrl-e,ctrl-f,ctrl-a \
+            --header="ENTER=view | CTRL-F=clear service | CTRL-A=vacuum all | CTRL-E=back | Journal: $journal_usage"
+    )
+
+    [[ -z "$selection" ]] && return
+
+    key=$(echo "$selection" | head -n1)
+    unit=$(echo "$selection" | tail -n1)
+
+    case "$key" in
+
+      enter)
+        clear
+        sudo journalctl -u "$unit" --no-pager | less -R
+        clear
+        ;;
+
+      ctrl-f)
+        read -rp "${yellow}[WARNING]: ${reset}Clear journal for $unit? [y|n]: " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+          sudo journalctl --unit="$unit" --rotate
+          sudo journalctl --unit="$unit" --vacuum-time=1s
+          success "Journal for $unit cleared."
+          sleep 2
+        fi
+        ;;
+
+      ctrl-a)
+        read -rp "${yellow}[WARNING]: ${reset}Vacuum ALL journal logs ($journal_usage)? [y|n]: " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+          sudo journalctl --rotate
+          sudo journalctl --vacuum-time=1s
+          success "All journal logs cleared."
+          sleep 2
+        fi
+        ;;
+
+      ctrl-e)
+        return
+        ;;
+    esac
   done
 }
 # ==== End Of Log Browser ====
