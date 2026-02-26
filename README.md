@@ -265,7 +265,8 @@ one-click rule-engine "purge firewall ruleset"
 ### Usage Examples
 
 **Open SSH port**
-- one-click rule-engine "open ssh"
+- one-click rule-engine "enable ssh"
+- one-click rule-engine "allow ssh"
 
 **Block MySQL port**
 - one-click rule-engine "close 3306"
@@ -278,6 +279,29 @@ one-click rule-engine "purge firewall ruleset"
 
 **Preview rules without applying**
 - one-click rule-engine --dry-run "open https"
+
+
+  **Command:** `one-click rule-engine`  
+
+**Subcommands:**
+
+| Subcommand Syntax                        | Description |
+|-----------------------------------------|-------------|
+| `(show\|list)`                           | List filter table |
+| `show mangle`                            | Show mangle table |
+| `show <table>`                           | Show selected table |
+| `(backup\|save\|retain)`                 | Backup rules |
+| `(restore\|reinstate\|import)`           | Restore rules |
+| `(delete\|remove\|purge) (firewall\|config\|rules)` | Delete a saved backup |
+
+**Usage Examples:**
+
+Open SSH port:
+
+```
+one-click rule-engine "allow ssh"
+```
+---
 
 ## Operation Details
 
@@ -348,6 +372,18 @@ without installing heavy benchmarking suites manually.
 - Cache + system log visibility
 
 Built for fast diagnostics in headless environments.
+
+**Command:** `one-click logs` or `one-click log-browser`  
+
+**Subcommands:**
+
+| Subcommand     | Description                  |
+|----------------|-----------------------------|
+| `Ctrl+E`       | Go back to previous menu     |
+| `Ctrl+F`       | Delete selected log file     |
+| `Ctrl+A`       | Vacuum all log files         |
+
+---
 
 # Dependency Model
 
