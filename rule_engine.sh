@@ -84,7 +84,9 @@ rule_engine() {
       fi
     done
     success "All rules successfully applied."
+    exit 0
   else
     warn "No changes applied."
+    exit 0
   fi
 }    
