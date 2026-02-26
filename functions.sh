@@ -190,7 +190,7 @@ collect_sysinfo() {
   ip_asn="$(jq -r '.as' <<< $api_response2)"
   drive_cap="$(awk 'NR==2' <(lsblk -o size))"
   ns=($(awk '$1 !~ "#" && /nameserver/ {print $2}' /etc/resolv.conf ))
-  cpu_model="$(lscpu | awk -F: '/Model name/ {print $2}' | sed 's/^ *//')"
+  cpu_model="$(lscpu | awk -F: '/^Model name/ {print $2}' | sed 's/^ *//')"
   cpu="$(nproc)"
   cpu_cores=$(nproc)
   freq=$(awk -F: '/cpu MHz/ {freq=$2} END {print freq " MHz"}' /proc/cpuinfo | sed 's/^[ \t]*//')
@@ -1556,6 +1556,67 @@ restore_firewall() {
     die "Restore not confirmed" "Aborting..."
   fi  
 }
+get_existing_rules() {
+  local backend="$1"
+  case "$backend" in
+    nft)
+      nft list ruleset
+      ;;
+    iptables)
+      iptables-save
+      ;;
+    ufw)
+      ufw status numbered
+      ;;
+    firewalld)
+      firewall-cmd --list-all --zone=public
+      ;;
+    *)
+      die "Unsupported firewall backend."
+      ;;
+  esac
+}
+rule_exists() {
+  local backend="$1"
+  local new_rule="$2"
+  local existing
+
+  existing=$(get_existing_rules "$backend")
+
+  # Simple substring match; can be enhanced per backend syntax
+  if grep -qF -- "$new_rule" <<< "$existing"; then
+    return 0  # rule exists
+  else
+    return 1  # rule does not exist
+  fi
+}
+apply_rule() {
+  local backend="$firewall_backend"
+  local rule_cmd="$1"
+
+  if rule_exists "$backend" "$rule_cmd"; then
+    warn "This rule already exists in $backend: $rule_cmd"
+    return 0
+  fi
+
+  # Otherwise, apply normally
+  case "$backend" in
+    nft)
+      nft "$rule_cmd" || return 1
+      ;;
+    iptables)
+      iptables $rule_cmd || return 1
+      ;;
+    ufw)
+      ufw $rule_cmd || return 1
+      ;;
+    firewalld)
+      firewall-cmd $rule_cmd || return 1
+      ;;
+  esac
+
+  info "Rule applied: $rule_cmd"
+}
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
   fw_bin="iptables"
@@ -1945,16 +2006,13 @@ print_blue_table() {
   for r in "${rows[@]}"; do
     (( ${#r} > max )) && max=${#r}
   done
-  # helper for padding
   pad() { printf "%-*s" "$max" "$1"; }
-  # top border
   printf "${BLUE}┌────┬─%s─┐${RESET}\n" "$(printf '─%.0s' $(seq 1 $max))"
   local i=1
   for r in "${rows[@]}"; do
     printf "${BLUE}│ %2d │ ${RESET}%s${BLUE} │${RESET}\n" "$i" "$(pad "$r")"
     ((i++))
   done
-  # bottom border
   printf "${BLUE}└────┴─%s─┘${RESET}\n" "$(printf '─%.0s' $(seq 1 $max))"
 }
 # ==== Log Browser ====
