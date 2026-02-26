@@ -17,6 +17,7 @@ collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
+# ==== Check System Resources ====
 clear
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
@@ -155,7 +156,83 @@ print_table() {
   print_row "$key_width" "$val_width" "Country" "$country"
   printf "${blue}└%s┘${reset}\n" "$border"
 }
+run_ocb_no_gb() {
+  local version gb_path gb_url
+  header_notice "$ocb_header" "$ocb_banner" "3" "62"
+  init
+  expand_country "${country:-}"
+  print_table
+  fio_cpu_benchmark
+  fio_disk_benchmark
+  # ==== RAM BENCH ====
+  printf "${blue}%s${reset}\n" \
+    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "Test" "Total MiB" "MiB/sec" "Ops/sec"
+  printf "${yellow}%s${reset}\n" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
+    "│ RAM Bandwidth Benchmark                                                                          │" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
+
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "Read" "$total" "${throughput[0]}" "$ops" \
+    "Write" "$write_total" "${write_throughput[0]}" "$write_ops"
+  printf "${blue}%s${reset}\n" \
+    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  if ping -4 -c1 google.com &> /dev/null; then
+    iperf_table "IPv4"
+  else
+     printf "${red}%s${reset}\n" \
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ No IPv4 connectivity detected. Skipping IPv4 iperf tests.                                        │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  fi
+  if ping -6 -c1 google.com &>/dev/null; then
+    iperf_table "IPv6"
+  else
+    printf "${red}%s${reset}\n" \
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ No IPv6 connectivity detected. Skipping IPv6 iperf tests.                                        │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  fi
+  
+  threads=$(nproc)
+  time_sec=65
+  cpu_max_prime=30000
+  cpu_output=$(sysbench cpu --threads=$threads --time=$time_sec --cpu-max-prime=$cpu_max_prime run)
+  # ==== PARSE RESULTS ====
+  total_time=$(echo "$cpu_output" | awk -F: '/total time:/ {gsub(/ /,"",$2); print $2}')
+  events_sec=$(echo "$cpu_output" | awk -F: '/events per second:/ {gsub(/ /,"",$2); print $2}')
+  min_time=$(echo "$cpu_output" | awk -F: '/min:/ {gsub(/ /,"",$2); print $2}')
+  avg_time=$(echo "$cpu_output" | awk -F: '/avg:/ {gsub(/ /,"",$2); print $2}')
+  max_time=$(echo "$cpu_output" | awk -F: '/max:/ {gsub(/ /,"",$2); print $2}')
+  # ==== PRINT TABLE ====
+  printf "${blue}%s${reset}\n" \
+    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "Test" "Total Sec" "Events/sec" "Min/Avg/Max Sec"
+  printf "${yellow}%s${reset}\n" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
+    "│ CPU Benchmark (sysbench)                                                                         │" \
+    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤ "
+  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
+    "CPU Multi-Core" "$total_time" "$events_sec" "$min_time / $avg_time / $max_time"
+  printf "${blue}%s${reset}\n" \
+  "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+  end=$(date +%s)
+  total_time "start" "end"
+}
 run_ocb() {
+  avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  if (( avail_mem < 1500 )); then
+    warn "Less than 1.5GB RAM." "Geekbench will not be run. Will use sysbench instead."
+    run_ocb_no_gb
+  fi
+  if (( avail_disk < 7 )); then
+    warn "Less than 7GB Storage." "Geekbench will not be run. Will use sysbench instead."
+    run_ocb_no_gb
+  fi
   local version gb_path gb_url
   version="${1:-6}"
   gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
