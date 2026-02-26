@@ -14,6 +14,12 @@
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 rule_engine() {
+  if [[ "pkg_mgr" == "apt" ]]; then
+    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
+  elif [[ "$pkg_mgr" == "dnf" ]]; then
+    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
+    install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr" true
+  fi
   rule="$1"
   flag="${2:-}"
   dry_run=0
@@ -98,10 +104,22 @@ rule_engine() {
         info "Rule applied: $cmd"
       else
         warn "Failed to apply rule: $cmd"
+        fail+=("$cmd")
+        die=1
       fi
     done
-    success "All rules successfully applied."
-    exit 0
+    if [[ "$die" -eq 1 ]]; then
+      warn "The following commands failed to install:"
+      echo "========================================="
+      for f in "${fail[@]}"; do
+        error "${yellow}[][]${blue} $f ${yellow}[][]${reset}"
+      done
+      echo "========================================="
+      die "Installation Failed!"
+    else
+      success "All rules successfully applied."
+      exit 0
+    fi
   else
     warn "No changes applied."
     exit 0
