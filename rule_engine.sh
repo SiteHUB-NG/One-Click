@@ -92,14 +92,24 @@ rule_engine() {
   # ==== Preview & Confirm ====
   info "The following commands will be executed:"
   for cmd in "${unique_cmds[@]}"; do
+    cmd=$(sed -E 's/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;s/input|output|forward|prerouting/\U&/g' <<< "$cmd")
     printf "${green}[COMMAND]: %s${reset}\n" "$cmd"
   done
   echo
   read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
   confirm="${confirm,,}"
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
+    i=""
     for cmd in "${unique_cmds[@]}"; do
+      cmd="${cmd#raw: }"
+      # ==== Handle RAW Entries ====
+      cmd=$(
+        sed -E '
+          s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
+          s/input|output|forward|prerouting/\U&/g
+      ' <<< "$cmd")
       read -r -a arr <<< "$cmd"
+      # ==== Execute Commands ====
       if "${arr[@]}"; then
         info "Rule applied: $cmd"
       else
