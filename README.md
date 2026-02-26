@@ -265,21 +265,30 @@ one-click rule-engine "purge firewall ruleset"
 ### Usage Examples
 
 **Open SSH port**
-- one-click rule-engine "enable ssh"
-- one-click rule-engine "allow ssh"
-
+```
+one-click rule-engine "enable ssh"
+one-click rule-engine "allow ssh"
+```
 **Block MySQL port**
-- one-click rule-engine "close 3306"
-
+```
+one-click engine "close 3306"
+```
 **Enable ICMP (ping)**
-- one-click rule-engine "enable icmp"
-
+```
+one-click rule-engine "enable icmp"
+```
 **Delete the 3rd rule in the INPUT chain**
-- one-click rule-engine "delete line 3"
-
+```
+one-click firewall "delete line 3"
+```
+**Using raw input**
+```
+one-click rule-engine "raw: iptables -I INPUT -p tcp -m tcp-comment --dport 443 -j ACCEPT"
+```
 **Preview rules without applying**
-- one-click rule-engine --dry-run "open https"
-
+```
+one-click engine --dry-run "open https"
+```
 
   **Command:** `one-click rule-engine`  
 
@@ -293,13 +302,14 @@ one-click rule-engine "purge firewall ruleset"
 | `(backup\|save\|retain)`                 | Backup rules |
 | `(restore\|reinstate\|import)`           | Restore rules |
 | `(delete\|remove\|purge) (firewall\|config\|rules)` | Delete a saved backup |
+| `raw: <COMMAND>` | Directly input raw commands|
 
 **Usage Examples:**
 
 Open SSH port:
 
 ```
-one-click rule-engine "allow ssh"
+one-click engine "allow ssh"
 ```
 ---
 
@@ -311,6 +321,76 @@ one-click rule-engine "allow ssh"
 4. Validates IP addresses, ports, and connection states.
 5. Displays a preview and requests confirmation before applying (unless in dry-run mode).
 6. Applies rules safely and logs actions.
+
+## Raw Entry Mode
+
+RuleEngine supports a **`raw:` entry mode**, allowing advanced users to inject full native `iptables` commands directly into the execution pipeline.
+
+Raw mode bypasses natural-language parsing and sends the command straight into the normalization and execution layer.
+
+### Syntax
+
+raw: <full iptables command>
+
+- The `raw:` prefix is required.
+- Everything after `raw:` is treated as a direct `iptables` command.
+- Flags are automatically normalized (e.g., `-a` → `-A`).
+- Jump targets such as `ACCEPT` and `DROP` are automatically capitalized.
+- The `-j` flag remains lowercase (as required by `iptables`).
+
+### Example Usage
+
+Input:
+```
+raw: iptables -a INPUT -p tcp --dport 80 -j accept
+```
+After normalization:
+
+```
+iptables -A INPUT -P TCP --DPORT 80 -j ACCEPT
+```
+### Chaining Commands
+
+Raw commands can be chained together as well as with human language parsed input. However, spacing rules are strict to prevent accidental fallback into human-language parsing when using `raw:`.
+
+#### Using Comma `,` Delimiter
+
+When chaining with a comma:
+
+The next raw: must begin immediately.
+
+No leading space before raw:.
+
+Correct:
+```
+raw: iptables -A INPUT -p tcp --dport 22 -j ACCEPT,raw: iptables -L
+```
+Incorrect
+```
+raw: iptables -A INPUT -p tcp --dport 22 -j ACCEPT, raw: iptables -L
+```
+(Leading space before raw: may trigger natural-language parsing.)
+
+#### Using `and` Delimiter
+
+When chaining with and:
+
+There must be exactly one space after and
+
+There must be exactly one space before raw:
+
+Correct:
+```
+raw: iptables -A INPUT -p tcp --dport 22 -j ACCEPT and raw: iptables -L
+```
+Incorrect:
+```
+raw: iptables -A INPUT -p tcp --dport 22 -j ACCEPT and  raw: iptables -L
+raw: iptables -A INPUT -p tcp --dport 22 -j ACCEPT andraw: iptables -L
+```
+Improper spacing may cause the parser to interpret the command as natural language instead of raw mode.
+
+Use `raw:` when you need full control over advanced match extensions.
 
 ## Security Considerations
 
