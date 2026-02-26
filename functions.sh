@@ -1624,7 +1624,7 @@ clean_duplicate_rules() {
   # ==== Save Rules ====
   iptables-save | sed '/^\[.*\]$/d' > "$tmpfile"
   # ==== Extract Duplicate ====
-  { grep '^-A' "$tmpfile" || true; } | sort -u | awk '$1 > 1' > "$cleanfile"
+  { grep '^-A' "$tmpfile" || true; } | sort | uniq -c | awk '$1 > 1' > "$cleanfile"
   cnt=$(awk '{print $1}' "$cleanfile" | head -1)
   if [[ "$cnt" -eq 1 ]]; then
     rule_plural=rule
