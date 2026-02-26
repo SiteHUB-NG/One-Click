@@ -132,6 +132,7 @@ install_dependancies() {
   for id in "${ids[@]}"; do
     case "$id" in
       debian)
+        export DEBIAN_FRONTEND=noninteractive
         pkg_mgr="apt"
         install_dep "rsync" "type rsync" "rsync" "$pkg_mgr" true
         install_dep "tmux" "type tmux" "tmux" "$pkg_mgr" true
@@ -326,7 +327,7 @@ load_rule_engine() {
 }
 #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 # ==== System Info Dashboard - Skip TMUX and root checks ====
-if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "system-info" || "${1:-}" == "system" ]]; then
+if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "sys-info" || "${1:-}" == "system-info" || "${1:-}" == "system" ]]; then
   load_system
   sys_info
   shift
@@ -340,7 +341,7 @@ for arg in "$@"; do
     --profile=*) profile_arg="${arg#*=}"     ;;
   esac
 done
-if [[ "$1" == "--version" ]]; then
+if [[ "${1:-}" == "--version" ]]; then
   echo "$version"
   exit 0
 fi
@@ -352,6 +353,7 @@ fi
 if [[ "${1:-}" == "rule-engine" || "${1:-}" == "engine" || "${1:-}" == "firewall" ]]; then
   load_rule_engine
   rule_engine "${2:-}"
+  exit 0
 fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
@@ -500,7 +502,8 @@ if [[ -z "${!flag:-}" ]]; then
   printf '%s' "Launching a TMUX session for One-Click"
   for i in {1..13}; do printf '.'; sleep 0.3; done
   echo
-  tmux new-session -d -s "$session" "env $flag=1 bash '${path}' '$arg'; exec bash"
+  tmux new-session -s "$session" "env $flag=1 bash '${path}' '$arg'; exec bash"
+  #tmux new-session -s "$session" "env $flag=1 exec bash '${path}' '$arg'"
   printf '%s\n' \
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
     "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
