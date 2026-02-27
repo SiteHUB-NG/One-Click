@@ -1680,6 +1680,7 @@ parse_firewall_command() {
   fw_bin="iptables"
   ip_version="ipv4"
   rule="$1"
+  inherited_proto="$2"
   action="" 
   port=""
   ports=""
@@ -1802,7 +1803,7 @@ parse_firewall_command() {
     [[ "$action" == "DELETE" ]] && mode="-D"
   fi
   # ==== ICMP enable/disable handling ====
-  if grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
+  if grep -Eqi "\b(icmp|echo)\b" <<< "$rule_lower"; then
     if [[ "$ip_version" == "ipv6" ]]; then
       proto="icmpv6"
     else
@@ -2019,63 +2020,60 @@ parse_firewall_command() {
         fi
         if [[ "$proto" == "tcp" ]]; then
           tcp_ports+=("$port_only")
-        elif [[ "$proto" == "udp" ]]; then
+          elif [[ "$proto" == "udp" ]]; then
           udp_ports+=("$port_only")
         fi
       done
-      break
     fi
   done
-  # Detect explicit numeric port if no service matched
-  if [[ -z "$ports" && "$rule_lower" =~ ([0-9]{1,5}) ]]; then
-    can_port="${BASH_REMATCH[1]}"
-    if valid_port "$can_port"; then
-      tcp_ports+=("$can_port")
-    fi
+  # ==== Remove Duplicate Ports ====
+  tcp_ports=($(printf "%s\n" "${tcp_ports[@]}" | sort -n | uniq))
+  udp_ports=($(printf "%s\n" "${udp_ports[@]}" | sort -n | uniq))
+  # ==== Parse explicit numeric ports ====
+  # ==== Determine requested protocol first ====
+  if grep -Eqi "\budp\b" <<< "$rule_lower"; then
+    requested_proto="udp"
+  elif grep -Eqi "\btcp\b" <<< "$rule_lower"; then
+    requested_proto="tcp"
+  elif grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
+    requested_proto="icmp"
+  else
+    requested_proto="tcp"  # default fallback
   fi
+  # ==== Extract all numeric ports from human input ====
+  mapfile -t all_ports < <(grep -oE '[0-9]{1,5}' <<< "$rule_lower")
+  for p in "${all_ports[@]}"; do
+    if valid_port "$p"; then
+      case "$requested_proto" in
+        udp) udp_ports+=("$p") ;;
+        tcp) tcp_ports+=("$p") ;;
+        icmp) ;;  # ICMP has no ports
+        *) tcp_ports+=("$p") ;;
+      esac
+    fi
+  done
+  # ==== Handle explicit port ranges like 100-200 ====
   if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
     port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
-    proto="${proto:-tcp}"
+    proto="${requested_proto:-tcp}"
     valid_range "$port_range" || die "Invalid port range"
   fi
-  # ==== Port Args ====
+  # ==== Build per-protocol port args ====
   build_port_args() {
     local proto="$1"
     local -n ports_ref="$2"
     local args=()
     if (( ${#ports_ref[@]} > 1 )); then
-      # multiple ports → multiport
-      args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
+        args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
     elif (( ${#ports_ref[@]} == 1 )); then
-      # single port → --dport
-      args+=("--dport" "${ports_ref[0]}")
+        args+=("--dport" "${ports_ref[0]}")
     fi
     echo "${args[@]}"
   }
-  # ==== TCP / UDP port args ====
   tcp_port_args=()
   udp_port_args=()
-  if (( ${#tcp_ports[@]} > 0 )); then
-    tcp_port_args=($(build_port_args "tcp" tcp_ports))
-  fi
-  if (( ${#udp_ports[@]} > 0 )); then
-    udp_port_args=($(build_port_args "udp" udp_ports))
-  fi
-  # ==== Detect Port/Range ====
-  if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
-    port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
-    proto=${proto:-tcp}
-    valid_range "$port_range" || die "Invalid port range"
-  elif [[ "$rule_lower" =~ port[[:space:]]*([0-9]{1,5}) ]]; then
-    port="${BASH_REMATCH[1]}"
-    valid_port "$port" || die "Invalid port"
-  fi
-  if grep -Eq "\bmultiport\b" <<< "$rule_lower"; then
-    proto=${proto:-tcp}
-    if [[ "$rule_lower" =~ ([0-9,]+) ]]; then
-      ports="${BASH_REMATCH[1]}"
-    fi
-  fi
+  [[ ${#tcp_ports[@]} -gt 0 ]] && tcp_port_args=($(build_port_args "tcp" tcp_ports))
+  [[ ${#udp_ports[@]} -gt 0 ]] && udp_port_args=($(build_port_args "udp" udp_ports))
   if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
     for sp in "${sensitive_ports[@]}"; do
       if [[ "$port" == "$sp" ]]; then
@@ -2114,14 +2112,14 @@ parse_firewall_command() {
     [[ -n "$proto" ]] && fw_cmd+=(-p "$proto")
     [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
     [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
-    # ==== Add port arguments (multiport / single port / range) ====
+    # ==== Add port arguments (single / multiport / range) ====
     if [[ "$proto" == "tcp" ]]; then
-       [[ ${#tcp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "tcp" tcp_ports))
+      [[ ${#tcp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "tcp" tcp_ports))
     elif [[ "$proto" == "udp" ]]; then
       [[ ${#udp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "udp" udp_ports))
     fi
-    # Add port range if defined
-    [[ -n "$port_range" ]] && fw_cmd+=(--dport "$port_range")
+    # ==== Multiport Support ====
+    [[ -n "$port_range" ]] && fw_cmd+=(-m multiport --dports "$port_range")
     # ==== Allow Ports For NAT ====
     if [[ "$action" == "DNAT" || "$action" == "SNAT" ]]; then
       [[ -n "$dst_ip" ]] && fw_cmd+=(-j "$action" --to-destination "$dst_ip")
@@ -2134,7 +2132,17 @@ parse_firewall_command() {
     [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
     [[ "$action" != "DELETE" && -n "$action" ]] && fw_cmd+=(-j "$action")
   fi
-  generated_cmds+=("${fw_cmd[*]}")
+  # ==== Add ports per protocol ====
+  if (( ${#tcp_ports[@]} > 0 )); then
+    tcp_args=($(build_port_args "tcp" tcp_ports))
+    fw_cmd_tcp=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp "${tcp_args[@]}" -j "$action")
+    generated_cmds+=("${fw_cmd_tcp[*]}")
+  fi
+  if (( ${#udp_ports[@]} > 0 )); then
+    udp_args=($(build_port_args "udp" udp_ports))
+    fw_cmd_udp=("$fw_bin" -t "$table" "$mode" "$chain" -p udp "${udp_args[@]}" -j "$action")
+    generated_cmds+=("${fw_cmd_udp[*]}")
+  fi
 }
 # =========================================== End Of Rule Engine ================================================== #
 # ===================================== Display Table For Boot Recovery =============================================
