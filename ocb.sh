@@ -19,6 +19,7 @@ install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
 # ==== Check System Resources ====
 clear
+no_gb=0
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
 cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
