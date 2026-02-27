@@ -101,7 +101,9 @@ spinner_frames=( '\' '-' '/' '|' )
 r1=( '|' '/' '-' '\' )
 r2=( '-' '/' '|' '\' )
 r3=( '|' '\' '-' '/' )
-sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$path"
+if [[ -f "$path" ]]; then
+ sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$path"
+fi
 # ==== Install Dependancies ====
 install_dep() {
   local dep_name check_cmd pkg_name pkg_manager fatal
