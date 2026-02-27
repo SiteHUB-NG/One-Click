@@ -156,14 +156,7 @@ print_table() {
   print_row "$key_width" "$val_width" "Country" "$country"
   printf "${blue}└%s┘${reset}\n" "$border"
 }
-run_ocb_no_gb() {
-  local version gb_path gb_url
-  header_notice "$ocb_header" "$ocb_banner" "3" "62"
-  init
-  expand_country "${country:-}"
-  print_table
-  fio_cpu_benchmark
-  fio_disk_benchmark
+ram_bench() {
   # ==== RAM BENCH ====
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -179,6 +172,26 @@ run_ocb_no_gb() {
     "Write" "$write_total" "${write_throughput[0]}" "$write_ops"
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+}
+gb_check() {
+  if (( avail_mem < 1500 )); then
+    printf "$(tput setaf 100) %s${reset}\n" \
+    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+    "│ ${yellow}Less than 1.5GB RAM." "Geekbench will not be run. Will use sysbench instead.$(tput setaf 100)                     │" \
+    printf "$(tput setaf 100) %s${reset}\n" \
+    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+    no_gb=1
+  fi
+  if (( avail_disk < 7 )); then
+    printf "$(tput setaf 100) %s${reset}\n" \
+    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+    "│ ${yellow}Less than 7GB Storage." "Geekbench will not be run. Will use sysbench instead.$(tput setaf 100)                   │" \
+    printf "$(tput setaf 100) %s${reset}\n" \
+    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+    no_gb=1
+  fi
+}
+iperf_run() {
   if ping -4 -c1 google.com &> /dev/null; then
     iperf_table "IPv4"
   else
@@ -195,7 +208,8 @@ run_ocb_no_gb() {
       "│ No IPv6 connectivity detected. Skipping IPv6 iperf tests.                                        │" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
   fi
-  
+}
+sysbench() {
   threads=$(nproc)
   time_sec=65
   cpu_max_prime=30000
@@ -219,20 +233,11 @@ run_ocb_no_gb() {
     "CPU Multi-Core" "$total_time" "$events_sec" "$min_time / $avg_time / $max_time"
   printf "${blue}%s${reset}\n" \
   "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
-  end=$(date +%s)
-  total_time "start" "end"
 }
+# ==== Run Script ====
 run_ocb() {
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
-  if (( avail_mem < 1500 )); then
-    warn "Less than 1.5GB RAM." "Geekbench will not be run. Will use sysbench instead."
-    run_ocb_no_gb
-  fi
-  if (( avail_disk < 7 )); then
-    warn "Less than 7GB Storage." "Geekbench will not be run. Will use sysbench instead."
-    run_ocb_no_gb
-  fi
   local version gb_path gb_url
   version="${1:-6}"
   gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
@@ -261,38 +266,15 @@ run_ocb() {
   print_table
   fio_cpu_benchmark
   fio_disk_benchmark
-  # ==== RAM BENCH ====
-  printf "${blue}%s${reset}\n" \
-    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
-  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
-    "Test" "Total MiB" "MiB/sec" "Ops/sec"
-  printf "${yellow}%s${reset}\n" \
-    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤" \
-    "│ RAM Bandwidth Benchmark                                                                          │" \
-    "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
-
-  printf "${blue}│%-20s %-15s %-15s %-45s│${reset}\n" \
-    "Read" "$total" "${throughput[0]}" "$ops" \
-    "Write" "$write_total" "${write_throughput[0]}" "$write_ops"
-  printf "${blue}%s${reset}\n" \
-    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
-  if ping -4 -c1 google.com &> /dev/null; then
-    iperf_table "IPv4"
+  ram_bench
+  iperf_run
+  gb_check
+  if (( no_gb == 1 )); then
+    sysbench
   else
-     printf "${red}%s${reset}\n" \
-      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ No IPv4 connectivity detected. Skipping IPv4 iperf tests.                                        │" \
-      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+    geekbench_table "${version:-6}" "$gb_path"
   fi
-  if ping -6 -c1 google.com &>/dev/null; then
-    iperf_table "IPv6"
-  else
-    printf "${red}%s${reset}\n" \
-      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ No IPv6 connectivity detected. Skipping IPv6 iperf tests.                                        │" \
-      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
-  fi
-  geekbench_table "${version:-6}" "$gb_path"
   end=$(date +%s)
   total_time "start" "end"
+  exit 0
 }
