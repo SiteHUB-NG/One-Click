@@ -98,7 +98,7 @@ rule_engine() {
         s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
         s/input|output|forward|prerouting/\U&/g
     ' <<< "$cmd")
-    printf "${green}[COMMAND]: %s${reset}\n" "$cmd"
+    printf "${cyan}[COMMAND]: %s${reset}\n" "$cmd"
   done
   echo
   read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
