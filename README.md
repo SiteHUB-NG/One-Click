@@ -352,6 +352,11 @@ iptables -A INPUT -P TCP --DPORT 80 -j ACCEPT
 ### Chaining Commands
 
 Raw commands can be chained together as well as with human language parsed input. However, spacing rules are strict to prevent accidental fallback into human-language parsing when using `raw:`.
+Chaining can be used with any service. Ports will be mapped without further input.
+
+![One-Click Logo](https://as214354.network/one-click-rule-engine.png)
+
+![One-Click Logo](https://as214354.network/oc-rule-engine.png)
 
 #### Using Comma `,` Delimiter
 
