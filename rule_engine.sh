@@ -120,10 +120,10 @@ rule_engine() {
       else
         warn "Failed to apply rule: $cmd"
         fail+=("$cmd")
-        die=1
+        fatal=1
       fi
     done
-    if [[ "$die" -eq 1 ]]; then
+    if [[ "${fatal:-}" -eq 1 ]]; then
       warn "The following commands failed to install:"
       echo "========================================="
       for f in "${fail[@]}"; do
