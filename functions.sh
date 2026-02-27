@@ -307,7 +307,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# ==== One-Click Bench ====
+# ============================================= End Script Helpers ======================================== #
+# =============================================== Country Mapping ===========================================
 expand_country() {
   local code="${1^^}"  # uppercase input
   case "$code" in
@@ -552,6 +553,8 @@ expand_country() {
     *) country="$code"                               ;;  
   esac
 }
+# =========================================== End Country Mapping ====================================================== #
+# ============================================= ONE CLICK BENCH ==========================================================
 fio_cpu_benchmark() {
   local duration threads output usr_cpu sys_cpu
   duration=10
@@ -943,7 +946,7 @@ iperf_locs=( \
   "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
   "slc.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "SLC, UT, US (10G)" "IPv4|IPv6" \
   "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
-  "speedtest.milkywan.fr" "9200-9240" "Milkywan" "Île-de-France, FR (40G)" "IPv4|IPv6" \
+  "speedtest.milkywan.fr" "9200-9240" "Milkywan" "Ile-de-France, FR (40G)" "IPv4|IPv6" \
   "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
   "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
   "lagos.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Ikeja, Lagos, NG (2G)" "IPv4|IPv6" \
@@ -1058,8 +1061,8 @@ total_time() {
     printf "${blue}└%s┘${reset}\n" "$border"
   fi
 }
-# ==== End One-Click Bench ==== #
-# ==== Directtory Listing ====
+# ============================================= End One-Click Bench ========================================= #
+# ============================================== Directory Listing ============================================
 ls_table() {
   # ---- safety for set -euo pipefail ----
   set +u
@@ -1322,7 +1325,8 @@ v4() {
     v4
   fi
 }
-# ==== Ensure password is secure ====
+# ========================================== End Of Directory Listing =========================================== #
+# ========================================== Ensure password is secure ============================================
 password_strength() {
   local password
   password="${1:-}"
@@ -1354,8 +1358,8 @@ password_strength() {
   success "${green}Strong${reset}: Password meets all requirements."
   return 0
 }
-# ==== End Of Secure Password ==== #
-# ==== RuleEngine ====
+# =========================================== End Of Secure Password ============================================== #
+# =============================================== Rule Engine =======================================================
 detect_firewall_backend() {
   if command -v iptables >/dev/null 2>&1; then
     firewall_backend="iptables"
@@ -2132,8 +2136,8 @@ parse_firewall_command() {
   fi
   generated_cmds+=("${fw_cmd[*]}")
 }
-# ==== Enf Of Rule Engine ==== #
-# ==== Display Table For Boot Recovery ====
+# =========================================== End Of Rule Engine ================================================== #
+# ===================================== Display Table For Boot Recovery =============================================
 print_blue_table() {
   local dir="$1"
   local BLUE="\033[34m"
@@ -2162,7 +2166,8 @@ print_blue_table() {
   done
   printf "${BLUE}└────┴─%s─┘${RESET}\n" "$(printf '─%.0s' $(seq 1 $max))"
 }
-# ==== Log Browser ====
+# ===================================================End Of Boot Recovery ================================================= #
+# ===================================================== Log Browser =========================================================
 log_browser_menu() {
   header_notice "$log_title" "$log_banner" "12" "7"
   while true; do
@@ -2313,7 +2318,7 @@ browse_journal() {
     esac
   done
 }
-# ==== End Of Log Browser ====
+# ============================================== End Of Log Browser ======================================================
 create_service() {
   rsync_cmd="${1:-}"
   job="${2:-}"
