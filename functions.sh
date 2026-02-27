@@ -1875,10 +1875,11 @@ parse_firewall_command() {
   fi
   # ==== Service Name Mapping ====
   declare -A service_ports=(
+    # Standard services
     [tcpmux]=1
     [echo]=7
     [discard]=9
-    [systat]=11
+    [systat]=11 
     [daytime]=13
     [qotd]=17
     [chargen]=19
@@ -1890,7 +1891,6 @@ parse_firewall_command() {
     [time]=37
     [whois]=43
     [tacacs]=49
-    [dns]=53
     [dhcp-server]=67
     [dhcp-client]=68
     [tftp]=69
@@ -1904,15 +1904,15 @@ parse_firewall_command() {
     [nntp]=119
     [ntp]=123
     [imap]=143
-    [snmp]=161
-    [snmptrap]=162
+    [snmp]="udp:161 tcp:161"
+    [snmptrap]="udp:162 tcp:162"
     [bgp]=179
     [irc]=194
     [ldap]=389
     [https]=443
     [microsoft-ds]=445
-    [smtps]=465
-    [syslog]=514
+    [smtps]=465  
+    [syslog]="udp:514 tcp:514"
     [ldaps]=636
     [ftps-data]=989
     [ftps]=990
@@ -1925,17 +1925,17 @@ parse_firewall_command() {
     [vnc]=5900
     [redis]=6379
     [mongodb]=27017
-    [sip]=5060
-    [sips]=5061
+    [sip]="udp:5060 tcp:5060"
+    [sips]="udp:5061 tcp:5061"
     [pptp]=1723
     [l2tp]=1701
     [ipsec-isakmp]=500
-    [openvpn]=1194
+    [openvpn]="udp:1194 tcp:1194"
     [docker]=2375
     [docker-tls]=2376
     [kubernetes-api]=6443
     [etcd]=2379
-    [grafana]=3000
+    [grafana]=3000 
     [prometheus]=9090
     [elasticsearch]=9200
     [kibana]=5601
@@ -1981,21 +1981,81 @@ parse_firewall_command() {
     [glusterfs]=24007
     [vault]=8200
     [consul]=8500
+    [dns]="tcp:53 udp:53"
+    [apache]="tcp:80 tcp:443"
+    [nginx]="tcp:80 tcp:443"
+    [bind9]="tcp:53 udp:53"
+    [haproxy]="tcp:80 tcp:443"
+    [memcached]="tcp:11211"
+    [elasticsearch]="tcp:9200"
+    [kibana]="tcp:5601"
+    [grafana]="tcp:3000"
+    [prometheus]="tcp:9090"
+    [vault]="tcp:8200"
+    [postfix]="tcp:25"
+    [dovecot]="tcp:143 tcp:993"
+    [cyrus-imap]="tcp:143 tcp:993"
+    [mongodb]="tcp:27017"
   )
+  tcp_ports=()
+  udp_ports=()
+  port_range=""
+  port=""
+  ports=""
   for service in "${!service_ports[@]}"; do
     if grep -Eq "\b$service\b" <<< "$rule_lower"; then
-      port="${service_ports[$service]}"
-      if [[ -z "$proto" ]]; then
-        proto="tcp"
-      fi
+      ports="${service_ports[$service]}"
+      for entry in $ports; do
+        if [[ "$entry" == *:* ]]; then
+          proto="${entry%%:*}"
+          port_only="${entry##*:}"
+        else
+          proto="tcp"
+          port_only="$entry"
+        fi
+        if [[ "$proto" == "tcp" ]]; then
+          tcp_ports+=("$port_only")
+        elif [[ "$proto" == "udp" ]]; then
+          udp_ports+=("$port_only")
+        fi
+      done
       break
     fi
   done
-  if [[ -z "$port" && "$rule_lower" =~ ([0-9]{1,5}) ]]; then
+  # Detect explicit numeric port if no service matched
+  if [[ -z "$ports" && "$rule_lower" =~ ([0-9]{1,5}) ]]; then
     can_port="${BASH_REMATCH[1]}"
     if valid_port "$can_port"; then
-        port="$can_port"
+      tcp_ports+=("$can_port")
     fi
+  fi
+  if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
+    port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
+    proto="${proto:-tcp}"
+    valid_range "$port_range" || die "Invalid port range"
+  fi
+  # ==== Port Args ====
+  build_port_args() {
+    local proto="$1"
+    local -n ports_ref="$2"
+    local args=()
+    if (( ${#ports_ref[@]} > 1 )); then
+      # multiple ports → multiport
+      args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
+    elif (( ${#ports_ref[@]} == 1 )); then
+      # single port → --dport
+      args+=("--dport" "${ports_ref[0]}")
+    fi
+    echo "${args[@]}"
+  }
+  # ==== TCP / UDP port args ====
+  tcp_port_args=()
+  udp_port_args=()
+  if (( ${#tcp_ports[@]} > 0 )); then
+    tcp_port_args=($(build_port_args "tcp" tcp_ports))
+  fi
+  if (( ${#udp_ports[@]} > 0 )); then
+    udp_port_args=($(build_port_args "udp" udp_ports))
   fi
   # ==== Detect Port/Range ====
   if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
@@ -2050,15 +2110,14 @@ parse_firewall_command() {
     [[ -n "$proto" ]] && fw_cmd+=(-p "$proto")
     [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
     [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
-    [[ -n "$ports" ]] && fw_cmd+=(-m multiport --dports "$ports")
-    # Only add ports for tcp/udp
-    if [[ "$proto" == "tcp" || "$proto" == "udp" ]]; then
-      if [[ -n "$port_range" ]]; then
-        fw_cmd+=(--dport "$port_range")
-      elif [[ -n "$port" ]]; then
-        fw_cmd+=(--dport "$port")          
-	  fi
+    # ==== Add port arguments (multiport / single port / range) ====
+    if [[ "$proto" == "tcp" ]]; then
+       [[ ${#tcp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "tcp" tcp_ports))
+    elif [[ "$proto" == "udp" ]]; then
+      [[ ${#udp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "udp" udp_ports))
     fi
+    # Add port range if defined
+    [[ -n "$port_range" ]] && fw_cmd+=(--dport "$port_range")
     # ==== Allow Ports For NAT ====
     if [[ "$action" == "DNAT" || "$action" == "SNAT" ]]; then
       [[ -n "$dst_ip" ]] && fw_cmd+=(-j "$action" --to-destination "$dst_ip")
