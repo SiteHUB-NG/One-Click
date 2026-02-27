@@ -35,6 +35,7 @@ rule_engine() {
   rule_lower=${rule,,}
   rule_lower=$(sed -E 's/ ?(how to|please|can you|help|fix|this) ?//g' <<< "$rule_lower")
   last_action=""
+  last_proto=""
   generated_cmds=()
   detect_firewall_backend
   if iptables -V 2>/dev/null | grep -qi nf_tables; then
@@ -58,7 +59,7 @@ rule_engine() {
   done
   # ==== Parse all subcommands first ====
   for sub in "${subcommands[@]}"; do
-    parse_firewall_command "$sub"
+    parse_firewall_command "$sub" "$last_proto"
   done
   # ==== Deduplicate against kernel ====
   unique_cmds=()
