@@ -502,7 +502,9 @@ if [[ -z "${!flag:-}" ]]; then
     echo "${cyan}Attach with: tmux attach -t ${session}${reset}"
     exit 1
   fi
-  chmod +x "${path:?Path not set}"
+  if [[ -f "$path" ]]; then
+   chmod +x "${path:?Path not set}"
+  fi
   printf '%s' "Launching a TMUX session for One-Click"
   for i in {1..13}; do printf '.'; sleep 0.3; done
   echo
