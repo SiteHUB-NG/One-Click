@@ -629,7 +629,7 @@ if [[ $# -gt 0 ]]; then
         "      range               A range of ports e.g 'allow tcp range 1000-2000'" \
         "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them." \
         "      sensitive-list:     List all of the ports in the sensitive list." \
-        "      sensitive-remove:   Remove ports from the sensitive list" \        
+        "      sensitive-remove:   Remove ports from the sensitive list" \
         "      from                From source IP" \
         "      to                  To destination IP " \
         "      $(tput smul)Protocols:$(tput rmul) " \
