@@ -67,18 +67,18 @@ rule_engine() {
     read -r -a arr <<< "$cmd"
     # Skip if rule already exists in kernel
     if [[ "${fw_bin:-}" == "iptables" || "${fw_bin:-}" == "ip6tables" ]]; then
-      if iptables -C "${arr[@]}" &>/dev/null; then
-        info "Skipping duplicate rule already in kernel: $cmd"
-        duplicate_skipped=1
-        continue
-      fi
+        if iptables -C "${arr[@]}" &>/dev/null; then
+            info "Skipping duplicate rule already in kernel: $cmd"
+            duplicate_skipped=1
+            continue
+        fi
     fi
     unique_cmds+=("$cmd")
   done
   if [[ ${#unique_cmds[@]} -eq 0 ]]; then
     if [[ "$duplicate_skipped" == "1" ]]; then
-      info "All rules already exist. Nothing to change."
-      exit 0
+        info "All rules already exist. Nothing to change."
+        exit 0
     fi
     die "No valid commands generated."
   fi
@@ -86,16 +86,16 @@ rule_engine() {
   if [[ "$dry_run" -eq 1 ]]; then
     info "[DRY RUN] The following commands would be executed:"
     for cmd in "${unique_cmds[@]}"; do
-      echo "  $cmd"
+        echo "  $cmd"
     done
     exit 0
   fi
-  # ==== Preview & Confirm ====
+  # ==== Preview & Confirm ==== 
   info "The following commands will be executed:"
   for cmd in "${unique_cmds[@]}"; do
     # ==== Capitalize RAW Display Entries ====
     cmd=$(
-      sed -E '
+        sed -E '
         s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
         s/input|output|forward|prerouting/\U&/g
     ' <<< "$cmd")
@@ -106,16 +106,20 @@ rule_engine() {
   confirm="${confirm,,}"
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
     i=""
+    # ==== Take snapshot BEFORE applying rule ====
+    tmp_snapshot=$(mktemp /tmp/iptables_backup.XXXXXX)
+    iptables-save > "$tmp_snapshot"
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
       # ==== Handle RAW Entries ====
       cmd=$(
         sed -E '
           s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
-          s/input|output|forward|prerouting/\U&/g
+          s/input|output|forward|prerouting/\U&/g;
+  
       ' <<< "$cmd")
       read -r -a arr <<< "$cmd"
-      # ==== Execute Commands ====
+       # ==== Execute Commands ====
       if "${arr[@]}"; then
         info "Rule applied: $cmd"
       else
@@ -131,13 +135,30 @@ rule_engine() {
         error "${yellow}[][]${blue} $f ${yellow}[][]${reset}"
       done
       echo "========================================="
-      die "Installation Failed!"
     else
       success "All rules successfully applied."
-      exit 0
     fi
   else
     warn "No changes applied."
     exit 0
   fi
+  echo
+  echo "${yellow}[SAFETY]:${reset} If you cannot confirm, the firewall will revert in 10 seconds."
+  if ! read -t 10 -rp "[USER]: Confirm rule is safe? (y/yes to keep): " safety_confirm ; then
+    safety_confirm=""
+  fi
+  safety_confirm="${safety_confirm,,}"
+  if [[ "$safety_confirm" != "y" && "$safety_confirm" != "yes" ]]; then
+    warn "No confirmation received. Reverting firewall to previous state..."
+    if iptables-restore < "$tmp_snapshot"; then
+      success "Firewall successfully reverted to previous state."
+    else
+      error "Failed to revert firewall from snapshot!"
+      fatal=1
+    fi
+  else
+    success "Rule confirmed and kept."
+  fi
+  # ==== Remove temporary snapshot ====
+  rm -f "$tmp_snapshot"
 }
