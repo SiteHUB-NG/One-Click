@@ -477,11 +477,7 @@ if ! command -v 'one-click' >/dev/null 2>&1; then
   exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
-if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
-  source "$tab_complete"
-elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
-  source "$tab_complete2"
-else
+if ! source "${tab_complete:-${tab_complete2}" &> /dev/null; then
   die "Dependancy not handled"
 fi
 # ==== Install dependancies ====
@@ -571,11 +567,13 @@ if [[ $# -gt 0 ]]; then
     -u|--uninstall)
       if command -v one-click >/dev/null 2>&1; then
         warn "This will completely remove One-Click and all related files."
-        read -rp "Are you sure? [y/n]: " uninstall_confirm
+        read -rp "${cyan}Are you sure? ${yellow}[y|n]:${reset} " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
-          rm -rf "$log_dir" "$base" "$manpage" "$tab_complete" "/var/cache/one-click" "$(command -v one-click)"
+          rm -rf "$log_dir" "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
           success "One-Click has been uninstalled."
+          complete -r one-click
+          unset -f _one-click
           exit 0
         else
           die "Uninstall aborted."
@@ -611,15 +609,38 @@ if [[ $# -gt 0 ]]; then
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
         "  bench                   Benchmarking tool automates the execution of tests" \
-        "  engine                  Converts human-readable commands into iptables commands" \
+        "  (engine|rule-engine)    Converts human-readable commands into iptables commands" \
+        "      $(tput smul)subcommands:$(tput rmul)        Subcommands can be chained e.g 'allow udp port 100 and reject 200 output and tcp 300'." \
+        "      --dry-run           Show what commands would be executed without applying them." \
+        "      (open|list) <arg>?  Opens firewall table. Can optionally be extended by specifying the table arg" \
+        "      flush <table>       Flush rules in specified table e.g 'flush mangle'." \
+        "      flush all           Flush all tables e.g 'one-click firewall flush all'." \
+        "      (backup|save)       Create a backup file of the firewall configuration e.g 'one-click engine backup'." \
+        "      restore             Restore firewall configuration from an available backup e.g 'one-click engine restore'." \
+        "      allow <arg>         (ACCEPT) Open ports e.g 'allow 443' or  'allow apache' to accept packets on ports 80 and 443" \
+        "      (deny|drop) <arg>   (DROP) Drop packets e.g 'deny https' or 'close smtp' or 'drop smtp'" \
+        "      (reject|decline)    (REJECT) Reject packets e.g 'bounce https' or 'reject 22'" \
+        "      (delete|remove)     (DELETE) Delete rule entries from tables e.g 'remove line 3 from nat'. Use 'open' command first" \
+        "      (mask|hide)         (MASQUERADE) e.g 'hide from 1.1.1.1'" \
+        "      enable (icmp|echo)  Enable ICMP protocol e.g 'allow enable echo'" \
+        "      disable (icmp|echo) Disable ICMP protocol e.g 'disable icmp'" \
+        "      raw: <iptables cmd> Enter raw commands for extended functionality" \
+        "      multiport           Multiple Ports e.g 'bounce https multiport 50 556 4000'" \
+        "      range               A range of ports e.g 'allow tcp range 1000-2000'" \
+        "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them." \
+        "      sensitive-list:     List all of the ports in the sensitive list." \
+        "      sensitive-remove:   Remove ports from the sensitive list" \        
+        "      from                From source IP" \
+        "      to                  To destination IP " \
+        "      $(tput smul)Protocols:$(tput rmul) " \
+        "      tcp                 TCP Traffic is the deafult for most chains" \
+        "      udp                 UDP Traffic 'allow udp port 100'" \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  repair                  Repair network (Includes snapshots and backup of network files)" \
         "  rule-engine             Converts human-readable commands into iptables commands" \
-        "  sys-info                System Information" \
-        "  system                  System Information" \
-        "  logs                    System Log File Browswer" \
-        "  log-browser             System Log File Browswer" \
+        "  (system|sys-info)       System Information" \
+        "  (logs|log-browser)      System Log File Browswer" \
         "  cron                    Configure a cron job" \
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
