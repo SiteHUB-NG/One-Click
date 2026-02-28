@@ -31,7 +31,7 @@ rule_engine() {
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
-  sensitive_ports=(22 3389 80 443)
+  default_sensitive_ports=(21 22 25 465 587 3306 9090)
   rule_lower=${rule,,}
   rule_lower=$(sed -E 's/ ?(how to|please|can you|help|fix|this) ?//g' <<< "$rule_lower")
   last_action=""
