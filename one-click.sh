@@ -477,7 +477,11 @@ if ! command -v 'one-click' >/dev/null 2>&1; then
   exec 'one-click' "$@"
 fi
 set -- $(map_one_click "$@")
-if ! source "${tab_complete:-${tab_complete2}" &> /dev/null; then
+if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
+  source "$tab_complete"
+elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
+  source "$tab_complete2"
+else
   die "Dependancy not handled"
 fi
 # ==== Install dependancies ====
@@ -570,6 +574,11 @@ if [[ $# -gt 0 ]]; then
         read -rp "${cyan}Are you sure? ${yellow}[y|n]:${reset} " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
+          if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
+            rm -rf "$log_dir" "$base" "$manpage" "$tab_complete" "/var/cache/one-click" "$(command -v one-click)"
+          elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
+            rm -rf "$log_dir" "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
+          fi
           rm -rf "$log_dir" "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
           success "One-Click has been uninstalled."
           complete -r one-click
