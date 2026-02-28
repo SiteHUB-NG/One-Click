@@ -14,6 +14,7 @@
 # ====== One-Click ====== #
 mkdir -p "${log_dir:-}"
 touch "${log_error_file:-}" "${log_file:-}"
+sensitive_ports_file="/etc/one-click/rule-engine/.sensitive.ports"
 # ==== Build Essential Variables ====
 build_vars() {
   mapfile -t local_drives < <(lsblk -dn -o NAME,SIZE,TYPE | awk '$3=="disk"{print $1,$2}')
@@ -1608,7 +1609,6 @@ rule_exists_iptables() {
   if [[ "${cmd[0]:-}" == "$fw_bin" ]]; then
     cmd=("${cmd[@]:1}")
   fi
-  # Check rule existence using iptables -C (works for all options)
   if "$fw_bin" -C "${cmd[@]}" &>/dev/null; then
     return 0
   else
@@ -1668,12 +1668,43 @@ clean_duplicate_rules() {
   ' "$tmpfile" > "${tmpfile}.deduped"
   # ==== Attempt Restore ====
   iptables-restore < "${tmpfile}.deduped" || {
-      warn "Restore failed." "Firewall has not been changed."
-      rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
-      return 1
+    warn "Restore failed." "Firewall has not been changed."
+    rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
+    return 1
   }
   rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
   success "Duplicate cleanup complete." "Firewall reconfigured retaining one copy of each duplicate."
+}
+load_sensitive_ports() {
+  sensitive_ports=()
+  if [[ -f "$sensitive_ports_file" ]]; then
+    mapfile -t sensitive_ports < "$sensitive_ports_file"
+  fi
+}
+save_sensitive_ports() {
+  mkdir -p "$(dirname "$sensitive_ports_file")"
+  printf "%s\n" "${sensitive_ports[@]}" > "$sensitive_ports_file"
+}
+check_sensitive_ports() {
+    local proto="$1"
+    local -n ports_ref="$2"  # pass array by name
+    local action="$3"
+    for p in "${ports_ref[@]}"; do
+        for sp in "${sensitive_ports[@]}"; do
+            if [[ "$p" == "$sp" ]]; then
+                if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
+                    warn "You are blocking sensitive port $p. This may lock you out."
+                    read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
+                    confirm="${confirm,,}"
+                    if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
+                        die "Aborted."
+                    fi
+                else
+                    warn "Port $p is considered sensitive."
+                fi
+            fi
+        done
+    done
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
@@ -1693,10 +1724,57 @@ parse_firewall_command() {
   table="filter" 
   del_line=""
   rule_lower="${rule,,}"
-  # ==== RAW IPTABLES MODE ====
-  if [[ "$rule_lower" =~ ^raw: ]]; then
-    local raw_cmd
-    raw_cmd="${rule#raw: }"
+  # ==== Add Sensitive Ports ====
+  if [[ "$rule_lower" =~ ^sensitive: ]]; then
+    load_sensitive_ports
+    local new_ports
+    new_ports=($(grep -oE '[0-9]{1,5}' <<< "$rule"))
+    for p in "${new_ports[@]}"; do
+      if valid_port "$p"; then
+        if ! [[ " ${sensitive_ports[*]} " =~ " $p " ]]; then
+          sensitive_ports+=("$p")
+        fi
+      else
+        warn "Ignored invalid port: $p"
+      fi
+      done
+      save_sensitive_ports
+      info "Sensitive ports updated: ${sensitive_ports[*]}"
+      exit 0
+    fi
+    # ==== Remove Sensitive Ports ====
+    if [[ "$rule_lower" =~ ^sensitive-remove: ]]; then
+      load_sensitive_ports
+      local remove_ports
+      remove_ports=($(grep -oE '[0-9]{1,5}' <<< "$rule"))
+      for p in "${remove_ports[@]}"; do
+        sensitive_ports=("${sensitive_ports[@]/$p}")
+      done
+      save_sensitive_ports
+      info "Sensitive ports updated (after removal): ${sensitive_ports[*]}"
+      exit 0
+    fi
+    # ==== List Server Ports ====
+    if [[ "$rule_lower" =~ ^sensitive-list ]]; then
+      load_sensitive_ports
+      if (( ${#sensitive_ports[@]} == 0 )); then
+        info "No sensitive ports configured."
+      else
+        info "Current sensitive ports: ${sensitive_ports[*]}"
+      fi
+      exit 0
+    fi
+    # ==== ICMP alias ====
+    if grep -Eqi "\becho\b" <<< "$rule_lower"; then
+      rule_lower="icmp"  
+    fi
+    if grep -Eq "\b(masquerade|mask|hide|snat|dnat)\b" <<< "$rule_lower"; then
+      skip_service_ports=1
+    fi
+    # ==== Raw Iptables ====
+    if [[ "$rule_lower" =~ ^raw: ]]; then
+      local raw_cmd
+      raw_cmd="${rule#raw: }"
     # ==== Detect ip6tables ====
     if grep -Eq "\bip6tables\b" <<< "$raw_cmd"; then
       fw_bin="ip6tables"
@@ -1802,21 +1880,45 @@ parse_firewall_command() {
     [[ "$action" == "ACCEPT" ]] && mode="-I"
     [[ "$action" == "DELETE" ]] && mode="-D"
   fi
-  # ==== ICMP enable/disable handling ====
-  if grep -Eqi "\b(icmp|echo)\b" <<< "$rule_lower"; then
-    if [[ "$ip_version" == "ipv6" ]]; then
-      proto="icmpv6"
-    else
-      proto="icmp"
-	fi
-    chain=${chain:-INPUT}
-    if grep -Eq "\benable\b" <<< "$rule_lower"; then
-      action="ACCEPT"
-      mode="-I"
-    elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
-      action="DROP"
-      mode="-A"
+  # ==== MASQUERADE / MASK / HIDE ====
+if grep -Eq "\b(masquerade|mask|hide)\b" <<< "$rule_lower"; then
+    table="nat"
+    chain="POSTROUTING"
+    mode="-A"
+    fw_bin="iptables"
+    # Extract source CIDR directly here (fresh parse)
+    if [[ "$rule_lower" =~ from[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?) ]]; then
+        src_ip="${BASH_REMATCH[1]}"
     fi
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain")
+    [[ -n "$src_ip" ]] && fw_cmd+=("-s" "$src_ip")
+    fw_cmd+=("-j" "MASQUERADE")
+    generated_cmds+=("${fw_cmd[*]}")
+    return 0
+  fi
+  # ==== Detect flush / clear / reset ====
+if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
+    declare -a tables_to_flush=("filter" "nat" "mangle" "raw" "security")
+    for tbl in "${tables_to_flush[@]}"; do
+      if grep -Eqi "\b$tbl\b" <<< "$rule_lower"; then
+        tables_to_flush=("$tbl")
+        break
+      fi
+    done
+    if grep -Eqi "\b(ipv6|ip6tables)\b" <<< "$rule_lower"; then
+      fw_bin="ip6tables"
+    else
+      fw_bin="iptables"
+    fi
+    if grep -Eqi "\ball\b" <<< "$rule_lower"; then
+      info "Flushing all tables: ${tables_to_flush[*]} ($fw_bin)"
+    else
+      info "Flushing table(s): ${tables_to_flush[*]} ($fw_bin)"
+    fi
+    for tbl in "${tables_to_flush[@]}"; do
+      generated_cmds+=("$fw_bin -t $tbl -F")
+    done
+    return 0
   fi
   # ==== Detect Protocol ====
   #proto="tcp"
@@ -1844,22 +1946,19 @@ parse_firewall_command() {
     conn_state="INVALID"
   fi
   # ==== Detect Source IP ====
-  if [[ "$rule_lower" =~ (via|from|src|source)[[:space:]]+(address[[:space:]]+)?([0-9a-fA-F:./]+) ]]; then
-    src_ip="${BASH_REMATCH[3]}"
+  if [[ "$rule_lower" =~ \bfrom[[:space:]]+([0-9a-fA-F:.\/]+)\b ]]; then
+    src_ip="${BASH_REMATCH[1]}"
     if valid_ip "$src_ip"; then
       ip_version="ipv4"
     elif valid_ipv6 "$src_ip"; then
       ip_version="ipv6"
       fw_bin="ip6tables"
     else
-      die "Invalid source IP"
+      die "Invalid source IP: $src_ip"
     fi
   fi
-  if [[ "$ip_version" == "ipv6" && "$proto" == "icmp" ]]; then
-    proto="icmpv6"
-  fi
   # ==== Detect Destination IP ====
-  if [[ "$rule_lower" =~ (to|dst|destination)[[:space:]]+(address[[:space:]]+)?([0-9./]+) ]]; then
+  if [[ "$rule_lower" =~ \b(to|dst|destination)[[:space:]]+(address[[:space:]]+)?([0-9a-fA-F:.\/]+)\b ]]; then
     dst_ip="${BASH_REMATCH[3]}"
     if valid_ip "$dst_ip"; then
       ip_version="ipv4"
@@ -1867,7 +1966,7 @@ parse_firewall_command() {
       ip_version="ipv6"
       fw_bin="ip6tables"
     else
-      die "Invalid destination IP"
+      die "Invalid destination IP: $dst_ip"
     fi
   fi
   # ==== Detect Delete Line ====
@@ -2007,89 +2106,129 @@ parse_firewall_command() {
   port_range=""
   port=""
   ports=""
-  for service in "${!service_ports[@]}"; do
-    if grep -Eq "\b$service\b" <<< "$rule_lower"; then
-      ports="${service_ports[$service]}"
-      for entry in $ports; do
-        if [[ "$entry" == *:* ]]; then
-          proto="${entry%%:*}"
-          port_only="${entry##*:}"
-        else
-          proto="tcp"
-          port_only="$entry"
-        fi
-        if [[ "$proto" == "tcp" ]]; then
-          tcp_ports+=("$port_only")
-          elif [[ "$proto" == "udp" ]]; then
-          udp_ports+=("$port_only")
-        fi
-      done
+  # ==== ICMP / echo handling ====
+  if grep -Eqi "\b(icmp|echo)\b" <<< "$rule_lower"; then
+    proto="icmp"
+    [[ "$ip_version" == "ipv6" ]] && proto="icmpv6"
+    chain=${chain:-INPUT}
+    if grep -Eq "\benable\b" <<< "$rule_lower"; then
+        action="ACCEPT"
+        mode="-I"
+    elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
+        action="DROP"
+        mode="-A"
     fi
-  done
-  # ==== Remove Duplicate Ports ====
-  tcp_ports=($(printf "%s\n" "${tcp_ports[@]}" | sort -n | uniq))
-  udp_ports=($(printf "%s\n" "${udp_ports[@]}" | sort -n | uniq))
-  # ==== Parse explicit numeric ports ====
-  # ==== Determine requested protocol first ====
-  if grep -Eqi "\budp\b" <<< "$rule_lower"; then
-    requested_proto="udp"
-  elif grep -Eqi "\btcp\b" <<< "$rule_lower"; then
-    requested_proto="tcp"
-  elif grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
-    requested_proto="icmp"
-  else
-    requested_proto="tcp"  # default fallback
-  fi
-  # ==== Extract all numeric ports from human input ====
-  mapfile -t all_ports < <(grep -oE '[0-9]{1,5}' <<< "$rule_lower")
-  for p in "${all_ports[@]}"; do
-    if valid_port "$p"; then
-      case "$requested_proto" in
-        udp) udp_ports+=("$p") ;;
-        tcp) tcp_ports+=("$p") ;;
-        icmp) ;;  # ICMP has no ports
-        *) tcp_ports+=("$p") ;;
-      esac
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
+    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
+    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+    generated_cmds+=("${fw_cmd[*]}")
+    skip_service_ports=1
+    return 0
+   fichain=${chain:-INPUT}
+   fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
+   [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
+   [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
+   [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
+   [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+   generated_cmds+=("${fw_cmd[*]}")
+   skip_service_ports=1
+   return 0
+   fi
+    # ==== Service Name Mapping ====
+    if [[ -z "${skip_service_ports:-}" ]]; then
+      for service in "${!service_ports[@]}"; do
+        if grep -Eq "\b$service\b" <<< "$rule_lower"; then
+          ports="${service_ports[$service]}"
+            for entry in $ports; do
+              if [[ "$entry" == *:* ]]; then
+                proto="${entry%%:*}"
+                port_only="${entry##*:}"
+              else
+                proto="tcp"
+                port_only="$entry"
+              fi
+              if [[ "$proto" == "tcp" ]]; then
+                tcp_ports+=("$port_only")
+              elif [[ "$proto" == "udp" ]]; then
+                udp_ports+=("$port_only")
+              fi
+            done
+          fi
+        done
+      fi
+    # ==== Remove Duplicate Ports ====
+    tcp_ports=($(printf "%s\n" "${tcp_ports[@]}" | sort -n | uniq))
+    udp_ports=($(printf "%s\n" "${udp_ports[@]}" | sort -n | uniq))
+    # ==== Parse explicit numeric ports ====
+    # ==== Determine requested protocol first ====
+    if grep -Eqi "\budp\b" <<< "$rule_lower"; then
+      requested_proto="udp"
+    elif grep -Eqi "\btcp\b" <<< "$rule_lower"; then
+      requested_proto="tcp"
+    elif grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
+      requested_proto="icmp"
+    else
+      requested_proto="tcp"  # default fallback
     fi
-  done
-  # ==== Handle explicit port ranges like 100-200 ====
-  if grep -Eq '\b(range|ports?)\b[[:space:]]+[0-9]+[:-][0-9]+' <<< "$rule_lower"; then
-    port_range=$(sed -E 's/.* ([0-9:-]+).*/\1/;s/-/:/' <<< "$rule_lower")
-    proto="${requested_proto:-tcp}"
-    valid_range "$port_range" || die "Invalid port range"
-  fi
-  # ==== Build per-protocol port args ====
-  build_port_args() {
+    # ==== Extract all numeric ports from human input ====
+    # Remove IP addresses
+    rule_ports_only="$rule_lower"
+    rule_ports_only=$(sed -E 's/\b(to|from)[[:space:]]+[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
+    rule_ports_only=$(sed -E 's/\b(to|dst|destination)[[:space:]]+(address[[:space:]]+)?[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
+    mapfile -t all_ports < <(grep -oE '[0-9]{1,5}' <<< "$rule_ports_only")
+    for p in "${all_ports[@]}"; do
+      if valid_port "$p"; then
+        case "$requested_proto" in
+          udp) udp_ports+=("$p") ;;
+          tcp) tcp_ports+=("$p") ;;
+          icmp)                  ;; 
+          *) tcp_ports+=("$p")   ;;
+        esac
+      fi
+    done
+    # ==== Handle explicit port ranges like 100-200 ====
+    # ==== ICMP / echo handling ====
+    if grep -Eqi "\b(icmp|echo)\b" <<< "$rule_lower"; then
+      proto="icmp"
+      [[ "$ip_version" == "ipv6" ]] && proto="icmpv6"
+      chain=${chain:-INPUT}
+      if grep -Eq "\benable\b" <<< "$rule_lower"; then
+        action="ACCEPT"
+        mode="-I"
+      elif grep -Eq "\bdisable\b" <<< "$rule_lower"; then
+        action="DROP"
+        mode="-A"
+      fi
+      skip_service_ports=1   # prevent TCP/UDP port logic
+      # DO NOT append to generated_cmds here
+    fi
+    # ==== Build per-protocol port args ====
+    build_port_args() {
     local proto="$1"
     local -n ports_ref="$2"
     local args=()
-    if (( ${#ports_ref[@]} > 1 )); then
-        args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
+    local has_range=0
+    for p in "${ports_ref[@]}"; do
+      [[ "$p" == *-* ]] && has_range=1
+    done
+    if (( has_range )); then
+      for p in "${ports_ref[@]}"; do
+        args+=("--dport" "$p")
+      done
+    elif (( ${#ports_ref[@]} > 1 )); then
+      args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
     elif (( ${#ports_ref[@]} == 1 )); then
-        args+=("--dport" "${ports_ref[0]}")
+      args+=("--dport" "${ports_ref[0]}")
     fi
     echo "${args[@]}"
   }
   tcp_port_args=()
   udp_port_args=()
-  [[ ${#tcp_ports[@]} -gt 0 ]] && tcp_port_args=($(build_port_args "tcp" tcp_ports))
-  [[ ${#udp_ports[@]} -gt 0 ]] && udp_port_args=($(build_port_args "udp" udp_ports))
-  if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
-    for sp in "${sensitive_ports[@]}"; do
-      if [[ "$port" == "$sp" ]]; then
-        warn "You are blocking sensitive port $sp. This may lock you out."
-        read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
-        if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
-          die "Aborted."
-        fi
-      fi
-    done
-  fi
-  for sensitive in "${sensitive_ports[@]}"; do
-    if [[ "$port" == "$sensitive" ]]; then
-      warn "Port $port is considered sensitive." 
-    fi
-  done
+  [[ ${#tcp_ports[@]} -gt 0 ]] && check_sensitive_ports "tcp" tcp_ports "$action"
+  [[ ${#udp_ports[@]} -gt 0 ]] && check_sensitive_ports "udp" udp_ports "$action"
+  #[[ ${#tcp_ports[@]} -gt 0 ]] && tcp_port_args=($(build_port_args "tcp" tcp_ports))
+  #[[ ${#udp_ports[@]} -gt 0 ]] && udp_port_args=($(build_port_args "udp" udp_ports))
   if [[ "$ip_version" == "ipv6" && "$ipv6_available" -ne 1 ]]; then
     die "ip6tables not available on this system."
   fi
@@ -2129,19 +2268,51 @@ parse_firewall_command() {
     if [[ "$port" == 22 && "$action" == "ACCEPT" ]]; then
       fw_cmd+=(-m state --state NEW,ESTABLISHED -m recent --name SSH --set)
     fi
-    [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
-    [[ "$action" != "DELETE" && -n "$action" ]] && fw_cmd+=(-j "$action")
+	[[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
+    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+  fi
+  if [[ "$action" == "MASQUERADE" ]]; then
+    fw_cmd+=(-j MASQUERADE)
+    [[ -n "$src_ip" ]] && fw_cmd+=("--to-source" "$src_ip")   # optional
+  fi
+  if [[ "$action" == "SNAT" ]]; then
+    [[ -n "$src_ip" ]] && fw_cmd+=(-j SNAT --to-source "$src_ip")
+  fi
+  if [[ "$action" == "DNAT" ]]; then
+    [[ -n "$dst_ip" ]] && fw_cmd+=(-j DNAT --to-destination "$dst_ip")
   fi
   # ==== Add ports per protocol ====
   if (( ${#tcp_ports[@]} > 0 )); then
     tcp_args=($(build_port_args "tcp" tcp_ports))
-    fw_cmd_tcp=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp "${tcp_args[@]}" -j "$action")
+    fw_cmd_tcp=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp "${tcp_args[@]}")
+    [[ -n "$src_ip" ]] && fw_cmd_tcp+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd_tcp+=(-d "$dst_ip")
+    [[ -n "$action" ]] && fw_cmd_tcp+=(-j "$action")
     generated_cmds+=("${fw_cmd_tcp[*]}")
   fi
   if (( ${#udp_ports[@]} > 0 )); then
     udp_args=($(build_port_args "udp" udp_ports))
-    fw_cmd_udp=("$fw_bin" -t "$table" "$mode" "$chain" -p udp "${udp_args[@]}" -j "$action")
+    fw_cmd_udp=("$fw_bin" -t "$table" "$mode" "$chain" -p udp "${udp_args[@]}")
+    [[ -n "$src_ip" ]] && fw_cmd_udp+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd_udp+=(-d "$dst_ip")
+    [[ -n "$action" ]] && fw_cmd_udp+=(-j "$action")
     generated_cmds+=("${fw_cmd_udp[*]}")
+  fi
+  # protocols without ports (ICMP, ICMPv6)
+  if [[ "$proto" == "icmp" || "$proto" == "icmpv6" ]]; then
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
+    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
+    [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
+    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+    generated_cmds+=("${fw_cmd[*]}")
+	if [[ "$action" == "MASQUERADE" ]]; then
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain")
+    [[ -n "$src_ip" ]] && fw_cmd+=("-s" "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd+=("-d" "$dst_ip")
+    fw_cmd+=("-j" "MASQUERADE")
+    generated_cmds+=("${fw_cmd[*]}")
+  fi
   fi
 }
 # =========================================== End Of Rule Engine ================================================== #
