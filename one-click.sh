@@ -35,22 +35,45 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  reinstall               OS reinstallation" \
     "  backup                  Backup with rsync + rclone" \
     "  bench                   Benchmarking tool automates the execution of tests" \
-    "  engine                  Converts human-readable commands into iptables commands" \
+    "  (engine|rule-engine)    Converts natural language into iptables commands" \
+    "      $(tput smul)subcommands:$(tput rmul)        Subcommands are delimited by $(tput setaf 373)and$(tput sgr 0) and $(tput setaf 373),$(tput sgr 0)(comma) can be chained e.g '$(tput setaf 228)allow udp port 100 and reject 200 output and tcp 300$(tput sgr0)'." \
+    "      --dry-run           Show what commands would be executed without applying them." \
+    "      (open|list) <arg>?  Opens firewall table. Can optionally be extended by specifying the table arg" \
+    "      flush <table>       Flush rules in specified table e.g '$(tput setaf 228)flush mangle$(tput sgr0)'." \
+    "      flush all           Flush all tables e.g '$(tput setaf 228)one-click firewall flush all$(tput sgr0)'." \
+    "      (backup|save)       Create a backup file of the firewall configuration e.g '$(tput setaf 228)one-click engine backup$(tput sgr0)'." \
+    "      restore             Restore firewall configuration from an available backup e.g '$(tput setaf 228)one-click engine restore$(tput sgr0)'." \
+    "      allow <arg>         (ACCEPT) Open ports e.g '$(tput setaf 228)allow 443$(tput sgr0)' or  '$(tput setaf 228)allow apache$(tput sgr0)' to accept packets on ports 80 and 443" \
+    "      (deny|drop) <arg>   (DROP) Drop packets e.g '$(tput setaf 228)deny https$(tput sgr0)' or '$(tput setaf 228)close smtp$(tput sgr0)' or '$(tput setaf 228)drop smtp$(tput sgr0)'" \
+    "      (reject|decline)    (REJECT) Reject packets e.g '$(tput setaf 228)bounce https$(tput sgr0)' or '$(tput setaf 228)reject 22$(tput sgr0)'" \
+    "      (delete|remove)     (DELETE) Delete rule entries from tables e.g '$(tput setaf 228)remove line 3 from nat$(tput sgr0)'. Use '$(tput setaf 228)open$(tput sgr0)' command first" \
+    "      (mask|hide)         (MASQUERADE) e.g 'hide from 1.1.1.1'" \
+    "      enable (icmp|echo)  Enable ICMP protocol e.g '$(tput setaf 228)allow enable echo$(tput sgr0)'" \
+    "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
+    "      raw: <iptables cmd> Enter raw commands for extended functionality" \
+    "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
+    "      range               A range of ports e.g '$(tput setaf 228)allow tcp range 1000-2000$(tput sgr0)'" \
+    "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
+    "      sensitive-list      List all of the ports in the sensitive list." \
+    "      sensitive-remove:   Remove ports from the sensitive list" \
+    "      from                From source IP" \
+    "      to                  To destination IP " \
+    "      $(tput smul)Protocols:$(tput rmul) " \
+    "      tcp                 TCP Traffic is the deafult for most chains" \
+    "      udp                 UDP Traffic '$(tput setaf 228)allow udp port 100$(tput sgr0)'" \
     "  migrator                System migration tool. Rsync + DD options." \
     "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
     "  repair                  Repair network (Includes snapshots and backup of network files)" \
     "  rule-engine             Converts human-readable commands into iptables commands" \
-    "  sys-info                System Information" \
-    "  system                  System Information" \
-    "  logs                    System Log File Browswer" \
-    "  log-browser             System Log File Browswer" \
+    "  (system|sys-info)       System Information" \
+    "  (logs|log-browser)      System Log File Browswer" \
     "  cron                    Configure a cron job" \
     "  help                    Show this help message" \
     "  uninstall               Remove one-click and all associated files and configurations." \
     "  --version               Check version" \
     " " "$(tput smul)Examples:$(tput rmul)" \
     "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
-    "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
+    "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" 
   exit 0
 fi
 # ==== Confirm Package Manager ====
@@ -618,46 +641,20 @@ if [[ $# -gt 0 ]]; then
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
         "  bench                   Benchmarking tool automates the execution of tests" \
-        "  (engine|rule-engine)    Converts human-readable commands into iptables commands" \
-        "      $(tput smul)subcommands:$(tput rmul)        Subcommands can be chained e.g 'allow udp port 100 and reject 200 output and tcp 300'." \
-        "      --dry-run           Show what commands would be executed without applying them." \
-        "      (open|list) <arg>?  Opens firewall table. Can optionally be extended by specifying the table arg" \
-        "      flush <table>       Flush rules in specified table e.g 'flush mangle'." \
-        "      flush all           Flush all tables e.g 'one-click firewall flush all'." \
-        "      (backup|save)       Create a backup file of the firewall configuration e.g 'one-click engine backup'." \
-        "      restore             Restore firewall configuration from an available backup e.g 'one-click engine restore'." \
-        "      allow <arg>         (ACCEPT) Open ports e.g 'allow 443' or  'allow apache' to accept packets on ports 80 and 443" \
-        "      (deny|drop) <arg>   (DROP) Drop packets e.g 'deny https' or 'close smtp' or 'drop smtp'" \
-        "      (reject|decline)    (REJECT) Reject packets e.g 'bounce https' or 'reject 22'" \
-        "      (delete|remove)     (DELETE) Delete rule entries from tables e.g 'remove line 3 from nat'. Use 'open' command first" \
-        "      (mask|hide)         (MASQUERADE) e.g 'hide from 1.1.1.1'" \
-        "      enable (icmp|echo)  Enable ICMP protocol e.g 'allow enable echo'" \
-        "      disable (icmp|echo) Disable ICMP protocol e.g 'disable icmp'" \
-        "      raw: <iptables cmd> Enter raw commands for extended functionality" \
-        "      multiport           Multiple Ports e.g 'bounce https multiport 50 556 4000'" \
-        "      range               A range of ports e.g 'allow tcp range 1000-2000'" \
-        "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them." \
-        "      sensitive-list:     List all of the ports in the sensitive list." \
-        "      sensitive-remove:   Remove ports from the sensitive list" \
-        "      from                From source IP" \
-        "      to                  To destination IP " \
-        "      $(tput smul)Protocols:$(tput rmul) " \
-        "      tcp                 TCP Traffic is the deafult for most chains" \
-        "      udp                 UDP Traffic 'allow udp port 100'" \
+        "  (engine|rule-engine)    Converts natural language into iptables commands" \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  repair                  Repair network (Includes snapshots and backup of network files)" \
-        "  rule-engine             Converts human-readable commands into iptables commands" \
         "  (system|sys-info)       System Information" \
-        "  (logs|log-browser)      System Log File Browswer" \
+        "  (log-browser|logs)      System Log File Browswer" \
         "  cron                    Configure a cron job" \
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
-        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" 
-      exit 1
+        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
+        exit 1
       ;;
   esac
 fi
