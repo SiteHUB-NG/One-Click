@@ -1676,11 +1676,25 @@ clean_duplicate_rules() {
   success "Duplicate cleanup complete." "Firewall reconfigured retaining one copy of each duplicate."
 }
 load_sensitive_ports() {
-  sensitive_ports=()
+  sensitive_ports=("${default_sensitive_ports[@]}")
   if [[ -f "$sensitive_ports_file" ]]; then
-    mapfile -t sensitive_ports < "$sensitive_ports_file"
+    while IFS= read -r s_port; do
+      [[ -z "$s_port" ]] && continue
+      [[ "$s_port" =~ ^# ]] && continue
+      sensitive_ports+=("$s_port")
+    done < "$sensitive_ports_file"
   fi
-}
+  # ==== Remove Duplicates ====
+  declare -A _seen
+  _unique_sensitive_ports=()
+  for unique in "${sensitive_ports[@]}"; do
+    if [[ -z "${_seen[$unique]:-}" ]]; then
+      _unique_ports+=("$unique")
+      _seen[$unique]=1
+    fi
+  done
+  sensitive_ports=("${_unique_ports[@]}")
+  }
 save_sensitive_ports() {
   mkdir -p "$(dirname "$sensitive_ports_file")"
   printf "%s\n" "${sensitive_ports[@]}" > "$sensitive_ports_file"
@@ -1691,16 +1705,16 @@ check_sensitive_ports() {
     local action="$3"
     for p in "${ports_ref[@]}"; do
         for sp in "${sensitive_ports[@]}"; do
-            if [[ "$p" == "$sp" ]]; then
+            if [[ "$unique" == "$sp" ]]; then
                 if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
-                    warn "You are blocking sensitive port $p. This may lock you out."
+                    warn "You are blocking sensitive port $unique. This may lock you out."
                     read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
                     confirm="${confirm,,}"
                     if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
                         die "Aborted."
                     fi
                 else
-                    warn "Port $p is considered sensitive."
+                    warn "Port $unique is considered sensitive."
                 fi
             fi
         done
