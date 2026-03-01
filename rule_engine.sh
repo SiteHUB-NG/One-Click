@@ -152,8 +152,8 @@ rule_engine() {
     exit 0
   fi
   echo
-  echo "${yellow}[SAFETY]:${reset} If you cannot confirm, the firewall will revert in 10 seconds."
-  if ! read -t 10 -rp "[USER]: Confirm rule is safe? (y/yes to keep): " safety_confirm ; then
+  echo "${yellow}[SAFETY]:${reset} Firewall configuration will rollback in 10 seconds if not confirmed functional!"
+  if ! read -t 10 -rp "${cyan}[USER]:${reset} Confirm rule is safe? (y|yes to keep): " safety_confirm ; then
     safety_confirm=""
   fi
   safety_confirm="${safety_confirm,,}"
