@@ -1591,7 +1591,6 @@ apply_rule() {
         continue
       fi
     fi
-    # Apply only after confirmation
     if [[ "$CONFIRM_APPLY" == "1" ]]; then
       if "${fw_cmd[@]}"; then
         success "Rule applied: ${fw_cmd[*]}"
@@ -1700,25 +1699,33 @@ save_sensitive_ports() {
   printf "%s\n" "${sensitive_ports[@]}" > "$sensitive_ports_file"
 }
 check_sensitive_ports() {
-    local proto="$1"
-    local -n ports_ref="$2"  # pass array by name
-    local action="$3"
-    for p in "${ports_ref[@]}"; do
-        for sp in "${sensitive_ports[@]}"; do
-            if [[ "$unique" == "$sp" ]]; then
-                if [[ "$action" == "DROP" || "$action" == "REJECT" ]]; then
-                    warn "You are blocking sensitive port $unique. This may lock you out."
-                    read -rp "${cyan}[USER]: ${reset}Are you absolutely sure? (yes/no): " confirm
-                    confirm="${confirm,,}"
-                    if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
-                        die "Aborted."
-                    fi
-                else
-                    warn "Port $unique is considered sensitive."
-                fi
-            fi
-        done
-    done
+  local proto="$1"
+  local -n ports_ref="$2"
+  local current_action="$3"
+  load_sensitive_ports
+  for p in "${ports_ref[@]}"; do
+    if [[ -n "${SENSITIVE_MAP[$p]:-}" ]]; then
+      local service_desc="${SENSITIVE_MAP[$p]}"
+      case "$current_action" in
+        DROP|REJECT|DELETE)
+          echo -e "${red}╔════════════════ [ CRITICAL WARNING ] ════════════════╗${reset}"
+          warn "Action: $current_action detected on Port $p ($service_desc)."
+          warn "This is a CORE SERVICE. Proceeding may cut your connection!"
+          echo -e "${red}╚══════════════════════════════════════════════════════╝${reset}"
+          read -rp "${cyan}[USER]:${reset} Confirm you want to restrict $service_desc? (yes/no): " confirm
+          if [[ "${confirm,,}" != "yes" ]]; then
+            die "Safety Abort: Prevented restriction of $service_desc."
+          fi
+          ;;
+        ACCEPT|OPEN|ALLOW)
+          info "Note: You are opening $p ($service_desc). Ensure this is intended."
+          ;;
+        LOG)
+          info "Monitoring $service_desc activity..."
+          ;;
+      esac
+    fi
+  done
 }
 parse_firewall_command() {
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
@@ -1778,7 +1785,7 @@ parse_firewall_command() {
       fi
       exit 0
     fi
-    # ==== ICMP alias ====
+    # ==== ICMP Alias ====
     if grep -Eqi "\becho\b" <<< "$rule_lower"; then
       rule_lower="icmp"  
     fi
@@ -1895,7 +1902,7 @@ parse_firewall_command() {
     [[ "$action" == "DELETE" ]] && mode="-D"
   fi
   # ==== MASQUERADE / MASK / HIDE ====
-if grep -Eq "\b(masquerade|mask|hide)\b" <<< "$rule_lower"; then
+  if grep -Eq "\b(masquerade|mask|hide)\b" <<< "$rule_lower"; then
     table="nat"
     chain="POSTROUTING"
     mode="-A"
@@ -1911,7 +1918,7 @@ if grep -Eq "\b(masquerade|mask|hide)\b" <<< "$rule_lower"; then
     return 0
   fi
   # ==== Detect flush / clear / reset ====
-if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
+  if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
     declare -a tables_to_flush=("filter" "nat" "mangle" "raw" "security")
     for tbl in "${tables_to_flush[@]}"; do
       if grep -Eqi "\b$tbl\b" <<< "$rule_lower"; then
@@ -2140,15 +2147,15 @@ if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
     skip_service_ports=1
     return 0
    fichain=${chain:-INPUT}
-   fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
-   [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
-   [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
-   [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
-   [[ -n "$action" ]] && fw_cmd+=(-j "$action")
-   generated_cmds+=("${fw_cmd[*]}")
-   skip_service_ports=1
-   return 0
-   fi
+    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
+    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
+    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
+    [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
+    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+    generated_cmds+=("${fw_cmd[*]}")
+    skip_service_ports=1
+    return 0
+    fi
     # ==== Service Name Mapping ====
     if [[ -z "${skip_service_ports:-}" ]]; then
       for service in "${!service_ports[@]}"; do
@@ -2183,14 +2190,13 @@ if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
     elif grep -Eqi "\bicmp\b" <<< "$rule_lower"; then
       requested_proto="icmp"
     else
-      requested_proto="tcp"  # default fallback
+      requested_proto="tcp" 
     fi
     # ==== Extract all numeric ports from human input ====
-    # Remove IP addresses
     rule_ports_only="$rule_lower"
     rule_ports_only=$(sed -E 's/\b(to|from)[[:space:]]+[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
     rule_ports_only=$(sed -E 's/\b(to|dst|destination)[[:space:]]+(address[[:space:]]+)?[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
-    mapfile -t all_ports < <(grep -oE '[0-9]{1,5}' <<< "$rule_ports_only")
+    mapfile -t all_ports < <(grep -oE '[0-9]{1,5}-[0-9]{1,5}|[0-9]{1,5}' <<< "$rule_ports_only")
     for p in "${all_ports[@]}"; do
       if valid_port "$p"; then
         case "$requested_proto" in
@@ -2201,7 +2207,6 @@ if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
         esac
       fi
     done
-    # ==== Handle explicit port ranges like 100-200 ====
     # ==== ICMP / echo handling ====
     if grep -Eqi "\b(icmp|echo)\b" <<< "$rule_lower"; then
       proto="icmp"
@@ -2217,118 +2222,76 @@ if grep -Eqi "\b(flush|clear|reset)\b" <<< "$rule_lower"; then
       skip_service_ports=1   # prevent TCP/UDP port logic
       # DO NOT append to generated_cmds here
     fi
-    # ==== Build per-protocol port args ====
+    # ==== Build Port Args ====
     build_port_args() {
-    local proto="$1"
-    local -n ports_ref="$2"
-    local args=()
-    local has_range=0
-    for p in "${ports_ref[@]}"; do
-      [[ "$p" == *-* ]] && has_range=1
-    done
-    if (( has_range )); then
-      for p in "${ports_ref[@]}"; do
-        args+=("--dport" "$p")
-      done
-    elif (( ${#ports_ref[@]} > 1 )); then
-      args+=("-m" "multiport" "--dports" "$(IFS=,; echo "${ports_ref[*]}")")
-    elif (( ${#ports_ref[@]} == 1 )); then
-      args+=("--dport" "${ports_ref[0]}")
+      local proto="$1"
+      local -n ports_ref="$2"
+      local args=()
+      if (( ${#ports_ref[@]} == 0 )); then
+        return
+      fi
+      local formatted_ports
+      formatted_ports=$(IFS=,; echo "${ports_ref[*]}")
+      formatted_ports="${formatted_ports//-/:}" 
+      if [[ "$formatted_ports" == *","* ]] || [[ "$formatted_ports" == *":"* ]]; then
+        # If there are multiple ports OR a range, use multiport
+        args+=("-m" "multiport" "--dports" "$formatted_ports")
+      else
+        # Just a single port
+        args+=("--dport" "$formatted_ports")
+      fi
+      echo "${args[@]}"
+    }
+    tcp_port_args=()
+    udp_port_args=()
+    if [[ "$ip_version" == "ipv6" && "$ipv6_available" -ne 1 ]]; then
+      die "ip6tables not available on this system."
     fi
-    echo "${args[@]}"
-  }
-  tcp_port_args=()
-  udp_port_args=()
-  [[ ${#tcp_ports[@]} -gt 0 ]] && check_sensitive_ports "tcp" tcp_ports "$action"
-  [[ ${#udp_ports[@]} -gt 0 ]] && check_sensitive_ports "udp" udp_ports "$action"
-  #[[ ${#tcp_ports[@]} -gt 0 ]] && tcp_port_args=($(build_port_args "tcp" tcp_ports))
-  #[[ ${#udp_ports[@]} -gt 0 ]] && udp_port_args=($(build_port_args "udp" udp_ports))
-  if [[ "$ip_version" == "ipv6" && "$ipv6_available" -ne 1 ]]; then
-    die "ip6tables not available on this system."
-  fi
-  # ==== Duplicate Prevention ====
-  if [[ "$fw_bin" == "iptables" || "$fw_bin" == "ip6tables" ]]; then
-    if [[ "$mode" == "-A" || "$mode" == "-I" ]]; then
-      if rule_exists_iptables "${fw_cmd[@]}"; then
-        warn "The rule being added already exists." \
-		  "Skipping adding duplicate entry"
-        duplicate_skipped=1
-        return 0
+    # ==== Duplicate Prevention ====
+    if [[ "$fw_bin" == "iptables" || "$fw_bin" == "ip6tables" ]]; then
+      if [[ "$mode" == "-A" || "$mode" == "-I" ]]; then
+        if rule_exists_iptables "${fw_cmd[@]}"; then
+          warn "The rule being added already exists." \
+		    "Skipping adding duplicate entry"
+          duplicate_skipped=1
+          return 0
+        fi
       fi
     fi
-  fi
-  # ==== build command ====
-  if [[ "$mode" == "-D" ]]; then
-    fw_cmd=("$fw_bin" -t "$table" -D "$chain" "$del_line")
-  else
-    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain")
-    [[ -n "$proto" ]] && fw_cmd+=(-p "$proto")
-    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
-    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
-    # ==== Add port arguments (single / multiport / range) ====
-    if [[ "$proto" == "tcp" ]]; then
-      [[ ${#tcp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "tcp" tcp_ports))
-    elif [[ "$proto" == "udp" ]]; then
-      [[ ${#udp_ports[@]} -gt 0 ]] && fw_cmd+=($(build_port_args "udp" udp_ports))
+	if (( ${#tcp_ports[@]} > 0 )); then
+      check_sensitive_ports "tcp" tcp_ports "${action:-ACCEPT}"
     fi
-    # ==== Multiport Support ====
-    [[ -n "$port_range" ]] && fw_cmd+=(-m multiport --dports "$port_range")
-    # ==== Allow Ports For NAT ====
-    if [[ "$action" == "DNAT" || "$action" == "SNAT" ]]; then
-      [[ -n "$dst_ip" ]] && fw_cmd+=(-j "$action" --to-destination "$dst_ip")
-      [[ -n "$src_ip" ]] && fw_cmd+=(-j "$action" --to-source "$src_ip")
+    if (( ${#udp_ports[@]} > 0 )); then
+      check_sensitive_ports "udp" udp_ports "${action:-ACCEPT}"
     fi
-    # ==== Generic P22 Coverage ====
-    if [[ "$port" == 22 && "$action" == "ACCEPT" ]]; then
-      fw_cmd+=(-m state --state NEW,ESTABLISHED -m recent --name SSH --set)
+    # ==== FINAL COMMAND CONSTRUCTION ====
+    if [[ "$mode" == "-D" ]]; then
+      generated_cmds+=("$fw_bin -t $table -D $chain $del_line")
+      return 0
     fi
-	[[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
-    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
+    # ==== Handle TCP ports ====
+    if (( ${#tcp_ports[@]} > 0 )); then
+      local tcp_args
+      tcp_args=$(build_port_args "tcp" tcp_ports)
+      local cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp $tcp_args)
+      [[ -n "$src_ip" ]] && cmd+=(-s "$src_ip")
+      [[ -n "$dst_ip" ]] && cmd+=(-d "$dst_ip")
+      [[ -n "$conn_state" ]] && cmd+=(-m state --state "$conn_state")
+      [[ -n "$action" ]] && cmd+=(-j "$action")
+      generated_cmds+=("${cmd[*]}")
+    fi
+    # Handle UDP ports
+    if (( ${#udp_ports[@]} > 0 )); then
+      local udp_args
+      udp_args=$(build_port_args "udp" udp_ports)
+      local cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p udp $udp_args)
+      [[ -n "$src_ip" ]] && cmd+=(-s "$src_ip")
+      [[ -n "$dst_ip" ]] && cmd+=(-d "$dst_ip")
+      [[ -n "$conn_state" ]] && cmd+=(-m state --state "$conn_state")
+      [[ -n "$action" ]] && cmd+=(-j "$action")
+      generated_cmds+=("${cmd[*]}")
   fi
-  if [[ "$action" == "MASQUERADE" ]]; then
-    fw_cmd+=(-j MASQUERADE)
-    [[ -n "$src_ip" ]] && fw_cmd+=("--to-source" "$src_ip")   # optional
-  fi
-  if [[ "$action" == "SNAT" ]]; then
-    [[ -n "$src_ip" ]] && fw_cmd+=(-j SNAT --to-source "$src_ip")
-  fi
-  if [[ "$action" == "DNAT" ]]; then
-    [[ -n "$dst_ip" ]] && fw_cmd+=(-j DNAT --to-destination "$dst_ip")
-  fi
-  # ==== Add ports per protocol ====
-  if (( ${#tcp_ports[@]} > 0 )); then
-    tcp_args=($(build_port_args "tcp" tcp_ports))
-    fw_cmd_tcp=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp "${tcp_args[@]}")
-    [[ -n "$src_ip" ]] && fw_cmd_tcp+=(-s "$src_ip")
-    [[ -n "$dst_ip" ]] && fw_cmd_tcp+=(-d "$dst_ip")
-    [[ -n "$action" ]] && fw_cmd_tcp+=(-j "$action")
-    generated_cmds+=("${fw_cmd_tcp[*]}")
-  fi
-  if (( ${#udp_ports[@]} > 0 )); then
-    udp_args=($(build_port_args "udp" udp_ports))
-    fw_cmd_udp=("$fw_bin" -t "$table" "$mode" "$chain" -p udp "${udp_args[@]}")
-    [[ -n "$src_ip" ]] && fw_cmd_udp+=(-s "$src_ip")
-    [[ -n "$dst_ip" ]] && fw_cmd_udp+=(-d "$dst_ip")
-    [[ -n "$action" ]] && fw_cmd_udp+=(-j "$action")
-    generated_cmds+=("${fw_cmd_udp[*]}")
-  fi
-  # protocols without ports (ICMP, ICMPv6)
-  if [[ "$proto" == "icmp" || "$proto" == "icmpv6" ]]; then
-    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p "$proto")
-    [[ -n "$src_ip" ]] && fw_cmd+=(-s "$src_ip")
-    [[ -n "$dst_ip" ]] && fw_cmd+=(-d "$dst_ip")
-    [[ -n "$conn_state" ]] && fw_cmd+=(-m state --state "$conn_state")
-    [[ -n "$action" ]] && fw_cmd+=(-j "$action")
-    generated_cmds+=("${fw_cmd[*]}")
-	if [[ "$action" == "MASQUERADE" ]]; then
-    fw_cmd=("$fw_bin" -t "$table" "$mode" "$chain")
-    [[ -n "$src_ip" ]] && fw_cmd+=("-s" "$src_ip")
-    [[ -n "$dst_ip" ]] && fw_cmd+=("-d" "$dst_ip")
-    fw_cmd+=("-j" "MASQUERADE")
-    generated_cmds+=("${fw_cmd[*]}")
-  fi
-  fi
-}
+}  
 # =========================================== End Of Rule Engine ================================================== #
 # ===================================== Display Table For Boot Recovery =============================================
 print_blue_table() {
