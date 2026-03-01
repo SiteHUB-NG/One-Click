@@ -38,7 +38,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  (engine|rule-engine)    Converts natural language into iptables commands" \
     "      $(tput smul)subcommands:$(tput rmul)        Subcommands are delimited by $(tput setaf 373)and$(tput sgr 0) and $(tput setaf 373),$(tput sgr 0)(comma) can be chained e.g '$(tput setaf 228)allow udp port 100 and reject 200 output and tcp 300$(tput sgr0)'." \
     "      --dry-run           Show what commands would be executed without applying them." \
-    "      (open|list) <arg>?  Opens firewall table. Can optionally be extended by specifying the table arg" \
+    "      (open|show) <arg>?  Opens firewall table view. Can optionally be extended by specifying the $(tput setaf 228)table arg$(tput sgr0) or with the '$(tput setaf 228)all$(tput sgr0)' flag." \
     "      flush <table>       Flush rules in specified table e.g '$(tput setaf 228)flush mangle$(tput sgr0)'." \
     "      flush all           Flush all tables e.g '$(tput setaf 228)one-click firewall flush all$(tput sgr0)'." \
     "      (backup|save)       Create a backup file of the firewall configuration e.g '$(tput setaf 228)one-click engine backup$(tput sgr0)'." \
@@ -52,7 +52,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
     "      raw: <iptables cmd> Enter raw commands for extended functionality" \
     "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
-    "      range               A range of ports e.g '$(tput setaf 228)allow tcp range 1000-2000$(tput sgr0)'" \
+    "      range               A range of ports e.g '$(tput setaf 228)range 1000-2000$(tput sgr0)'" \
     "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
     "      sensitive-list      List all of the ports in the sensitive list." \
     "      sensitive-remove:   Remove ports from the sensitive list" \
