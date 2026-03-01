@@ -31,7 +31,16 @@ rule_engine() {
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
-  default_sensitive_ports=(21 22 25 465 587 3306 9090)
+  # ==== Default Sensitive Ports ====
+  declare -A SENSITIVE_MAP=(
+    [22]="SSH (Remote Access)"
+    [21]="FTP (Unencrypted File Transfer)"
+    [25]="SMTP (Mail Routing)"
+    [443]="HTTPS (Web Traffic)"
+    [3306]="MySQL (Database)"
+    [9090]="Cockpit"
+    [51820]="WireGuard VPN"
+  )
   rule_lower=${rule,,}
   rule_lower=$(sed -E 's/ ?(how to|please|can you|help|fix|this) ?//g' <<< "$rule_lower")
   last_action=""
