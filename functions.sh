@@ -2309,7 +2309,7 @@ log_browser_menu() {
     case "$choice" in
       1) browse_files   ;;
       2) browse_journal ;;
-      0) exit           ;;
+      3) exit           ;;
     esac
   done
 }
