@@ -162,7 +162,7 @@ decrypt_cron() {
     else
       next_run=$(date -d "$hour:$min" +"%A, %B %d at %I:%M %p")
     fi
-    echo -e "${grey}Next scheduled run: ${yellow}${next_run}${reset}"
+    success "${grey}Next scheduled run: ${yellow}${next_run}${reset} (${tz_val:-UTC}).${green}[SUCCESS]${reset}"
   else
     time_str="$(translate_field "$min" "minute") past $(translate_field "$hour" "hour")"
   fi
@@ -187,8 +187,7 @@ decrypt_cron() {
   else
     month_str="every month"
   fi
-  success "Cron job successfully installed" \
-  "${grey}Your backup is scheduled to run on ${cyan}${dow_str}, ${day_str} ${month_str} ${grey}at ${cyan}${time_str} (${tz_val:-UTC}). ${green}[SUCCESS]${reset}"
+  success "Cron job successfully installed${green}[SUCCESS]${reset}"   
   return
 }
 select_timezone() {
