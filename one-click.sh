@@ -14,7 +14,6 @@
 # ====== One-Click ====== #
 # ==== Initialization ==== 
 export TERM="${TERM:-xterm}"
-export LC_ALL=C
 set -euo pipefail
 shopt -u globstar nullglob
 source /etc/os-release
