@@ -78,11 +78,52 @@ install_dependencies() {
   success "${green}[✓]${reset} Dependencies installed successfully"
 }
 before_migration() {
+  local local_disk_name=$(findmnt -n -o SOURCE /)
   recovery_dir="/boot/recovery"
   rm -rf "$recovery_dir"
   mkdir -p "$recovery_dir/"{bin,sbin,etc,proc,sys,dev,run,root,lib,lib64}
   vmlinuz="$recovery_dir/vmlinuz-$(uname -r)"
   initrd="$recovery_dir/initrd-$(uname -r).img"
+  # === Prepare Root Lookup ====
+  e2label "$local_disk_name" CLONE_ROOT || tune2fs -L CLONE_ROOT "$local_disk_name"
+  cp /etc/fstab /etc/fstab.one_click_bak
+  cp /boot/grub/grub.cfg /boot/grub/grub.cfg.one_click_bak
+  # ==== Prepare GRUB ====
+  update-grub
+  sed -Ei 's,^UUID=[^ ]* /,LABEL=CLONE_ROOT /,' /etc/fstab
+  sed -Ei '
+    /GRUB_DISABLE_LINUX_UUID/ ! { 
+      $p;
+      s/.*/GRUB_DISABLE_LINUX_UUID=true/
+    };
+    /GRUB_DISABLE_LINUX_UUID/ {
+      s/^#?(GRUB_DISABLE_LINUX_UUID=).*/\1true/
+    }
+  ' /etc/default/grub
+  sed -Ei.one-click-backup '
+    s/(GRUB_DEFAULT=)"?[^"]*"?/\1"Recovery Environment (SSH)"/
+    s/(GRUB_TIMEOUT=)"?[^"]*"?/\15/
+  ' /etc/default/grub
+  sed -i 's/search --no-floppy --fs-uuid --set=root .*/search --no-floppy --label CLONE_ROOT --set=root/' /boot/grub/grub.cfg
+  sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8"/' /etc/default/grub
+  
+  # ==== GRUB Entry ====
+  warn "${yellow}[+]${reset} Installing GRUB recovery entry"
+  cat >> /boot/grub/custom.cfg <<EOF
+menuentry "Recovery Environment (SSH)" {
+    insmod part_msdos
+    insmod part_gpt
+    insmod ext2
+    insmod search_label
+    search --no-floppy --label --set=root CLONE_ROOT
+    linux /boot/recovery/vmlinuz-${kernel_version} root=/dev/ram0 rw rdinit=/init console=tty0 console=ttyS0,115200n8
+    initrd /boot/recovery/initrd-${kernel_version}.img
+}
+EOF
+
+  echo "MODULES=most" > /etc/initramfs-tools/conf.d/driver-policy
+  update-initramfs -u -k $(uname -r)
+  cp -f "/boot/vmlinuz-$kernel_version" "$recovery_dir/vmlinuz-$kernel_version"
   # ==== Copy kernel ====
   success "${green}[+]${reset} Copying kernel"
   cp -f /boot/vmlinuz-$(uname -r) "$vmlinuz"
@@ -91,6 +132,7 @@ before_migration() {
   warn "${yellow}[+]${reset} Building recovery initramfs tree"
   box="$(which busybox)"
   cp -f "$box" "$recovery_dir/bin/"
+  mkdir -p "$recovery_dir/etc/dropbear"
   copy_libs() {
     local bin="$1"
     ldd "$bin" | awk '{print $3}' | grep -E '^/' | while read -r lib; do
@@ -113,6 +155,58 @@ destination_server="${destination_server:-}"
 mask="$mask"
 destination_gw="${destination_gw:-}"
 EOF
+  # ==== Recory Script ====
+  cat > "$recovery_dir/sbin/remote_fix.sh" <<'EOF'
+#!/bin/sh
+echo "--- AUTOMATED POST-MIGRATION REPAIR ---"
+mkdir -p /mnt
+tune2fs -L CLONE_ROOT /dev/sda1 || e2label /dev/sda1 CLONE_ROOT
+mount -t ext4 /dev/disk/by-label/CLONE_ROOT /mnt || mount /dev/sda1 /mnt
+if [ $? -eq 0 ]; then
+  echo "Migrated Root Detected and Mounted."
+  if [ -f /mnt/etc/os-release ]; then
+    dst_id=$(grep -E '^ID=' /mnt/etc/os-release | cut -d= -f2 | tr -d '"')
+  fi
+  for i in dev proc sys run; do
+    mount --bind /$i /mnt/$i
+  done
+  dst_disk=$(lsblk -no PKNAME $(readlink -f /dev/disk/by-label/CLONE_ROOT) | head -n1)
+  if [ -z "$dst_disk" ]; then
+    dst_disk="sda"
+  fi
+  case "$dst_id" in
+    ubuntu|debian|kali|raspbian) expected_grub="grub"                          ;;
+    centos|rhel|fedora|rocky|almalinux) expected_grub="grub2"                  ;;
+    *) [ -d /mnt/boot/grub2 ] && expected_grub="grub2" || expected_grub="grub" ;;
+  esac
+  if [ ! -d "/mnt/boot/$expected_grub" ]; then
+    if [ "$expected_grub" = "grub2" ]; then
+      ln -sf /boot/grub /mnt/boot/grub2
+    else
+      ln -sf /boot/grub2 /mnt/boot/grub
+    fi
+  fi
+  chroot /mnt /usr/bin/rm -f /boot/grub/custom.cfg
+  chroot /mnt grub-install --recheck "/dev/$dst_disk"
+  if chroot /mnt command -v update-grub >/dev/null 2>&1; then
+    chroot /mnt update-grub
+  elif chroot /mnt command -v grub2-mkconfig >/dev/null 2>&1; then
+    chroot /mnt grub2-mkconfig -o /boot/$expected_grub/grub.cfg
+  fi
+  sync
+  umount -l /mnt/dev /mnt/proc /mnt/sys /mnt/run
+  umount /mnt
+  reboot -f
+else
+  exec /bin/sh
+fi
+EOF
+  chmod +x "$recovery_dir/sbin/remote_fix.sh"
+  cat > "$recovery_dir/sbin/auto-repair.sh" <<'EOF'
+#!/bin/sh
+/sbin/remote_fix.sh
+EOF
+  chmod +x "$recovery_dir/sbin/auto-repair.sh"
   # ==== Init script ====
   mkdir -p "$recovery_dir/lib/modules/$kernel_version"
   cp -f /sbin/modprobe "$recovery_dir/sbin/"
@@ -120,42 +214,49 @@ EOF
   cp -f /lib/modules/$(uname -r)/modules.* "$recovery_dir/lib/modules/$(uname -r)/"
   cat > "$recovery_dir/init" <<'EOF'
 #!/bin/sh
-# Mount pseudo-filesystems
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 mount -t tmpfs tmpfs /run
+for mod in virtio_blk virtio_pci virtio_scsi nvme ahci sd_mod; do
+  modprobe $mod 2>/dev/null || true
+done
 # Load modules
 for mod in $(ls /lib/modules/$(uname -r)/kernel/drivers/net/ | sed 's/.ko$//'); do
-    modprobe $mod 2>/dev/null || true
+  modprobe $mod 2>/dev/null || true
 done
+sleep 5
+blkid > /dev/null
+partprobe /dev/sda 2>/dev/null
+partprobe /dev/vda 2>/dev/null
 # Configure network
 . /etc/net.conf
 ip link set lo up
 if [ -n "${destination_server:-}" ]; then
-    ip addr add "${destination_server:-}/${mask}" dev "$nic"
-    ip link set "$nic" up
-    ip route add default via "${destination_gw:-}"
+  ip addr add "${destination_server:-}/${mask}" dev "$nic"
+  ip link set "$nic" up
+  ip route add default via "${destination_gw:-}"
 else
-    for i in $(ls /sys/class/net | grep -v lo); do
-        ip link set "$i" up
-        udhcpc -i "$i" &
-    done
+  for i in $(ls /sys/class/net | grep -v lo); do
+    ip link set "$i" up
+    udhcpc -i "$i" &
+  done
 fi
 sleep 1
 if [ -x /sbin/dropbear ]; then
-    dropbear -R -E &
+  dropbear -R -E &
 fi
 # ==== Mount target root if available ====
-if [ -b /dev/sda1 ]; then
-    mkdir -p /mnt
-    mount /dev/sda1 /mnt
+if [ -b /dev/disk/by-label/CLONE_ROOT ]; then
+  mkdir -p /mnt
+  mount /dev/disk/by-label/CLONE_ROOT /mnt
+elif [ -b /dev/sda1 ]; then
+  mount /dev/sda1 /mnt
 fi
 # ==== Auto-repair ====
 if [ -x /sbin/auto-repair.sh ]; then
     /sbin/auto-repair.sh
 fi
-# Fallback shell
 exec /bin/sh
 EOF
   chmod +x "$recovery_dir/init"
@@ -165,47 +266,35 @@ EOF
     cd "$recovery_dir"
     find . | cpio -H newc -o
   ) | gzip > "$initrd"
-  # ==== GRUB Entry ====
-  warn "${yellow}[+]${reset} Installing GRUB recovery entry"
-  cat >> /boot/grub/custom.cfg <<EOF
-menuentry "Recovery Environment (SSH)" {
-    search --file --no-floppy --set=root /boot/recovery/vmlinuz-${kernel_version}
-    set prefix=(\$root)/boot/grub
-    insmod linux
-    insmod ext4
-    insmod search_fs_file
-    insmod search_fs_uuid
-    linux /boot/recovery/vmlinuz-${kernel_version} root=/dev/ram0 rw rdinit=/init
-    initrd /boot/recovery/initrd-${kernel_version}.img
-}
-EOF
-
-  sed -Ei.one-click-backup '
-    s/(GRUB_DEFAULT=)"?[^"]*"?/\1"Recovery Environment (SSH)"/
-    s/(GRUB_TIMEOUT=)"?[^"]*"?/\15/
-  ' /etc/default/grub
-  update-grub
   success "${green}[✓]${reset} Recovery environment prepared successfully"
   warn "Now ready to perform DD migration. The system can auto-boot into recovery after migration."
 }
 after_migration() {
-  rm -f /etc/default/grub
-  rm -f /etc/default/custom.cfg
-  mv /etc/default/grub.one-click-backup /etc/default/grub
+  # ==== Clean Local System ==== 
+  [[ -f /etc/fstab.one_click_bak ]] && mv -f /etc/fstab.one_click_bak /etc/fstab
+  info "fstab restored"
+  [[ -f /etc/default/grub.one-click-backup ]] && mv -f /etc/default/grub.one-click-backup /etc/default/grub
+  info "/etc/default/grub restored"
+  [[ -f /boot/grub/grub.cfg.one_click_bak ]] && mv -f /boot/grub/grub.cfg.one_click_bak /boot/grub/grub.cfg
+  info "/boot/grub/grub.cfg restored"
+  rm -f /boot/grub/custom.cfg
   update-grub
   rm -rf /boot/recovery
+  success "System GRUB restored."
+}
+choose_migration_type() {
+  printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
+    "[1]. Migrate with dd (raw block level)" \
+    "[2]. Migrate with rsync (recommended)"
+  read -rp "${cyan}[USER]${reset} Please select the type of migration you would like to proceed with: " migration_type
+  return 0
 }
 migration() {
   header_notice "$raw_title" "$wizard" "5" "6"
   # ==== User Selection: DD or Rsync? ====
-  choose_migration_type() {
-    printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-      "[1]. Migrate with dd (raw block level)" \
-      "[2]. Migrate with rsync (recommended)"
-    read -rp "${cyan}[USER]${reset} Please select the type of migration you would like to proceed with: " migration_type
-  }
-  if [[ ! "${migration_type:-}" == [0-9] ]]; then
-    warn "Please input only an integer"
+  choose_migration_type
+  if [[ "${migration_type:-}" != [12] ]]; then
+    warn "Please select a valid option"
     choose_migration_type
   fi
   if [[ "${migration_type:-}" -eq 1 ]]; then
@@ -213,6 +302,23 @@ migration() {
   elif [[ "${migration_type:-}" -eq 2 ]]; then
     rsync_migrate
   fi
+}
+# ==== Post Migration On Destination ====
+destination_finalize() {
+  info "Starting Post-Migration Repair"
+  mount -o remount,rw /mnt 2>/dev/null || mount -o remount,rw /
+  rm -f /boot/grub/custom.cfg
+  rm -rf /boot/recovery
+  sed -i 's/GRUB_DEFAULT=.*/GRUB_DEFAULT=0/' /etc/default/grub
+  sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=2/' /etc/default/grub
+  info "Regenerating GRUB..."
+  update-grub
+  if [[ -f "$net_config" ]]; then
+      bash "$net_config"
+  fi
+  success "Migration Finalized. Rebooting into Production..."
+  sync
+  reboot
 }
 # ==== Use Rsync as the migration tool ====
 rsync_migrate() {
@@ -411,29 +517,38 @@ ssh_key() {
 }
 # ==== Set Password ====
 set_pass() {
-  info "Please enter [password|pass] or [key|ssh|ssh_key]: "
-  read -rp "${cyan}[USER]${reset} Would you like to use a password or SSH key: " req
-  req="${req,,}"
-  case "$req" in
-    password|pass)
-      req=n
-      read -s -rp "${cyan}[USER]${reset} Enter your SSH password for ${user}@${destination_server}: " pass
-      echo
-      read -s -rp "${cyan}[USER]${reset} Please re-enter your password: " pass2
-      echo
-      # ==== Ensure password was entered accurately ====
-      while [[ ! "$pass" == "$pass2" ]]; do
-        warn "${red}Passwords do not match${reset}" "${green}Please try again${reset}"
-        set_pass
-      done
-      ;;
-    key|ssh|ssh_key)
-      req=y
-      ssh_key
-      ;;
-    *) die "Invalid selection!" ;;
-  esac
-  return 0
+  while true; do
+    info "Please enter [password|pass] or [key|ssh|ssh_key]: "
+    read -rp "${cyan}[USER]${reset} Would you like to use a password or SSH key: " req
+    req="${req,,}"
+    case "$req" in
+      password|pass)
+        req=n
+        while true; do
+          read -s -rp "${cyan}[USER]${reset} Enter your SSH password for ${user}@${destination_server}: " pass
+          echo
+          read -s -rp "${cyan}[USER]${reset} Please re-enter your password: " pass2
+          echo
+          if [[ -n "$pass" && "$pass" == "$pass2" ]]; then
+            return 0 # Success! Exit the entire function
+          else
+            warn "${red}Passwords do not match or are empty.${reset}" "Please try again."
+          fi
+        done
+        ;;
+      key|ssh|ssh_key)
+        req=y
+        if ssh_key; then 
+          return 0 # Exit function if ssh_key setup succeeded
+        fi
+        # If ssh_key fails or returns false, it will naturally loop back to the start
+        ;;
+      *)
+        warn "Invalid selection: '${red}$req${reset}'" "Please choose 'password' or 'key'."
+        # No 'return' or 'break' here means it loops back to the question
+        ;;
+    esac
+  done
 }
 # ==== Rsync Migration Script ====
 run_migrate_rsync() {
@@ -817,16 +932,16 @@ run_migrate_rsync() {
     done < /root/rsync-services-running.txt
     echo "All services have no been restarted on the remote server"
   }
-  #before_migration
   db_migration
   dir_migration
   track_restart_services
   complete_migration
-  #after_migration
 }
 # ==== Use DD as the backup/migration tool ====
 dd_migrate() {
   # ==== Notice Main ====
+  current_trap=$(trap -p EXIT | cut -d"'" -f2)
+  trap "after_migration; $current_trap" EXIT
   info "This is a raw block-level migration (entire disk, bootloader, partitions, filesystem)." \
     "${red}ALL DATA ON THE DESTINATION WILL BE DESTROYED.${reset}" \
     " " "Please prepare the destination server with a similar (or the same) OS as this: $PRETTY_NAME although cross OS migration should generally work." \
@@ -837,7 +952,7 @@ dd_migrate() {
   echo
   printf '%s' "${cyan}[USER]${reset} [Scanning Drives]: "; for ((i=seq;i<((seq+22));i++));do printf '%s' "$(tput setaf $i)$(tput setab $i).${reset}"; sleep 0.3; done; echo -e '\n'
   # ==== Gather Pre-req info ====
-  read -rp "${cyan}[USER]${reset} Please enter the username of the destination server:                                   " user
+  read -rp "${cyan}[USER]${reset} Please enter the username of the destination server: " user
   if [[ "$user" == "root" ]]; then
     user_dir="/root"
   else
@@ -867,7 +982,7 @@ dd_migrate() {
   }
   # ==== Require Valid IPv4 ====
   v4() {
-    read -rp "${cyan}[USER]${reset} Please enter the IP of the destination server:                                         " destination_server
+    read -rp "${cyan}[USER]${reset} Please enter the IP of the destination server: " destination_server
     if ! is_ipv4 "$destination_server"; then
       error "The IP is ${red}INVALID$${reset}! Please try again."
       v4
@@ -875,13 +990,13 @@ dd_migrate() {
   }
   # ==== Require Valid IPv6 ====
   v6(){
-    read -rp "${cyan}[USER]${reset} Please enter the IPv6 address of the destination server $destination_server (Optional):       " destination_v6
+    read -rp "${cyan}[USER]${reset} Please enter the IPv6 address of the destination server $destination_server (Optional): " destination_v6
     if is_ipv6 "$destination_v6"; then
       error "The IP is ${red}INVALID${reset}! Please try again."
       v6
     fi
     if [[ ! "$destination_v6" == "" ]]; then
-      read -rp "${cyan}[USER]${reset} Please enter the IPv6 gateway address for ${destination_v6}:                           " remote_v6_gw
+      read -rp "${cyan}[USER]${reset} Please enter the IPv6 gateway address for ${destination_v6}: " remote_v6_gw
       if [[ "${remote_v6_gw:-}" == "" ]]; then
         warn "The gateway IPv6 is required. Please try again."
         v6
@@ -890,7 +1005,7 @@ dd_migrate() {
   }
   # ==== Ensure GW is present ====
   v4_gw() {
-    read -rp "${cyan}[USER]${reset} Please enter the IPv4 gateway address for ${destination_server}:                                " destination_gw
+    read -rp "${cyan}[USER]${reset} Please enter the IPv4 gateway address for ${destination_server}: " destination_gw
     if [[ "$destination_gw" == "" ]]; then
       warn "The gateway IP is required. Please try again."
       v4_gw
@@ -930,6 +1045,7 @@ ConditionPathExists="$net_config"
 [Service]
 Type=oneshot
 ExecStart="$net_config"
+ExecStartPost=/usr/bin/sync
 RemainAfterExit=yes
 TimeoutStartSec=120
 
@@ -940,6 +1056,7 @@ EOF
     rm -f "$net_config"
   fi
   cat << EOF > "$net_config"
+network_card=$(sed -En '/2: ([^:]*):.*/s//\1/p' <(ip a))
 ids=(${ids[@]})
 for id in ${ids[@]} ; do
   case \${id:-} in
@@ -951,6 +1068,7 @@ for id in ${ids[@]} ; do
         s/$sys_ip/$destination_server/g; 
         s,${sys_ipv6/:1},${destination_v6/:1},g; 
         s/$ipv6_gw/${remote_v6_gw:-}/g;
+        s/eth0/\$network_card/;
         /${nic:-}/,/inet6/ {
           /gateway/! {
             /netmask/ {
@@ -984,10 +1102,13 @@ for id in ${ids[@]} ; do
         " $wg_file
         wg-quick up "$int"
       fi
-      sed -i.one-click-backup "s/eth0/$nic/g" /etc/network/interfaces
-      ip addr flush dev "$nic" || true
-      ifdown "$nic" &> /dev/null || true
-      ifup "$nic" &> /dev/null || true
+      # ==== Force GRUB to use a standard serial and terminal console ====
+      sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8"/' /etc/default/grub
+      update-grub
+      sed -i.one-click-backup "s/eth0/\$network_card/g" /etc/network/interfaces
+      ip addr flush dev "\$network_card" || true
+      ifdown "\$network_card" &> /dev/null || true
+      ifup "\$network_card" &> /dev/null || true
       ;;
     rhel|centos|rocky|almalinux|fedora)
       local nmcli_status
@@ -1000,6 +1121,7 @@ for id in ${ids[@]} ; do
           s/$sys_gw/$destination_gw/g;
           s,${sys_ipv6/:1},${destination_v6/:1},g;
           s/$ipv6_gw/${remote_v6_gw:-}/g
+          s/eth0/\$network_card/;
         " /etc/NetworkManager/system-connections/$nic.nmconnection
         if [[ -f /etc/wireguard/wg0.conf ]]; then
           wg-quick down "$int"
@@ -1018,10 +1140,10 @@ for id in ${ids[@]} ; do
           wg-quick up "$int"
         fi
         sed -i.one-click-backup "s/eth0/$nic/g" /etc/NetworkManager/system-connections/$nic.nmconnection
-        nmcli device set "$nic" managed yes
+        nmcli device set "\$network_card" managed yes
         nmcli connection reload
-        nmcli device disconnect $nic
-        nmcli device connect $nic
+        nmcli device disconnect \$network_card
+        nmcli device connect \$network_card
         systemctl restart network || systemctl restart NetworkManager
       else
         #  ==== Check which network file exists ====
@@ -1032,7 +1154,8 @@ for id in ${ids[@]} ; do
           s/$sys_ip/$destination_server/g;
           s/$sys_gw/$destination_gw/g;
           s,${sys_ipv6/:1},${destination_v6/:1},g;
-          s/$ipv6_gw/${remote_v6_gw:-}/g
+          s/$ipv6_gw/${remote_v6_gw:-}/g;
+          s/eth0/\$network_card/;
         " /etc/sysconfig/network-scripts/ifcfg-$nic
         if [[ -d /etc/wireguard/ ]]; then
           wg-quick down "$int"
@@ -1050,7 +1173,10 @@ for id in ${ids[@]} ; do
           " $wg_file
           wg-quick up "$int"
         fi
-        sed -i.one-click-backup "s/eth0/$nic/g" /etc/sysconfig/network-scripts/ifcfg-$nic
+        # ==== Force GRUB to use a standard serial and terminal console ====
+        sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=".*/GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8"/' /etc/default/grub
+        update-grub
+        sed -i.one-click-backup "s/eth0/\$network_card/g" /etc/sysconfig/network-scripts/ifcfg-\$network_card
         systemctl restart network || systemctl restart NetworkManager
       fi
       ;;
@@ -1081,8 +1207,8 @@ EOF
   echo
   info "Checking SSH Validity..."
   sleep 0.3
-  if ! sshpass -p "$pass" ssh -T -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no "${user}@${destination_server}" "exit"; then
-    error '%s\n' " " "${red}SSH connection failed!${reset}" \
+  if ! sshpass -p "$pass" ssh -T -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no "${user}@${destination_server}" "exit" 2> /dev/null ; then
+    error " " "${red}SSH connection failed!${reset}" \
     "Please double-check credentials and host keys." \
     " " >&2
     printf '%s' "Now exiting"
@@ -1267,7 +1393,6 @@ EOF
         warn "$((num_local - num_remote)) local disks were not cloned because the remote server has fewer disks."
     fi
     echo
-    after_migration
     post_migration
   }
   confirm_destroy
