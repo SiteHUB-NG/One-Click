@@ -703,7 +703,7 @@ run_migrate_rsync() {
         "${ul}Options:${ul_reset}" \
         "[1]. Dry-Run Migration" \
         "[2]. Proceed with migration" \
-        "[3]. Go Back"
+        "[3]. Exit"
       read -rp "${cyan}[USER]${reset} Please select option 1,2 or 3: " dry_run
       [[ "$dry_run" =~ ^[123]$ ]] && break
       warn "Invalid option. Please select 1,2 or 3 ONLY!"
@@ -720,8 +720,8 @@ run_migrate_rsync() {
       --exclude-from=/root/rsync-etc-exclude.txt
       -e "ssh -o StrictHostKeyChecking=no"
     )
-    # ==== Go Back ====
-    [[ "$dry_run" -eq 3 ]] && migration
+    # ====  ====
+    [[ "$dry_run" -eq 3 ]] && exit 0
     # ==== Add --dry-run flag if user opted for dry run ====
     [[ "$dry_run" -eq 1 ]] && rsync_opts+=(--dry-run)
     # ==== Migrate directories ====
