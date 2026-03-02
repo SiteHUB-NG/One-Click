@@ -136,7 +136,7 @@ install_dep() {
   fatal="${5:-false}"
   # ==== Check if dependency is already installed ====
   if eval "$check_cmd" &>/dev/null; then
-    printf "%-40s ${blue}[OK]${reset}\n" "${blue}[DEPENDANCY CHECK]: ${reset}Checking ${dep_name}"
+  #  printf "%-40s ${blue}[OK]${reset}\n" "${blue}[DEPENDANCY CHECK]: ${reset}Checking ${dep_name}"
     return
   fi
   printf "%-40s" "${yellow}[INSTALLING DEP]: ${reset}Installing ${dep_name}"
