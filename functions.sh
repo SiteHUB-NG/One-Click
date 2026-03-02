@@ -1869,6 +1869,12 @@ parse_firewall_command() {
     delete_firewall_backups
     exit 0
   fi
+  # ==== Detect Interface ====
+  if [[ "$rule_lower" =~ (interface|iface)[[:space:]]+([a-zA-Z0-9.+]+) ]]; then
+    in_interface="${BASH_REMATCH[2]}"
+  elif grep -Eq "\blo\b" <<< "$rule_lower"; then
+    in_interface="lo"
+  fi
   # ==== Detect Table ====
   if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
     table="nat"
@@ -1917,6 +1923,22 @@ parse_firewall_command() {
     fi
     display_iptables_ui "$table" "$view_mode" "$view_header" | less -RXE
     exit 0
+  fi
+  # ==== Detect Negation ====
+  src_neg=""
+  if grep -Eq "\b(not|except|but not|!)\b" <<< "$rule_lower"; then
+     src_neg="!"
+  fi
+  # ==== Detect Reject Type ====
+  reject_with=""
+  if [[ "$rule_lower" =~ (prohibited|host[ -]prohibited|admin[ -]prohibited|not[ -]allowed) ]]; then
+    reject_with="icmp-host-prohibited"
+    action="REJECT"
+  fi
+  # ==== Detect Default Policy ====
+  if grep -Eq "\b(default|policy)\b" <<< "$rule_lower"; then
+    generated_cmds+=("$fw_bin -t $table -P $chain $action")
+    return 0
   fi
   # ==== Detect Chain ====
   case "$table" in
@@ -2017,18 +2039,20 @@ parse_firewall_command() {
     proto="tcp"
   fi
   # ==== Detect connection state ====
+  # ==== Detect connection state (Concatenation) ====
   conn_state=""
   if grep -Eqi "\bestablished\b" <<< "$rule_lower"; then
     conn_state="ESTABLISHED"
-    proto="tcp"
-  elif grep -Eqi "\bnew\b" <<< "$rule_lower"; then
-    conn_state="NEW"
-    proto="tcp"
+    # Note: We don't force proto="tcp" here as states apply to UDP/ICMP too
   fi
   if grep -Eqi "\brelated\b" <<< "$rule_lower"; then
-    conn_state="RELATED"
-  elif grep -Eqi "\binvalid\b" <<< "$rule_lower"; then
-    conn_state="INVALID"
+    if [[ -n "$conn_state" ]]; then conn_state+=",RELATED"; else conn_state="RELATED"; fi
+  fi
+  if grep -Eqi "\bnew\b" <<< "$rule_lower"; then
+    if [[ -n "$conn_state" ]]; then conn_state+=",NEW"; else conn_state="NEW"; fi
+  fi
+  if grep -Eqi "\binvalid\b" <<< "$rule_lower"; then
+    if [[ -n "$conn_state" ]]; then conn_state+=",INVALID"; else conn_state="INVALID"; fi
   fi
   # ==== Detect Source IP ====
   if [[ "$rule_lower" =~ from[[:space:]]+([0-9a-fA-F:.\/]+) ]]; then
@@ -2195,28 +2219,44 @@ parse_firewall_command() {
     generated_cmds+=("$fw_bin -t $table -D $chain $del_line")
     return 0
   fi
-  # ==== Handle TCP Ports ====
+  if [[ -n "${is_policy_change:-}" ]]; then
+    generated_cmds+=("$fw_bin -t $table -P $chain $action")
+    return 0
+  fi
+  if (( ${#tcp_ports[@]} == 0 )) && (( ${#udp_ports[@]} == 0 )) && [[ "${skip_service_ports:-}" != "1" ]]; then
+    local cmd=("$fw_bin" -t "$table" "$mode" "$chain")
+    [[ -n "${in_interface:-}" ]] && cmd+=("-i" "${in_interface:-}")
+    [[ -n "$src_ip" ]] && { [[ -n "$src_neg" ]] && cmd+=("!"); cmd+=("-s" "$src_ip"); }
+    [[ -n "$dst_ip" ]] && cmd+=("-d" "$dst_ip")
+    [[ -n "$proto" && "$proto" != "tcp" ]] && cmd+=("-p" "$proto")
+    [[ -n "$conn_state" ]] && cmd+=("-m" "state" "--state" "$conn_state")
+    if [[ "$action" == "REJECT" && -n "$reject_with" ]]; then
+        cmd+=("-j" "REJECT" "--reject-with" "$reject_with")
+    else
+        [[ -n "$action" ]] && cmd+=("-j" "$action")
+    fi
+    generated_cmds+=("${cmd[*]}")
+    return 0
+  fi
   if (( ${#tcp_ports[@]} > 0 )); then
-    local tcp_args
-    tcp_args=$(build_port_args "tcp" tcp_ports)
-    # Build the array
+    local tcp_args=$(build_port_args "tcp" tcp_ports)
     local cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p tcp)
-    [[ -n "$src_ip" ]] && cmd+=("-s" "$src_ip")
+    [[ -n "${in_interface:-}" ]] && cmd+=("-i" "${in_interface:-}")
+    [[ -n "$src_ip" ]] && { [[ -n "$src_neg" ]] && cmd+=("!"); cmd+=("-s" "$src_ip"); }
     [[ -n "$dst_ip" ]] && cmd+=("-d" "$dst_ip")
     [[ -n "$conn_state" ]] && cmd+=("-m" "state" "--state" "$conn_state")
-    cmd+=($tcp_args) # This contains -m multiport --dports ...
+    cmd+=($tcp_args)
     [[ -n "$action" ]] && cmd+=("-j" "$action")
     generated_cmds+=("${cmd[*]}")
   fi
-  # ==== Handle UDP Ports ====
   if (( ${#udp_ports[@]} > 0 )); then
-    local udp_args
-    udp_args=$(build_port_args "udp" udp_ports)
+    local udp_args=$(build_port_args "udp" udp_ports)
     local cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p udp $udp_args)
-    [[ -n "$src_ip" ]] && cmd+=(-s "$src_ip")
-    [[ -n "$dst_ip" ]] && cmd+=(-d "$dst_ip")
-    [[ -n "$conn_state" ]] && cmd+=(-m state --state "$conn_state")
-    [[ -n "$action" ]] && cmd+=(-j "$action")
+    [[ -n "$in_interface" ]] && cmd+=("-i" "$in_interface")
+    [[ -n "$src_ip" ]] && { [[ -n "$src_neg" ]] && cmd+=("!"); cmd+=("-s" "$src_ip"); }
+    [[ -n "$dst_ip" ]] && cmd+=("-d" "$dst_ip")
+    [[ -n "$conn_state" ]] && cmd+=("-m" "state" "--state" "$conn_state")
+    [[ -n "$action" ]] && cmd+=("-j" "$action")
     generated_cmds+=("${cmd[*]}")
   fi
 }  
