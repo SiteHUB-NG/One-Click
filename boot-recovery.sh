@@ -274,9 +274,8 @@ recovery_menu() {
       "[1]. Backup" \
       "[2]. Restore" \
       "[3]. Snapshot Directory" \
-      "[4]. Backup Directory" \
-      "[5]. Configure Cron" \
-      "[6]. Exit"
+      "[4]. Configure Cron" \
+      "[5]. Exit"
     read -rp "${cyan}[USER]${reset} Select an option [1-6]: " backup_run
     case "$backup_run" in
       1) recovery_backup  ;;
@@ -288,15 +287,8 @@ recovery_menu() {
           ls_table "${recovery_base:-}" 
         fi
         ;;
-      4)
-        if [[ -z "$(ls -A "${out_path:-}" 2>/dev/null)" ]]; then
-          warn "No snapshots found"
-        else
-          ls_table "${out_path:-}"
-        fi
-        ;;
-      5) install_cron "-y" "Boot Recovery Tool" "r"      ;;
-      6) exit 0                                          ;;
+      4) install_cron "-y" "Boot Recovery Tool" "r"      ;;
+      5) exit 0                                          ;;
       *) echo "[ERROR] Invalid selection"                ;;
     esac
     read -rp "${cyan}[USER]${reset} Press enter to continue"
