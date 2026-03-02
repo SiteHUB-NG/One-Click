@@ -1253,16 +1253,17 @@ header_notice() {
   done <<< "$header"
   sleep 3
   clear
-  offset=$(( (cols - ${#header_banner}) / 2 ))
-  row=$(( rows / 2 ))
-  tput cup "$row" "$offset"
+  # ==== Typing Header Notification ====
+  #offset=$(( (cols - ${#header_banner}) / 2 ))
+  #row=$(( rows / 2 ))
+  #tput cup "$row" "$offset"
   # ==== Notice Main ====
-  while IFS= read -r line; do
-    printf '%s' "$(tput setaf $af)$(tput setab $ab)${line//#/ }${reset}"
-    sleep 0.1
-  done < <(sed 's/./&\n/g' <<< "$header_banner")
-  echo
-  sleep 0.6
+  #while IFS= read -r line; do
+  #  printf '%s' "$(tput setaf $af)$(tput setab $ab)${line//#/ }${reset}"
+  #  sleep 0.1
+  #done < <(sed 's/./&\n/g' <<< "$header_banner")
+  #echo
+  #sleep 0.6
 }
 complete_migration_banner() {
   local len
