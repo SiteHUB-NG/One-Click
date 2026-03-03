@@ -943,14 +943,11 @@ fio_disk_benchmark() {
 iperf_locs=( \
   "1500.mtu.he.net" "5201-5205" "HE Net" "San Jose, CA, US (10G)" "IPv4|IPv6" \
   "la.speedtest.clouvider.net" "5200-5209" "Clouvider" "Los Angeles, CA, US (10G)" "IPv4|IPv6" \
-  "fremont.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Fremont, CA, US (1G)" "IPv4|IPv6" \
   "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
-  "slc.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "SLC, UT, US (10G)" "IPv4|IPv6" \
   "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
   "speedtest.milkywan.fr" "9200-9240" "Milkywan" "Ile-de-France, FR (40G)" "IPv4|IPv6" \
   "iperf-ams-nl.eranium.net" "5201-5210" "Eranium" "Amsterdam, NL (100G)" "IPv4|IPv6" \
   "speedtest.extra.telia.fi" "5201-5208" "Telia" "Helsinki, FI (10G)" "IPv4" \
-  "lagos.iperf.sitehub.com.ng" "5201-5202" "SiteHUB" "Ikeja, Lagos, NG (2G)" "IPv4|IPv6" \
   "iperf.angolacables.co.ao" "9200-9240" "Angola Cable" "Luanda, Angola, AO (10G)" "IPv4|IPv6" \
   "speedtest.sin1.sg.leaseweb.net" "5201-5210" "Leaseweb" "Singapore, SG (10G)" "IPv4|IPv6" \
   "154.31.113.6" "5201-5210" "DMIT" "Shinagawa, TY, JP (10G)" "IPv4|IPv6" \
@@ -1065,106 +1062,115 @@ total_time() {
 # ============================================= End One-Click Bench ========================================= #
 # ============================================== Directory Listing ============================================
 ls_table() {
-  # ---- safety for set -euo pipefail ----
   set +u
-  local dir="${1:-.}"
-  # ===== UTF-8 detection =====
-  local utf8=true
-  [[ "${LC_ALL:-}${LANG:-}" =~ UTF-8|utf8 ]] || utf8=false
-  # ===== Colors =====
-  local blue reset
-  blue="$(tput setaf 4 2>/dev/null || true)"
-  reset="$(tput sgr0 2>/dev/null || true)"
-  # ===== Borders =====
-  local TL TR BL BR HL VL TM BM LM RM MM
-  if $utf8; then
-    TL="╔"; TR="╗"; BL="╚"; BR="╝"
-    HL="═"; VL="║"
-    TM="╦"; BM="╩"; LM="╠"; RM="╣"; MM="╬"
-  else
-    TL="+"; TR="+"; BL="+"; BR="+"
-    HL="-"; VL="|"
-    TM="+"; BM="+"; LM="+"; RM="+"; MM="+"
+  local show_all=false
+  local OPTIND=1
+  while getopts "a" opt; do
+    case "$opt" in
+      a) show_all=true ;;
+      *) return 1 ;;
+    esac
+  done
+  shift $((OPTIND-1))
+  local target_path="${1:-.}"
+  local items_to_process=()
+  # ===== COLLECTION =====
+  if [[ -d "$target_path" ]]; then
+    while IFS= read -r -d '' entry; do
+      items_to_process+=("$entry")
+    done < <(find "$target_path" -maxdepth 3 -mindepth 1 -print0 2>/dev/null | sort -z)
+  elif [[ -e "$target_path" || -L "$target_path" ]]; then
+    items_to_process+=("$target_path")
   fi
-  # ===== UTF-8 safe repeat =====
-  repeat() {
-    local count="$1" char="$2" out=""
-    for ((i=0; i<count; i++)); do
-      out+="$char"
-    done
-    printf "%s" "$out"
-  }
-  # ===== Data arrays =====
+  # ===== DATA EXTRACTION =====
   local names=() types=() sizes=() perms=()
-  while IFS= read -r -d '' item; do
-    local base
-    base="$(basename "$item")"
-    [[ "$base" =~ [0-9_] ]] || continue
-    names+=( "$base" )
-    if [[ -d "$item" ]]; then
-      types+=(Directory)
-    elif [[ -L "$item" ]]; then
-      types+=(Symlink)
-    else
-      types+=(File)
+  for item in "${items_to_process[@]}"; do
+    local base="$(basename "$item")"
+    if [[ "$show_all" == "false" && ! -d "$item" ]]; then
+      [[ "$base" =~ [0-9_] ]] || continue
     fi
+    names+=( "${item#./}" ) 
+    if [[ -L "$item" ]]; then types+=(Symlink)
+    elif [[ -d "$item" ]]; then types+=(Directory)
+    else types+=(File); fi
     sizes+=( "$(stat -c '%s' "$item" 2>/dev/null || echo 0)" )
     perms+=( "$(stat -c '%A' "$item" 2>/dev/null || echo '?????????')" )
-  done < <(find "$dir" -maxdepth 1 -mindepth 1 -print0 | sort -z)
-  # ===== Minimum header widths =====
-  local w_name=4 w_type=4 w_size=4 w_perm=5
-  # ===== Compute content widths =====
-  local i
-  for i in "${!names[@]}"; do
-    (( ${#names[i]} > w_name )) && w_name=${#names[i]}
-    (( ${#types[i]} > w_type )) && w_type=${#types[i]}
-    (( ${#sizes[i]} > w_size )) && w_size=${#sizes[i]}
-    (( ${#perms[i]} > w_perm )) && w_perm=${#perms[i]}
   done
-  # ===== Padding (1 space left + right) =====
-  local pad=2
-  local cw_name=$((w_name + pad))
-  local cw_type=$((w_type + pad))
-  local cw_size=$((w_size + pad))
-  local cw_perm=$((w_perm + pad))
-  # ===== Top border =====
-  printf "%s%s%s%s%s%s%s%s%s\n" \
-    "$blue$TL" "$(repeat "$cw_name" "$HL")" "$TM" \
-    "$(repeat "$cw_type" "$HL")" "$TM" \
-    "$(repeat "$cw_size" "$HL")" "$TM" \
-    "$(repeat "$cw_perm" "$HL")" "$TR$reset"
-  # ===== Header =====
-  printf "%s %-${w_name}s %s %-${w_type}s %s %${w_size}s %s %-${w_perm}s %s\n" \
-    "$blue$VL" "Name" "$VL" "Type" "$VL" "Size" "$VL" "Perms" "$VL$reset"
-  # ===== Header separator =====
-  printf "%s%s%s%s%s%s%s%s%s\n" \
-    "$blue$LM" "$(repeat "$cw_name" "$HL")" "$MM" \
-    "$(repeat "$cw_type" "$HL")" "$MM" \
-    "$(repeat "$cw_size" "$HL")" "$MM" \
-    "$(repeat "$cw_perm" "$HL")" "$RM$reset"
-  # ===== Rows =====
+  # ===== TABLE RENDER =====
+  [[ ${#names[@]} -eq 0 ]] && { echo "No files found."; set -u; return; }
+  local utf8=true
+  [[ "${LC_ALL:-}${LANG:-}" =~ UTF-8|utf8 ]] || utf8=false
+  local blue reset; blue="$(tput setaf 4 2>/dev/null || true)"; reset="$(tput sgr0 2>/dev/null || true)"
+  local TL TR BL BR HL VL TM BM LM RM MM
+  if $utf8; then
+    TL="╔"; TR="╗"; BL="╚"; BR="╝"; HL="═"; VL="║"; TM="╦"; BM="╩"; LM="╠"; RM="╣"; MM="╬"
+  else
+    TL="+"; TR="+"; BL="+"; BR="+"; HL="-"; VL="|"; TM="+"; BM="+"; LM="+"; RM="+"; MM="+"
+  fi
+  repeat() { local out=""; for ((i=0; i<$1; i++)); do out+="$2"; done; printf "%s" "$out"; }
+  local w_n=4 w_t=4 w_s=4 w_p=5
   for i in "${!names[@]}"; do
-    printf "%s %-${w_name}s %s %-${w_type}s %s %${w_size}s %s %-${w_perm}s %s\n" \
-      "$blue$VL" "${names[i]}" "$VL" "${types[i]}" "$VL" \
-      "${sizes[i]}" "$VL" "${perms[i]}" "$VL$reset"
+    ((${#names[i]} > w_n)) && w_n=${#names[i]}
+    ((${#types[i]} > w_t)) && w_t=${#types[i]}
+    ((${#sizes[i]} > w_s)) && w_s=${#sizes[i]}
+    ((${#perms[i]} > w_p)) && w_p=${#perms[i]}
   done
-  # ===== Bottom border =====
-  printf "%s%s%s%s%s%s%s%s%s\n" \
-    "$blue$BL" "$(repeat "$cw_name" "$HL")" "$BM" \
-    "$(repeat "$cw_type" "$HL")" "$BM" \
-    "$(repeat "$cw_size" "$HL")" "$BM" \
-    "$(repeat "$cw_perm" "$HL")" "$BR$reset"
-  # ---- restore strict mode ----
+  local cn=$((w_n+2)) ct=$((w_t+2)) cs=$((w_s+2)) cp=$((w_p+2))
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$TL" "$(repeat $cn $HL)" "$TM" "$(repeat $ct $HL)" "$TM" "$(repeat $cs $HL)" "$TM" "$(repeat $cp $HL)" "$TR$reset"
+  printf "%s %-${w_n}s %s %-${w_t}s %s %${w_s}s %s %-${w_p}s %s\n" "$blue$VL" "Path" "$VL" "Type" "$VL" "Size" "$VL" "Perms" "$VL$reset"
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$LM" "$(repeat $cn $HL)" "$MM" "$(repeat $ct $HL)" "$MM" "$(repeat $cs $HL)" "$MM" "$(repeat $cp $HL)" "$RM$reset"
+  for i in "${!names[@]}"; do
+    printf "%s %-${w_n}s %s %-${w_t}s %s %${w_s}s %s %-${w_p}s %s\n" "$blue$VL" "${names[i]}" "$VL" "${types[i]}" "$VL" "${sizes[i]}" "$VL" "${perms[i]}" "$VL$reset"
+  done
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$BL" "$(repeat $cn $HL)" "$BM" "$(repeat $ct $HL)" "$BM" "$(repeat $cs $HL)" "$BM" "$(repeat $cp $HL)" "$BR$reset"
+  set -u
+}
+ls_table_all() {
+  set +u
+  local target="/etc/one-click//network-repair/backups"
+  if [[ -z "$target" ]]; then
+    echo "Error: No path provided."
+    return 1
+  fi
+  local paths=() types=() sizes=() perms=()
+  while IFS= read -r -d '' item; do
+    paths+=("$item")
+    if [[ -L "$item" ]]; then types+=(Symlink)
+    elif [[ -d "$item" ]]; then types+=(Directory)
+    else types+=(File); fi
+    sizes+=("$(stat -c '%s' "$item" 2>/dev/null || echo 0)")
+    perms+=("$(stat -c '%A' "$item" 2>/dev/null || echo '?????????')")
+  done < <(find "$target" -maxdepth 3 -mindepth 1 -print0 2>/dev/null | sort -z)
+  [[ ${#paths[@]} -eq 0 ]] && { echo "No items found in $target"; set -u; return; }
+  local utf8=true
+  [[ "${LC_ALL:-}${LANG:-}" =~ UTF-8|utf8 ]] || utf8=false
+  local blue="$(tput setaf 4 2>/dev/null || true)"
+  local reset="$(tput sgr0 2>/dev/null || true)"
+  local TL="╔" TR="╗" BL="╚" BR="╝" HL="═" VL="║" TM="╦" BM="╩" LM="╠" RM="╣" MM="╬"
+  $utf8 || { TL="+"; TR="+"; BL="+"; BR="+"; HL="-"; VL="|"; TM="+"; BM="+"; LM="+"; RM="+"; MM="+"; }
+  repeat() { local out=""; for ((i=0; i<$1; i++)); do out+="$2"; done; printf "%s" "$out"; }
+  local w_p=4 w_t=4 w_s=4 w_m=5
+  for i in "${!paths[@]}"; do
+    ((${#paths[i]} > w_p)) && w_p=${#paths[i]}
+    ((${#types[i]} > w_t)) && w_t=${#types[i]}
+    ((${#sizes[i]} > w_s)) && w_s=${#sizes[i]}
+    ((${#perms[i]} > w_m)) && w_m=${#perms[i]}
+  done
+  local cp=$((w_p+2)) ct=$((w_t+2)) cs=$((w_s+2)) cm=$((w_m+2))
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$TL" "$(repeat $cp $HL)" "$TM" "$(repeat $ct $HL)" "$TM" "$(repeat $cs $HL)" "$TM" "$(repeat $cm $HL)" "$TR$reset"
+  printf "%s %-${w_p}s %s %-${w_t}s %s %${w_s}s %s %-${w_m}s %s\n" "$blue$VL" "Full Path" "$VL" "Type" "$VL" "Size" "$VL" "Perms" "$VL$reset"
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$LM" "$(repeat $cp $HL)" "$MM" "$(repeat $ct $HL)" "$MM" "$(repeat $cs $HL)" "$MM" "$(repeat $cm $HL)" "$RM$reset"
+  for i in "${!paths[@]}"; do
+    printf "%s %-${w_p}s %s %-${w_t}s %s %${w_s}s %s %-${w_m}s %s\n" \
+      "$blue$VL" "${paths[i]}" "$VL" "${types[i]}" "$VL" "${sizes[i]}" "$VL" "${perms[i]}" "$VL$reset"
+  done
+  printf "%s%s%s%s%s%s%s%s%s\n" "$blue$BL" "$(repeat $cp $HL)" "$BM" "$(repeat $ct $HL)" "$BM" "$(repeat $cs $HL)" "$BM" "$(repeat $cm $HL)" "$BR$reset"
   set -u
 }
 config_table() {
   set +u
   local cfg="$1"
   [[ -r "$cfg" ]] || { echo "Cannot read $cfg" >&2; return 1; }
-  # ===== Colors =====
-  local blue reset
-  blue="$(tput setaf 4 2>/dev/null || true)"
-  reset="$(tput sgr0 2>/dev/null || true)"
   # ===== UTF-8 borders =====
   local TL TR BL BR HL VL TM BM LM RM MM
   TL="╔"; TR="╗"; BL="╚"; BR="╝"
@@ -1183,9 +1189,9 @@ config_table() {
     IFS='=' read -r key val <<< "$left"
     key="${key%%[[:space:]]*}"
     case "$key" in
-      req) key="key_req" ;;
+      req) key="key_req"             ;;
       pass) key="encrypted_password" ;;
-      key) key="ssh_key_path" ;;
+      key) key="ssh_key_path"        ;;
     esac
     keys+=("$key")
     vals+=("$val")
