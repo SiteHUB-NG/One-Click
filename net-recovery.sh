@@ -20,11 +20,11 @@ network_select_option() {
     " " "Outside of snapshots, it can only make intelligent guesses to fix a connectivity issue." \
     " " "This tool ${red}DOES NOT${reset} guarantee that it will be able to fix your issue." " "
   printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-    "[1]. Display Snapshot Contents" \
-    "[2]. Display Backup Contents" \
-    "[3]. Health Check|Repair Network" \
-    "[4]. Backup Network Configs" \
-    "[5]. Capture state snapshot" \
+    "[1]. Health Check|Repair Network" \
+    "[2]. Backup Network Configs" \
+    "[3]. Capture state snapshot" \
+    "[4]. Display Backup Contents" \
+    "[5]. Display Snapshot Contents" \
     "[6]. Restore Network Configs" \
     "[7]. Configure cron for snapshots" \
     "[8]. Exit"
@@ -355,16 +355,120 @@ restore_backup() {
   fi
 }
 repair() {
+  local int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
+  out=$(ip -s link show "$nic")
+  isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
+  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
+  retrans=$(netstat -s | grep "segments retransmitted" | awk '{print $1}')
+  gw=$(awk '/default/{print $3}' <(ip r))
+  dev=$(awk '/default/{print $5}' <(ip r))
+  gw6=$(awk '/default/{print $3}' <(ip -6 r))
+  dev6=$(awk '/default/{print $5}' <(ip -6 r))
+  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
+  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
+  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
+  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
+  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
+  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
+  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
   # ==== Check & repair network ====
+  warn \
+    "${yellow}╔════════════════════════════════════════════════════════════╗" \
+    "${yellow}║                    NETWORK HEALTH CHECK                    ║" \
+    "${yellow}╚════════════════════════════════════════════════════════════╝${reset}"
   if have_net && have_dns; then
-    success "${green}The network is healthy${reset}"
-    info "Preparing snapshots of the current configuration"
-    backup_all_configs
-    success "${green}[HEALTHY NETWORK]${reset} - snapshot available via menu option 5"
+    echo -e "\n● ${cyan}[INTERFACE: $int]${reset}"
+    echo -e "  ├─ Error Check: "
+    if [ "$rx_error" -gt 0 ]; then
+      echo -e "\e[31mFAIL\e[0m (RX: $rx_error errors)"
+    else
+      echo -e "\e[32mPASS\e[0m (RX: No errors)"
+    fi
+    if [ "$tx_error" -gt 0 ]; then
+      echo -e "\e[31mFAIL\e[0m (TX: $tx_error errors)"
+    else
+      echo -e "\e[32mPASS\e[0m (TX: No errors)"
+    fi
+    if [ "$rx_dropped" -gt 0 ]; then
+      echo -e "\e[31mFAIL\e[0m (RX: $rx_dropped drops)"
+    else
+      echo -e "\e[32mPASS\e[0m (RX No drops)"
+    fi
+    if [ "$tx_dropped" -gt 0 ]; then
+      echo -e "\e[31mFAIL\e[0m (TX: $tx_dropped drops)"
+    else
+      echo -e "\e[32mPASS\e[0m (TX: No drops)"
+    fi
+      echo -ne "  ├─ Path MTU (1500b): "
+    if ping -c 1 -M do -s 1472 8.8.8.8 &>/dev/null; then
+      echo -e "\e[32mOK\e[0m"
+    else
+      echo -e "\e[33mFRAGMENTED\e[0m (Standard MTU failing; check for 1450 or lower)"
+    fi
+    echo -ne "  ├─ DNS Response: "
+    if [ -z "$dns_time" ]; then 
+      echo -e "\e[31mTIMEOUT\e[0m"; 
+    elif [ "$dns_time" -gt 100 ]; then 
+      echo -e "\e[33mSLOW\e[0m (${dns_time}ms)"; 
+    else 
+      echo -e "\e[32mFAST\e[0m (${dns_time}ms)"; 
+    fi
+    echo -ne "  └─ TCP Retransmit Rate: "
+    if [ "$retrans" -gt 5000 ]; then 
+      echo -e "\e[33mHIGH\e[0m ($retrans segments)"
+    else 
+      echo -e "\e[32mSTABLE\e[0m" 
+    fi
+    echo -e "\n● ${cyan}[ACTIVE PORTS]${reset}"
+    awk '/LISTEN/{printf "  ├─ %-15s %s\n", $5, $7}' <(ss -tulpn) | sed '$s/├/└/'
+    echo -e "\n● ${cyan}[ACTIVE INTERFACES]${reset}"
+    awk '{printf "  ├─ %-10s %-10s %s\n", $1, $2, $3}' <(ip -br link show) | sed '$s/├/└/'
+    echo -e "\n● ${cyan}[GATEWAY & ROUTING]${reset}"
+    if [ -n "$gw" ]; then
+      echo "  ├─ Gateway:  $gw (via $dev)"
+      echo "  ├─ Next Hop/MAC: ${next_hop:-Local Gateway Reachable}"
+    fi
+    if [ -n "$gw6" ]; then
+      echo "  ├─ IPv6 Gateway: $gw6 (via $dev6)"
+    
+      echo "  ├─ IPv6 NextHop: ${next_6_hop}:-Local Gateway Reachable}"
+    else
+      echo "  ├─ IPv6 Gateway: Not Configured"
+    fi
+    echo "  └─ Routing Table: ${green}Active"
+    echo -e "\n● ${cyan}[ISP & PUBLIC IDENTITY]${reset}"
+    if [ $? -eq 0 ]; then
+      awk '
+        NR==1 {printf "  ├─ ISP:      %s\n", $0}
+        NR==2 {printf "  ├─ Org:      %s\n", $0}
+        NR==3 {printf "  ├─ AS Path:  %s\n", $0}
+        NR==4 {printf "  └─ PublicIP: %s\n", $0}
+      ' <<< "$isp"
+    else
+      echo "  └─ Error: Could not reach IP-API"
+    fi
+      echo -e "\n● ${cyan}[IPv6 CONNECTIVITY]${reset}"
+    if ping6 -c 1 google.com &>/dev/null; then
+      echo -e "  └─ Status: \e[32mONLINE\e[0m"
+    else
+      echo -e "  └─ Status: \e[31mOFFLINE/DISABLED\e[0m"
+    fi
+    echo
+    echo -e "\n● ${cyan}[NETWORK ASSESSMENT]${reset}"
+    success "${green}THE NETWORK IS HEALTHY${reset}"
+    echo
+    sleep 3
+    read -p "Would you like to backup the current network configurations? [y|n]: " config_net
+    if [[ "$config_net" == "y" || "$config_net" == "yes"  ]]; then
+      info "Preparing snapshots of the current configuration"
+      backup_all_configs
+      success "Backup of healthy network complete"
+    fi
+    success "${green}[NETWORK: HEALTHY]${reset}"
     return 0
   fi
   error "Network problem detected - attempting network repair"
-  info "Attempting to diagnose the issue"
+  warn "Attempting to diagnose the issue"
   iface="$(primary_iface || true)"
   if [[ -z "$iface" ]]; then
     error "No interface detected"
@@ -570,7 +674,17 @@ fix_network() {
     network_select_option
     repair_select="${repair_select,,}"
     case "$repair_select" in
-      1)
+      1) repair ;;
+      2)backup_all_configs                                    ;;
+      3)snapshot_state                                        ;;
+      4)
+        if [[ -z "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
+          warn "No backups found"
+        else
+          ls_table_all
+        fi
+        ;;
+      5)
         if [[ -z "$(ls -A "$snaps_dir" 2>/dev/null)" ]]; then
           warn "No snapshots found"
           #return
@@ -579,16 +693,7 @@ fix_network() {
           #return
         fi
         ;;
-      2)
-        if [[ -z "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
-          warn "No backups found"
-        else
-          ls_table_all
-        fi
-        ;;
-      3)repair                                                ;;
-      4)backup_all_configs                                    ;;
-      5)snapshot_state                                        ;;
+     
       6)restore_backup                                        ;;
       7)install_cron "-x" "One-Click Network Repair Tool" "v" ;;
       8)info "Exiting Network Repair" ; break                 ;;
