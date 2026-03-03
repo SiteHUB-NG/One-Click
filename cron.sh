@@ -187,7 +187,7 @@ decrypt_cron() {
   else
     month_str="every month"
   fi
-  success "Cron job successfully installed${green}[SUCCESS]${reset}"   
+  success "Cron job successfully installed${green} [SUCCESS]${reset}"   
   return
 }
 select_timezone() {
@@ -197,7 +197,7 @@ select_timezone() {
     read -rp "${cyan}[USER]${reset} Enter an alias for this job (e.g., backup-db): " id
   fi
   while true; do
-    read -rp "${cyan}[USER]${reset} Enter Timezone (e.g., 'WAT', 'Lagos', 'London', 'Warsaw' or 'list'): " tz_input
+    read -rp "${cyan}[USER]${reset} Enter Timezone (e.g., 'UTC', 'Lagos', 'London', 'Warsaw' or 'list'): " tz_input
     if [[ "$tz_input" == "list" ]]; then
       find "$search_dir" -type f | sed "s|$search_dir/||g" | grep -vE 'Etc/|posix/|right/' | column
       continue
@@ -221,11 +221,15 @@ detect_cron_clashes() {
   read -r m h dom mon dow <<< "$schedule"
   get_ordinal_suffix() {
     local day="$1"
+    if [[ ! "$day" =~ ^[0-9]+$ ]]; then
+      return
+    fi
     day=$((10#$day))
     if [[ "$day" -ge 11 && "$day" -le 13 ]]; then
       echo "${day}th"
       return
     fi
+    replace_dom="$dom"
     case $((day % 10)) in
       1) dom="${day}st" ;;
       2) dom="${day}nd" ;;
@@ -256,7 +260,7 @@ detect_cron_clashes() {
         final_cron_schedule="$schedule" 
         ;;
       2) 
-        final_cron_schedule="$m $h $dom $mon *" 
+        final_cron_schedule="$m $h $replace_dom $mon *" 
         success "Schedule adjusted to: $final_cron_schedule (Date Only)"
         ;;
       3) 
