@@ -72,7 +72,7 @@ select_snapshot_from_list() {
   done
 }
 list_profiles() {
-  [[ -d "$profiles_dir" ]] || die "Profiles directory not found: $profiles_dir"
+  [[ -d "$profiles_dir" ]] || error "Profiles directory not found: $profiles_dir"; return
   profiles=()
   for f in "$profiles_dir"/*.conf; do
     [[ -f "$f" ]] || continue
@@ -113,11 +113,12 @@ switch_profile() {
     run_menu
 }
 load_profile() {
-  local profile_name="$1"
+  local profile_name config_file
+  profile_name="$1"
+  config_file="$profiles_dir/${profile_name}.conf"
   [[ -n "$profile_name" ]] || profile_name=$(current_profile)
-  local config_file="$profiles_dir/${profile_name}.conf"
   [[ -r "$config_file" ]] || { 
-    warn "[WARN]: Profile $profile_name missing or unreadable. Using default."
+    warn "Profile is not configured or unreadable. Using $profile_name profile."
     profile_name="default"
     config_file="$profiles_dir/default.conf"
     [[ -f "$config_file" ]] || touch "$config_file"
@@ -170,9 +171,9 @@ launch_header() {
   header_notice "$backup_title" "$r_backup" "11" "4"
 }
 rclone_check() {
-  [[ -n "$r_remote" ]] || die "rclone remote not configured"
+  [[ -n "$r_remote" ]] || error "rclone remote not configured"; return
   rclone lsd "$r_remote" >/dev/null 2>&1 \
-    || die "rclone remote '$r_remote' is invalid or not authenticated"
+    || error "rclone remote '$r_remote' is invalid or not authenticated" ; return
 }
 rclone_list_snapshots() {
   rclone lsd "${r_remote}${s_file}" 2>/dev/null \
@@ -195,7 +196,7 @@ rclone_upload_snapshot() {
       --checkers 8 \
       --log-file="/var/log/one-click/rclone.log" \
       --log-level INFO \
-      || die "RCLONE upload failed"
+      || error "RCLONE upload failed"; return
     rm -f "$tmp_archive"
     success "Rclone compressed upload completed: ${snapshot_name}.tar.gz"
   else
@@ -209,7 +210,7 @@ rclone_upload_snapshot() {
       --checkers 8 \
       --log-file="/var/log/one-click/rclone.log" \
       --log-level INFO \
-      || die "RCLONE upload failed"
+      || error "RCLONE upload failed"; return
     success "Rclone upload completed: $snapshot_name"
   fi
 }
@@ -221,13 +222,13 @@ dump_databases() {
     mysqldump --single-transaction --routines --events \
       --all-databases > "$dump_dir/mysql.sql" \
       && success "MySQL dump successfully backed up to the remote server location: $dst_dir" \
-      || die "MySQL dump failed"
+      || error "MySQL dump failed"; return
   fi
   if command -v pg_dumpall >/dev/null; then
     info "Dumping PostgreSQL databases"
     sudo -u postgres pg_dumpall > "$dump_dir/postgres.sql" \
       && success "MySQL dump successfully backed up to the remote server location: $dst_dir" \
-      || die "PostgreSQL dump failed"
+      || error "PostgreSQL dump failed";return
   fi
 }
 restore_databases() {
@@ -237,12 +238,12 @@ restore_databases() {
       ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
         "cat $dst_dir/.db_dumps/mysql.sql" | mysql \
         && success "Remote MySQL restore completed" \
-        || die "Remote MySQL restore failed"
+        || error "Remote MySQL restore failed"; return
     else
       sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
         "cat $dst_dir/.db_dumps/mysql.sql" | mysql \
         && success "Remote MySQL restore completed" \
-        || die "Remote MySQL restore failed"
+        || error "Remote MySQL restore failed"; return
     fi
   fi
   if [[ -f "$restore_path/.db_dumps/postgres.sql" ]]; then
@@ -251,12 +252,12 @@ restore_databases() {
       ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
         "cat $dst_dir/postgres.sql" | psql \
         && success "Remote PostgreSQL restore completed" \
-        || die "Remote PostgreSQL restore failed"
+        || error "Remote PostgreSQL restore failed"; return
     else
       sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no "$backup_user@$backup_ip" \
         "cat $dst_dir/postgres.sql" | psql \
         && success "Remote PostgreSQL restore completed" \
-        || die "Remote PostgreSQL restore failed"
+        || error "Remote PostgreSQL restore failed"; return
     fi
   fi
 }
@@ -299,7 +300,7 @@ fetch_db_backup() {
       fi
       ;;
     *)
-      die "fetch_db_backup: unknown mode '$mode'"
+      error "fetch_db_backup: unknown mode '$mode'"; return
       ;;
   esac
   }
@@ -385,7 +386,7 @@ backup() {
   backup_dest="${backup_dest:-}"
   non_interactive="${non_interactive:-0}"
   source "$config"
-  snapshot_date=$(date +%F_%H-%M)
+  snapshot_date="${profile}_$(date +%F_%H-%M)"
   tmp_archive="/tmp/${snapshot_date}.tar.gz"
   if [[ -n "$backup_label" ]]; then
     latest_snapshot="${dst_dir}/${snapshot_date}_${backup_label}"
@@ -452,7 +453,7 @@ backup() {
           if "${rsync_cmd_run[@]}"; then
             remove_service
           else
-            die "restore failed"
+            error "restore failed"; return
           fi
         else
           rsync_cmd_run=(
@@ -466,7 +467,7 @@ backup() {
           if "${rsync_cmd_run[@]}"; then
             remove_service
           else
-            die "restore failed"
+            error "restore failed"; return
           fi
         fi
         ln -sfn "$latest_snapshot" "$dst_dir/rsync/latest"
@@ -486,7 +487,7 @@ backup() {
         rclone_upload_snapshot "$latest_snapshot"
         success "rclone snapshot completed: $latest_snapshot - ${r_remote}/${s_file}/${snapshot_name}"
         ;;
-      *) die "Invalid backup destination selected" ;;
+      *) error "Invalid backup destination selected"; return ;;
     esac
   done
   if [[ "$use_rclone" == "y" || "$use_rclone" == "yes" ]]; then
@@ -503,35 +504,42 @@ configure_backup() {
   info "Please select the directory from the following tree that you would like to backup from:"
   read -rp "${cyan}[USER]${reset} Press Enter to continue: " 
   source_dir() {
-    tree -d -L 2 -I 'proc|sys|dev|run|tmp|snap|lost+found|lib|mail|spool|cache|lang|locale|zoneinfo|boot|bin|rc[0-9]*|.*' /
-    read -rp "${cyan}[USER]${reset} Enter the directory where files should be backed up:                                         " source
-    if [[ -d "$source" ]]; then
-      tree -I 'proc|sys|dev|run|tmp|snap|lost+found|lib|mail|spool|cache|lang|locale|zoneinfo|boot|bin|rc[0-9]*|.*' "$source"
-    else
-      error "Invalid Directory"
-      sleep 2
-      source_dir
-    fi
+    local tree_ignore='proc|sys|dev|run|tmp|snap|lost+found|lib|mail|spool|cache|lang|locale|zoneinfo|boot|bin|rc[0-9]*|.*'
+    while true; do
+      clear
+      echo -e "${cyan}--- System Directory Structure ---${reset}"    
+      tree -d -L 2 -I "$tree_ignore" / | less -RFX
+      echo
+      read -rp "${cyan}[USER]${reset} Enter backup source directory (or 'q' to quit): " source
+      [[ "$source" == "q" ]] && return 1
+      if [[ -d "$source" ]]; then
+        tree -I "$tree_ignore" "$source" | less -RFX
+        break
+      else
+        echo -e "${red}Error: Invalid Directory${reset}"
+        sleep 1.5
+      fi
+    done
   }
   source_dir
   echo
-  read -rp "${cyan}[USER]${reset} Use rclone backup? (y/n):                                                              " use_rclone
+  read -rp "${cyan}[USER]${reset} Use rclone backup? (y/n): " use_rclone
   use_rclone=${use_rclone,,}
   if [[ "$use_rclone" == "y" || "$use_rclone" == "yes" ]]; then
-    read -rp "${cyan}[USER]${reset} rclone remote name (e.g. remote:):                                                     " r_remote
-    read -rp "${cyan}[USER]${reset} Should backups be compressed [y/n]:                                                    " compress_rclone
+    read -rp "${cyan}[USER]${reset} rclone remote name (e.g. remote:): " r_remote
+    read -rp "${cyan}[USER]${reset} Should backups be compressed [y/n]: " compress_rclone
   else
-    read -rp "${cyan}[USER]${reset} Please enter the IP of the destination server:                                         " backup_ip
+    read -rp "${cyan}[USER]${reset} Please enter the IP of the destination server: " backup_ip
     until is_ipv4 "$backup_ip"; do
       error "The IP is ${red}INVALID${reset}! Please try again."
-      read -rp "${cyan}[USER]${reset} Destination server IP:                                                                 " backup_ip
+      read -rp "${cyan}[USER]${reset} Destination server IP: " backup_ip
     done
-    read -rp "${cyan}[USER]${reset} Please enter the remote server username:                                               " backup_user
+    read -rp "${cyan}[USER]${reset} Please enter the remote server username: " backup_user
     check_ssh() {
-      read -s -rp "Enter the remote server password (leave blank to use key):                                              " pass
+      read -s -rp "${cyan}[USER]${reset} Enter the remote server password (leave blank to use key): " pass
       echo
       if [[ "$pass" != "" ]]; then
-        read -s -rp "Please enter the password again:                                                                        " pass2
+        read -s -rp "${cyan}[USER]${reset} Please enter the password again: " pass2
       fi
       echo
     }
@@ -541,18 +549,18 @@ configure_backup() {
       info "Please try again."
       check_ssh
     fi
-    echo
+    info ""
     if [[ -n "$pass" ]]; then
       e_pass=$(encrypt_password "$pass")
     else
       ssh_key
     fi
-    read -rp "${cyan}[USER]${reset} SSH port [22]:                                                                           " ssh_port
+    read -rp "${cyan}[USER]${reset} SSH port [22]: " ssh_port
     ssh_port=${ssh_port:-22}
   fi
-  read -rp "${cyan}[USER]${reset} Directory on destination server to save backups to:                                      " dst_dir
+  read -rp "${cyan}[USER]${reset} Directory on destination server to save backups to: " dst_dir
   dst_dir="${dst_dir%/}"
-  read -rp "${cyan}[USER]${reset} Enter a descriptive name for this backup (optional):                                     " backup_label
+  read -rp "${cyan}[USER]${reset} Enter a descriptive name for this backup (optional): " backup_label
   backup_label="${backup_label// /_}"
   warn "Confirming SSH Credentials"
   if [[ "${req:-}" == "y" || "${req:-}" == "yes" ]]; then
@@ -597,15 +605,19 @@ EOF
   chmod 600 "$config"
   success "${p_name:-Profile} successfully created"
   if [[ -n "${dst_dir:-}" ]]; then
-    info "To automate the firing of this script, we need to use cron for scheduled runs." \
-      "Please configure a cron job: "
-    read -rp "Press Enter to continue to configuring a cron job for ${p_name:-${profile_name/.*}}"
+    info "To automate the backup process, we will use cron for scheduled tasks." \
+      "Please configure a cron job in the next few steps: "
+    read -rp "${cyan}[USER]${reset} Press Enter to continue to configuring a cron job for ${p_name:-${profile_name/.*}}"
     install_cron "-z" "One-Click Backup Tool" "y" "$profile_name" "$backup_dest"
   else
-    die "SSH Validation failed."
+    error "SSH Validation failed."
+    return
   fi
   success "Backup profile '$profile_name' saved."
-  return 0
+  if [[ "$first_run" -eq 1 ]]; then
+    rsync_rclone
+    first_run=0
+  fi
 }
 restore_remote_backs() {
   # ==== Restore from remote backup ====
@@ -615,18 +627,18 @@ restore_remote_backs() {
     ssh -i "$key" -p "$ssh_port" -o StrictHostKeyChecking=no \
       "${backup_user}@${backup_ip}" \
       "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort" \
-      || die "Failed to list remote backups"
+      || error "Failed to list remote backups"; return
   else
     sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no \
       "${backup_user}@${backup_ip}" \
       "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort" \
-      || die "Failed to list remote backups"
+      || error "Failed to list remote backups"; return
   fi
   echo
   read -rp "${cyan}[USER]${reset} Backup date to restore (REQUIRED): " backup_date
-  [[ -n "$backup_date" ]] || die "Restore aborted: no backup selected"
+  [[ -n "$backup_date" ]] || error "Restore aborted: no backup selected"; return
   [[ "$backup_date" =~ ^[0-9]{4}- ]] \
-    || die "Invalid backup format"
+    || error "Invalid backup format"; return
   remote_snap="${remote_base}/${backup_date}"
   info "Restoring snapshot: $backup_date"
   local rsync_cmd_run=(
@@ -641,7 +653,7 @@ restore_remote_backs() {
     if "${rsync_cmd_run[@]}"; then
       remove_service
     else
-      die "restore failed"
+      error "restore failed"; return
     fi
   else
     wait_for_network
@@ -649,7 +661,7 @@ restore_remote_backs() {
     if sshpass -p "$d_pass" "${rsync_cmd_run[@]}"; then
       remove_service
     else
-      die "restore_failed"
+      error "restore_failed"; return
     fi
   fi
   success "Remote restore completed: $backup_date"
@@ -662,9 +674,9 @@ remote_table() {
   local count=${#items[@]}
   local title
   if (( count == 1 )); then
-    title=" SNAPSHOT "
+    title=" REMOTE BACKUP "
   else
-    title=" SNAPSHOTS "
+    title=" REMOTE BACKUPS "
   fi
   local BLUE="\033[34m"
   local WHITE="\033[97m"
@@ -692,8 +704,7 @@ remote_table() {
 restore_menu() {
   select_snapshot_from_list() {
     snapshots=("$@")
-    [[ ${#snapshots[@]} -gt 0 ]] || die "No backups available"
-
+    [[ ${#snapshots[@]} -gt 0 ]] || error "No backups available"; return
     echo
     info "Available backups:"
     local i=1
@@ -717,12 +728,12 @@ restore_menu() {
   }
   d_pass=$(decrypt_password "$pass")
   info "Restore Mode"
-  read -rp "${cyan}[USER]${reset} Restore from ${yellow}[${red}l${yellow}]${blue}ocal, ${yellow}[${red}r${yellow}]${blue}emote${reset} SSH or ${yellow}[${red}c${yellow}]${blue}loud${reset} (rclone):                                                       " restore_from
+  read -rp "${cyan}[USER]${reset} Restore from ${yellow}[${red}l${yellow}]${blue}ocal, ${yellow}[${red}r${yellow}]${blue}emote${reset} SSH or ${yellow}[${red}c${yellow}]${blue}loud${reset} (rclone): " restore_from
   restore_from="${restore_from,,}"
   restore_from="${restore_from:0:1}"
   read -rp "${cyan}[USER]${reset} Restore to $source or alternative path: " restore_path
   restore_path="${restore_path:-$source}"
-  mkdir -p "$restore_path" || die "Unable to create restore directory"
+  mkdir -p "$restore_path" || error "Unable to create restore directory"; return
   case "$restore_from" in
     # ==== LOCAL ====
     l)
@@ -730,13 +741,13 @@ restore_menu() {
         rsync -a --partial --append-verify --progress "$src_snap/" "$restore_path/"
       )
       mapfile -t local_snaps < <(
-        ls -1 "$dst_dir" 2>/dev/null | grep -E '^[0-9]{4}-' | sort
+        ls -1 "$dst_dir" 2>/dev/null | grep -E '^(${profile}_)?[0-9]{4}-' | sort
       )
       select_snapshot_from_list "${local_snaps[@]}" \
-        || die "Restore cancelled"
+        || error "Restore cancelled"; return
 
       src_snap="${dst_dir}/${selected_snapshot}"
-      [[ -d "$src_snap" ]] || die "Snapshot not found"
+      [[ -d "$src_snap" ]] || error "Snapshot not found"; return
 
       info "Restoring local snapshot: $selected_snapshot"
       wait_for_network
@@ -744,7 +755,7 @@ restore_menu() {
       if "${rsync_cmd_run[@]}"; then
         remove_service
       else
-        die "restore failed"
+        error "restore failed"; return
       fi
       success "Local restore completed"
       restore_databases
@@ -757,17 +768,17 @@ restore_menu() {
         mapfile -t remote_snaps < <(
           ssh -i "$key" -p "$ssh_port" -o StrictHostKeyChecking=no \
             "${backup_user}@${backup_ip}" \
-            "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort"
+            "ls -1 '$remote_base' | grep -E \"^(${profile}_)?[0-9]{4}-\" | sort"
         )
       else
         mapfile -t remote_snaps < <(
           sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no \
             "${backup_user}@${backup_ip}" \
-            "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort"
+            "ls -1 '$remote_base' | grep -E \"^(${profile}_)?[0-9]{4}-\" | sort"
         )
       fi
       select_snapshot_from_list "${remote_snaps[@]}" \
-        || die "Restore cancelled"
+        || error "Restore cancelled"; return
       remote_snap="${remote_base}/${selected_snapshot}"
       info "Restoring remote snapshot: $selected_snapshot"
       local rsync_cmd_run=(
@@ -782,7 +793,7 @@ restore_menu() {
         if "${rsync_cmd_run[@]}"; then
           remove_service
         else
-          die "restore failed"
+          error "restore failed"; return
         fi
       else
         wait_for_network
@@ -790,7 +801,7 @@ restore_menu() {
         if sshpass -p "$d_pass" "${rsync_cmd_run[@]}"; then
           remove_service
         else
-          die "restore failed"
+          error "restore failed"; return
         fi
       fi
       success "Remote restore completed"
@@ -803,16 +814,16 @@ restore_menu() {
         rclone lsd "${r_remote}/${s_file}" | awk '{print $NF}' | sort
       )
       select_snapshot_from_list "${rclone_snaps[@]}" \
-        || die "Restore cancelled"
+        || error "Restore cancelled"; return
       remote_path="${r_remote}/${s_file}/${selected_snapshot}"
       info "Restoring rclone snapshot: $selected_snapshot"
       rclone copy "$remote_path" "$restore_path" --progress \
-        || die "Rclone restore failed"
+        || error "Rclone restore failed"; return
       success "Rclone restore completed"
       restore_databases
       ;;
     *)
-      die "Invalid restore option selected"
+      error "Invalid restore option selected"; return
       ;;
   esac
 }
@@ -820,20 +831,20 @@ menu() {
   printf "%s\n" " " "${yellow}[${green}ONE-CLICK BACKUP TOOL${yellow}]${reset}                                  ${yellow}[${red}[$(tput setaf 4)PROFILE${reset}: $profile${red}]${yellow}]${reset}"
   info "Welcome to $(tput setaf 3)One-Click ${yellow}BACKUP${reset}!" \
     "Here. you can configure backup profiles, take and restore backups and choose your preferred backup location." \
-    "One-Click offers an array of useful and disaster recovery tools."
+    "One-Click offers a suite of productivity and disaster recovery tools."
   echo
   printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-  "[1].  Edit Configuration" \
-  "[2].  View Configuration" \
-  "[3].  View Profiles" \
-  "[4].  Add Profile" \
-  "[5].  Switch Profile" \
-  "[6].  Take A Snapshot" \
-  "[7].  Restore A Snapshot" \
-  "[8].  View Local Snapshots" \
-  "[9].  View Remote Snapshots" \
-  "[10]. Configure cron job" \
-  "[11]. Exit"
+    "[1].  View Profiles" \
+    "[2].  Add Profile" \
+    "[3].  Switch Profile" \
+    "[4].  View Configuration" \
+    "[5].  Edit Configuration" \
+    "[6].  Take A Backup" \
+    "[7].  Restore A Backup" \
+    "[8].  View Local Backup" \
+    "[9].  View Remote Backup" \
+    "[10]. Configure cron job" \
+    "[11]. Exit"
 }
 # ==== RUN MENU ====
 run_menu() {
@@ -844,7 +855,11 @@ run_menu() {
     menu
     read -rp "${cyan}[USER]${reset} Please select an option [1-11]: " backup_run
     case "$backup_run" in
-      1)
+      1) show_profiles_table          ;;
+      2) add_profile                  ;;
+      3) switch_profile               ;;
+      4) config_table "$config"       ;;
+      5)
         if [[ -s "$config" ]]; then
           info "Backup configuration exists at $config"
           read -rp "${cyan}[USER]${reset} Reconfigure it? [y/n]: " reconfig_backup
@@ -853,10 +868,8 @@ run_menu() {
           configure_backup
         fi
         ;;
-      2) config_table "$config"       ;;
-      3) show_profiles_table          ;;
-      4) add_profile                  ;;
-      5) switch_profile               ;;
+      
+      
       6) backup                       ;;
       7) restore_menu                 ;;
       8)
@@ -867,19 +880,19 @@ run_menu() {
         fi
         ;;
       9)
-        if [[ -z "$(ls -A "$source" 2>/dev/null)" ]]; then
+        if [[ -z "$(ls -A "$remote_base" 2>/dev/null)" ]]; then
           warn "No backup files found"
         else
           if [[ "$req" == "y" || "$req" == "yes" ]]; then
             echo
             remote_table $(ssh -i "$key" -p "$ssh_port" -o StrictHostKeyChecking=no \
               "${backup_user}@${backup_ip}" \
-              "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort")
+              "ls -1 '$remote_base' | grep -E \"^(${profile}_)?[0-9]{4}-' | sort")
           else
             echo
             remote_table $(sshpass -p "$d_pass" ssh -p "$ssh_port" -o StrictHostKeyChecking=no \
               "${backup_user}@${backup_ip}" \
-              "ls -1 '$remote_base' | grep -E '^[0-9]{4}-' | sort")
+              "ls -1 '$remote_base' | grep -E '^(${profile}_)?[0-9]{4}-' | sort")
           fi
         fi
         ;;
@@ -895,10 +908,10 @@ run_menu() {
 }
 # ==== SEL ENTRY ====
 rsync_rclone() {
-  mkdir -p "$profiles_dir"
   local profile
+  mkdir -p "$profiles_dir"
   profile=$(current_profile)
-  success "Using profile: ${cyan}${profile}${reset}"
+  success "${cyan}${profile}${reset} Profile Selected"
   load_profile "$profile" || exit 1
   if [[ ! -f "${config:-}" ]]; then
     backup_info
@@ -907,8 +920,13 @@ rsync_rclone() {
     launch_header
     run_menu
   else
-    warn "Configuration file has not been initialized."
-    info "Configuring now."
+    first_run=1
+    printf "${yellow}[BACKUP]: %s\n${reset}" \
+      "$(tput setaf 219)=====================================" \
+      "# THIS IS A NEW SETUP.              #" \
+      "# $profile has not been initialized. #" \
+      "$(tput setaf 219)=====================================${reset}" \
+      "Configuring now."
     configure_backup
   fi
 }
