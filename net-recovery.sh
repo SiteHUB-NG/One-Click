@@ -14,6 +14,7 @@
 # ====== One-Click ====== #
 # ==== Network Repair ====
 network_select_option() {
+  mkdir -p "$backup_dir"
   info "Network repair is a tool that will attempt to fix and resolve network connectivity issues" \
     "If it has had the opportunity to assess your environment before disaster, it will create snapshots and backups of your current configuration." \
     " " "Outside of snapshots, it can only make intelligent guesses to fix a connectivity issue." \
@@ -84,7 +85,6 @@ backup_all_configs() {
     if type systemd-resolve; then
       if resolvectl status > "$config_dir/resolvectl_status.txt" &> /dev/null; then
         success "resolvectl status state successfully saved"
-
       else
         error "resolvectl status state could not be saved"
         error+=(resolvctl)
@@ -292,74 +292,67 @@ restore_backup() {
     return 0
   }
   info "Restoring backup configs and snapshots..."
-  for f in "$backup_dir"/**/*.bak.*; do
+  local found_backups=0
+  while IFS= read -r f; do
+    [[ -e "$f" ]] || continue
+    found_backups=1
     rel="${f#$backup_dir/}"
-    rel="${rel%.bak.*}"
-    orig="/$rel"
+    orig="/${rel%.bak.*}"
     mkdir -p "$(dirname "$orig")"
     cp -a "$f" "$orig"
     success "Restored $orig from backup"
-  done
-  while read -r map service; do
-    [[ -f "$service" ]] || continue
+  done < <(find "$backup_dir" -type f -name "*.bak.*" 2>/dev/null)
+  if [[ -f "$service_restore" ]]; then
+    info "Service mapping file found. Restoring service snapshots..."
+    while read -r map service_tar; do
+      [[ -z "$map" || -z "$service_tar" ]] && continue
+      if [[ ! -f "$service_tar" ]]; then
+        warn "Snapshot tarball missing: $service_tar"
+        continue
+      fi
+      case "$map" in
+        ufw)
+          tar -xzf "$service_tar" -C / && ufw reload
+          ;;
+        iptables)
+          # Restore the state file first if it exists
+          [[ -f "$snaps_dir/iptables.state" ]] && iptables-restore < "$snaps_dir/iptables.state"
+          tar -xzf "$service_tar" -C /
+          ;;
+        nft)
+          [[ -f "$snaps_dir/nftables.state" ]] && nft -f "$snaps_dir/nftables.state"
+          tar -xzf "$service_tar" -C /
+          ;;
+        firewalld)
+          tar -xzf "$service_tar" -C / && systemctl restart firewalld
+          ;;
+        nm) 
+          tar -xzf "$service_tar" -C / && systemctl restart NetworkManager
+          ;;
+        netplan)
+          tar -xzf "$service_tar" -C / && netplan generate && netplan apply
+          ;;
+        ifup)
+          tar -xzf "$service_tar" -C / && (systemctl restart networking || { ifdown -a; ifup -a; })
+          ;;
+        suse)
+          tar -xzf "$service_tar" -C / && systemctl restart wicked
+          ;;
+        netdev)
+          tar -xzf "$service_tar" -C / && systemctl restart systemd-networkd
+          ;;
+      esac
+      success "Service [$map] restored and reloaded"
+    done < "$service_restore"
+  else
+    warn "No service snapshot mapping file found at $service_restore"
+  fi
 
-    case "$map" in
-      ufw)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        ufw reload
-        success "$service has been reloaded"
-        ;;
-      iptables)
-        iptables-restore < "$snaps_dir/iptables.state"
-        success "$service configs has been restored."
-        tar -xzf "$service" -C /
-        ;;
-      nft)
-        nft -f "$snaps_dir/nftables.state"
-        success "$service configs has been restored."
-        tar -xzf "$service" -C /
-        ;;
-      firewalld)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        systemctl restart firewalld
-        success "$service has been reloaded"
-        ;;
-      suse)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        systemctl restart wicked
-        success "$service has been reloaded"
-        ;;
-      netdev)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        systemctl restart systemd-networkd
-        success "$service has been reloaded"
-        ;;
-      ifup)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        systemctl restart networking || ifdown -a && ifup -a
-        success "$service has been reloaded"
-        ;;
-      netplan)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        netplan generate && netplan apply
-        success "$service has been reloaded"
-        ;;
-      nm)
-        tar -xzf "$service" -C /
-        success "$service configs has been restored."
-        systemctl restart NetworkManager
-        success "$service has been reloaded"
-        ;;
-    esac
-
-    success "$map service restarted"
-  done < "$service_restore"
+  if [[ $found_backups -eq 0 && ! -f "$service_restore" ]]; then
+    error "No backups or snapshots available to restore."
+  else
+    success "${yellow}[${reset}Restore process complete${yellow}]${reset}"
+  fi
 }
 repair() {
   # ==== Check & repair network ====
@@ -590,7 +583,7 @@ fix_network() {
         if [[ -z "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
           warn "No backups found"
         else
-          ls_table "$backup_dir/*/" 
+          ls_table_all
         fi
         ;;
       3)repair                                                ;;
