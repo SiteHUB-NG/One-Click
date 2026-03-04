@@ -13,7 +13,7 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== Cron logic ====
-install_dep "cron" "command -v cron" "cron" "$pkg_mgr" true
+install_dep "cron" "command -v crontab" "crond" "$pkg_mgr" true
 trap 'cron_menu' SIGUSR1
 draw_table_row() {
   local index="$1"
