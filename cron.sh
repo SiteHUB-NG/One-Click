@@ -13,11 +13,13 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== Cron logic ====
-case "$id" in
+for id in "${ids[@]}"; do
+  case "$id" in
   debian) install_dep "cron" "command -v crontab" "cron" "$pkg_mgr" true                 ;;
   rhel|centos|fedora) install_dep "cronie" "command -v crontab" "cronie" "$pkg_mgr" true ;;
    *) printf '%s\n' "Unknown OS: $id"                                                    ;;
-esac
+  esac
+fi
 trap 'cron_menu' SIGUSR1
 draw_table_row() {
   local index="$1"
