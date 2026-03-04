@@ -2310,14 +2310,52 @@ log_browser_menu() {
     echo "╠════════════════════════════════════════════════╣"
     printf "║ %-46s ║\n" " [1]. Browse Log Files"
     printf "║ %-46s ║\n" " [2]. Browse Journalctl (Services)"
-    printf "║ %-46s ║\n" " [3]. Exit"
+	printf "║ %-46s ║\n" " [3]. Live Journalctl Filter"
+    printf "║ %-46s ║\n" " [4]. Exit"
     echo "╚════════════════════════════════════════════════╝"
     tput sgr0
     read -rp "${cyan}[USER]: ${reset}Select option: " choice
     case "$choice" in
-      1) browse_files   ;;
-      2) browse_journal ;;
-      3) exit           ;;
+      1) browse_files       ;;
+      2) browse_journal     ;;
+	  3) live_journal_view  ;;
+      4) exit               ;;
+    esac
+  done
+}
+live_journal_view() {
+  while true; do
+    journal_usage=$(journalctl --disk-usage 2>/dev/null | awk '{print $3,$4}')
+    selection=$(
+      fzf --height=85% \
+          --border \
+          --ansi \
+          --prompt="Type service or keyword: " \
+          --preview 'sudo journalctl -u {q} -n 200 --no-pager' \
+          --preview-window=right:60%:wrap \
+          --expect=enter,ctrl-e \
+          --header="ENTER=view | CTRL-E=back | Live filter journal | Total usage: $journal_usage"
+    )
+    [[ -z "$selection" ]] && return
+    key=$(echo "$selection" | head -n1)
+    query=$(echo "$selection" | tail -n1)
+    case "$key" in
+      enter)
+        read -rp "${cyan}[USER]: ${reset}Live tail $query? [y/N]: " live
+        if [[ "$live" =~ ^[Yy]$ ]]; then
+          clear
+          echo "Live tailing '$query'... Press Ctrl-C to exit"
+          sudo journalctl -u "$query" -f --no-pager
+          clear
+        else
+          clear
+          sudo journalctl -u "$query" --no-pager | less -R
+          clear
+        fi
+        ;;
+      ctrl-e)
+        return
+        ;;
     esac
   done
 }
