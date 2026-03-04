@@ -13,9 +13,16 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== System information widget ====
+hide_mode=true
 cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
+x_site_ip="$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s))"
+x_site_gw="$(awk -F"[=: ]" '/Endpoint/{print $4}' <(wg showconf wg0))"
+who_ip="$whois_ip"
+sys_gwd="$sys_gw"
+x_site_gwd="$x_site_gw"
+x_site_ipd="$x_site_ip"
 sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -29,6 +36,20 @@ sys_info() {
       printf "%*s%s\n", pad, "", $0
     }'
   }
+  hidden() {
+    if [[ "$hide_mode" == true ]]; then
+      whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$whois_ip")
+      sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$sys_gw")
+      x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$x_site_ip")
+      x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$x_site_gw")
+    else
+      whois_ip="$who_ip"
+      sys_gw="$sys_gwd"
+      x_site_ip="$x_site_ipd"
+      x_site_gw="$x_site_gwd"
+    fi
+  }
+  hidden
   print_row() {
     printf "│ %-20s │ %-36s │\n" "${1:-}" "$2"
   }
@@ -46,9 +67,8 @@ sys_info() {
     print_row "IP Address" "$whois_ip"
     print_row "Gateway" "$sys_gw"
     if command -v wg showconf wg0 &> /dev/null; then
-      print_row "Cross-Site IP" "$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s)
-)"
-      print_row "Cross-Site Endpoint" "$(awk -F"[=: ]" '/Endpoint/{print $4}' <(wg showconf wg0))"
+      print_row "Cross-Site IP" "$x_site_ip"
+      print_row "Cross-Site Endpoint" "$x_site_gw"
     fi
     expand_country $ip_country
     print_row "IP Country" "$country"
@@ -92,18 +112,29 @@ sys_info() {
     if [[ "$refresh" = true ]]; then
       clear
       print_table
+      [[ "$hide_mode" == true ]] && status_text="ON (HIDDEN)"
       i=$(( (i + 1) % 4 ))
-    fi
-    if [[ "$refresh" = true ]]; then
       spinner="${spinner_frames[i]}"
       printf "\rRefresh: ON %s" "$spinner"
+      if [[ "$hide_mode" == true ]]; then
+        printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide"
+      else
+        printf '\n%s' "Press $(tput setaf 217)h$(tput sgr 0) to hide"
+      fi
     fi
-    if read -t 0.2 -n 1 key; then
+    if read -t 0.5 -n 1 key; then
       case "$key" in
+        h) 
+          hide_mode=true
+          hidden
+          if [[ "$refresh" == false ]]; then
+            print_table
+          fi
+          ;;
         p)
           refresh=false
           printf "\r%-80s\r" ""
-          echo "Refresh PAUSED. Press$(tput 217) r$(tput sgr 0) to resume."
+          echo "Refresh PAUSED. Press $(tput setaf 217)r$(tput sgr 0) to resume."
           ;;
         r)
           refresh=true
@@ -111,6 +142,13 @@ sys_info() {
         q)
           clear
           break
+          ;;
+        u)
+          hide_mode=false
+          hidden
+          if [[ "$refresh" == false ]]; then
+            print_table
+          fi
           ;;
       esac
     fi
