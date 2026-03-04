@@ -496,7 +496,7 @@ fi
 # ==== Install ====
 if ! command -v 'one-click' >/dev/null 2>&1; then
   install_self
-  exec 'one-click' "$@"
+  exec '/usr/local/bin/one-click' "$@"
 fi
 set -- $(map_one_click "$@")
 if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
