@@ -1749,18 +1749,18 @@ check_sensitive_ports() {
   current_action="$3"
   load_sensitive_ports
   for p in "${ports_ref[@]}"; do
-    if [[ -n "${SENSITIVE_MAP[$p]:-}" ]]; then
-      local service_desc="${SENSITIVE_MAP[$p]}"
+    if [[ -n "${default_sensitive_ports[$p]:-}" ]]; then
+      local service_desc="${default_sensitive_ports[$p]}"
       case "$current_action" in
         DROP|REJECT|DELETE)
-          echo -e "${red}╔════════════════ [ CRITICAL WARNING ] ════════════════╗${reset}"
-          warn "Action: $current_action detected on Port $p ($service_desc)."
-          warn "This is a CORE SERVICE. Proceeding may cause connectivity issues!"
-          echo -e "${red}╚══════════════════════════════════════════════════════╝${reset}"
-          read -rp "${cyan}[USER]:${reset} Confirm you want to restrict $service_desc? (yes/no): " confirm
-          if [[ "${confirm,,}" != "yes" ]]; then
-            die "Safety Abort: Prevented restriction of $service_desc."
-          fi
+          echo -e "${red}╔══════════════════════════ [ CRITICAL WARNING ] ══════════════════════════╗${reset}"
+          printf '%s\n' "${red}║${yellow}[ALERT]${reset} Action: $current_action detected on Port $p ($service_desc).          ${red} ║" \
+            "${red}║${yellow}[ALERT]${reset} This is a CORE SERVICE. Proceeding may cause connectivity issues! ${red}║"
+          echo -e "${red}╚══════════════════════════════════════════════════════════════════════════╝${reset}"
+          #read -rp "${cyan}[USER]:${reset} Confirm you want to restrict $service_desc? (yes/no): " confirm
+          #if [[ "${confirm,,}" != "yes" ]]; then
+          #  die "Safety Abort: Prevented restriction of $service_desc."
+          #fi
           ;;
         ACCEPT|OPEN|ALLOW)
           warn "Note: You are opening $p ($service_desc). Ensure this is intended."
@@ -1829,7 +1829,8 @@ parse_firewall_command() {
     if (( ${#sensitive_ports[@]} == 0 )); then
       info "No sensitive ports configured."
     else
-      info "Current sensitive ports: ${sensitive_ports[*]}"
+      info "Current sensitive ports:" 
+	  printf "$(tput setaf 267)[$(tput setaf 299)SENSITIVE PORT$(tput setaf 267)]${reset} %s\n" "${sensitive_ports[@]}"
     fi
     exit 0
   fi
