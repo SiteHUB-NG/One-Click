@@ -31,8 +31,8 @@ rule_engine() {
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
-  # ==== Default Sensitive Ports ====
-  declare -A SENSITIVE_MAP=(
+  # ==== Default Sensitive Ports (Remove from here) ====
+  declare -A default_sensitive_ports=(
     [22]="SSH (Remote Access)"
     [21]="FTP (Unencrypted File Transfer)"
     [25]="SMTP (Mail Routing)"
@@ -74,7 +74,6 @@ rule_engine() {
   unique_cmds=()
   for cmd in "${generated_cmds[@]}"; do
     read -r -a arr <<< "$cmd"
-    # Skip if rule already exists in kernel
     if [[ "${fw_bin:-}" == "iptables" || "${fw_bin:-}" == "ip6tables" ]]; then
         if iptables -C "${arr[@]}" &>/dev/null; then
             info "Skipping duplicate rule already in kernel: $cmd"
