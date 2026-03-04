@@ -148,7 +148,7 @@ snapshot_state() {
       /etc/firewalld/services/*.xml
       /etc/firewalld/direct.xml
     )
-    success "iptables restore state added to $service_restore"
+    success "Firewalld restore state added to $service_restore"
     echo "firewalld $snap_firewalld" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -165,7 +165,7 @@ snapshot_state() {
       /etc/sysconfig/nftables.conf
       /etc/one-click/network-repair/snapshots/nftables.state
     )
-    success "iptables restore state added to $service_restore"
+    success "nf_tables restore state added to $service_restore"
     echo "nft $snap_nft" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -200,7 +200,7 @@ snapshot_state() {
       /etc/ufw/user.rules
       /etc/ufw/user6.rules
     )
-    success "iptables restore state added to $service_restore"
+    success "ufw restore state added to $service_restore"
     echo "ufw $snap_ufw" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -218,7 +218,7 @@ snapshot_state() {
       /etc/sysconfig/network-scripts/rule-*
       /etc/NetworkManager/system-connections/*.nmconnection
     )
-    success "iptables restore state added to $service_restore"
+    success "NetworkManager restore state added to $service_restore"
     echo "nm $snap_NetworkManager" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -231,7 +231,7 @@ snapshot_state() {
     state_snap=(
       /etc/netplan/*.yaml
     )
-    success "iptables restore state added to $service_restore"
+    success "Netplan restore state added to $service_restore"
     echo "netplan $snap_netplan" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -240,12 +240,12 @@ snapshot_state() {
     [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_netplan" "${existing[@]}" &>/dev/null
   fi
   if command -v ifup &>/dev/null; then
-    snap_ifup="$snaps_dir/ifupdown-state-$(timestamp).tar.gz"
+    snap_ifup="$snaps_dir/ifup-state-$(timestamp).tar.gz"
     state_snap=(
       /etc/network/interfaces
       /etc/network/interfaces.d/*.cfg
     )
-    success "iptables restore state added to $service_restore"
+    success "ifup restore state added to $service_restore"
     echo "ifup $snap_ifup" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -254,13 +254,13 @@ snapshot_state() {
     [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_ifup" "${existing[@]}" &>/dev/null
   fi
   if [[ -e "/etc/systemd/network/*.netdev" ]]; then
-    snap_networkd="$snaps_dir/ifupdown-state-$(timestamp).tar.gz"
+    snap_networkd="$snaps_dir/networkd-state-$(timestamp).tar.gz"
     state_snap=(
       /etc/systemd/network/*.network
       /etc/systemd/network/*.netdev
       /etc/systemd/network/*.link
     )
-    success "iptables restore state added to $service_restore"
+    success "netdev restore state added to $service_restore"
     echo "netdev $snap_networkd" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -269,12 +269,12 @@ snapshot_state() {
     [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_networkd" "${existing[@]}" &>/dev/null
   fi
   if [[ -e "/etc/sysconfig/network/" ]]; then
-    snap_wicked="$snaps_dir/ifupdown-state-$(timestamp).tar.gz"
+    snap_wicked="$snaps_dir/rhel_network-state-$(timestamp).tar.gz"
     state_snap=(
       /etc/sysconfig/network/
       /etc/sysconfig/network/ifcfg-*
     )
-    success "iptables restore state added to $service_restore"
+    success "rhel_network restore state added to $service_restore"
     echo "suse $snap_wicked" >> "$service_restore"
     existing=()
     for snap in "${state_snap[@]}"; do
@@ -284,13 +284,15 @@ snapshot_state() {
   fi
 }
 restore_backup() {
-  warn "This will automatically restore known working network configurations"
-  read -rp "${cyan}[USER]${reset} Please confirm you are happy to proceed [y|n]: " confirm_restore
-  confirm_restore=${confirm_restore,,}
-  [[ "$confirm_restore" != "y" && "$confirm_restore" != "yes" ]] && {
-    info "You have chosen not to proceed with the restore"
-    return 0
-  }
+  if [[ "$recovery_restore" -ne 0 ]]; then
+    warn "This will automatically restore known working network configurations"
+    read -rp "${cyan}[USER]${reset} Please confirm you are happy to proceed [y|n]: " confirm_restore
+    confirm_restore=${confirm_restore,,}
+    [[ "$confirm_restore" != "y" && "$confirm_restore" != "yes" ]] && {
+      info "You have chosen not to proceed with the restore"
+      return 0
+    }
+  fi
   info "Restoring backup configs and snapshots..."
   local found_backups=0
   while IFS= read -r f; do
@@ -415,9 +417,9 @@ repair() {
     fi
     echo -ne "  └─ TCP Retransmit Rate: "
     if [ "$retrans" -gt 5000 ]; then 
-      echo -e "\e[33mHIGH\e[0m ($retrans segments)"
+      echo -e "\e[32mHIGH\e[0m ($retrans segments)"
     else 
-      echo -e "\e[32mSTABLE\e[0m" 
+      echo -e "\e[33mSTABLE\e[0m" 
     fi
     echo -e "\n● ${cyan}[ACTIVE PORTS]${reset}"
     awk '/LISTEN/{printf "  ├─ %-15s %s\n", $5, $7}' <(ss -tulpn) | sed '$s/├/└/'
@@ -463,8 +465,9 @@ repair() {
       info "Preparing snapshots of the current configuration"
       backup_all_configs
       success "Backup of healthy network complete"
+    else
+      error "Network Config Backup Rejected" 
     fi
-    success "${green}[NETWORK: HEALTHY]${reset}"
     return 0
   fi
   error "Network problem detected - attempting network repair"
@@ -533,90 +536,10 @@ repair() {
     success "Connectivity has been restored"
     exit 0
   fi
-  # ==== Ensure IP ====
+  # ==== Restore Snapshot ====
   if ! ip -4 addr show "$iface" | grep -q inet; then
-    warn "No IPv4 on $iface" "Attempting fix"
-    for id in "${ids[@]}"; do
-      case "$id" in
-        debian|ubuntu)
-          iface_file="/etc/network/interfaces"
-          [[ -f "${iface_file:-}" ]] && cp "${iface_file:-}" "${iface_file:-}.bak"
-          sed -Ei.one-click-bak "
-            s/$sys_gw/$destination_gw/
-            s/$ipv6_gw/${remote_v6_gw:-}
-            s/$sys_ip/$destination_server/g; 
-            s/${sys_ipv6/:1}/${destination_v6/:1}/g; 
-            s/$ipv6_gw/${remote_v6_gw:-}/g;
-            s/eth0/$nic/g
-          " "${iface_file:-}"
-          if [[ -f /etc/wireguard/wg0.conf ]]; then
-            sed -Ei.one-click-bak "
-              s/$sys_ip/$destination_server/g; 
-              s/$sys_gw/$destination_gw/g; 
-              s/${sys_ipv6/:1}/${destination_v6/:1}/g; 
-              s/$ipv6_gw/${remote_v6_gw:-}/g;
-              s/^.*200 default via $destination_gw/#&/
-              " /etc/wireguard/wg0.conf
-            wg-quick up wg0
-          fi
-          ip addr flush dev "$nic" || true
-          ifup "$nic" &> /dev/null || true
-          ;;
-        rhel|centos|rocky|almalinux|fedora)
-          local nmcli_status
-          # ==== Try NetworkManager ====
-          if command -v nmcli &> /dev/null; then
-            iface_file="/etc/NetworkManager/system-connections/$nic.nmconnection"
-            [[ -f "${iface_file:-}" ]] && cp "${iface_file:-}" "${iface_file:-}.bak"
-            sed -Ei.one-click-bak "
-              s/$sys_ip/$destination_server/g;
-              s/$sys_gw/$destination_gw/g;
-              s/${sys_ipv6/:1}/${destination_v6/:1}/g;
-              s/$ipv6_gw/${remote_v6_gw:-}/g;
-              s/eth0/$nic/g
-            " "${iface_file:-}"
-            if [[ -f /etc/wireguard/wg0.conf ]]; then
-              sed -Ei.one-click-bak "
-                s/$sys_ip/$destination_server/g;
-                s/$sys_gw/$destination_gw/g;
-                s/${sys_ipv6/:1}/${destination_v6/:1}/g;
-                s/$ipv6_gw/${remote_v6_gw:-}/g;
-                s/200 default via $destination_gw/#&/
-              " /etc/wireguard/wg0.conf
-              wg-quick up wg0
-            fi
-            nmcli device set "$nic" managed yes
-            nmcli connection reload
-            nmcli device disconnect "$nic"
-            nmcli device connect "$nic"
-            systemctl restart network || systemctl restart NetworkManager
-          else
-            #  ==== Check which network files exist ====
-            local iface_file
-            iface_file="/etc/sysconfig/network-scripts/ifcfg-$nic"
-            [[ -f "${iface_file:-}" ]] && cp "${iface_file:-}" "${iface_file:-}.bak"
-            sed -Ei.one-click-bak "
-              s/$sys_ip/$destination_server/g
-              s/$sys_gw/$destination_gw/g;
-              s/${sys_ipv6/:1}/${destination_v6/:1}/g;
-              s/$ipv6_gw/${remote_v6_gw:-}/g
-              s/eth0/$nic/g
-            " /etc/sysconfig/network-scripts/ifcfg-"$nic"
-            if [[ -f /etc/wireguard/wg0.conf ]]; then
-              sed -Ei.one-click-bak "
-                s/$sys_ip/$destination_server/g;
-                s/$sys_gw/$destination_gw/g;
-                s/${sys_ipv6/:1}/${destination_v6/:1}/g;
-                s/$ipv6_gw/${remote_v6_gw:-}/g;
-                s/200 default via $destination_gw/#&/
-              " /etc/wireguard/wg0.conf
-              wg-quick up wg0
-            fi
-            systemctl restart network || systemctl restart NetworkManager
-          fi
-          ;;
-      esac
-    done
+    recovery_restore=1
+    restore_backup
     if have_net; then
       success "Connectivity has been restored"
       exit 0
@@ -647,18 +570,11 @@ nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
   fi
-  # ==== Network? Grab snapshots ====
+  # ==== Network? ====
   if have_net && have_dns; then
     success "Network is active"
-    snapshot_state
   else
-    error "Network issue detected."
-    warn "Would you like for this script to try and restore connectivity [y/n]: " restore_network
-    restore_network=${restore_network,,}
-    if [[ "$restore_network" == "y" || "$restore_network" == "yes" ]]; then
-      warn "Attempting to fix network issues"
-      restore_backup
-    fi
+    warn "Unable to bring the network up."
   fi
   echo "=== Network Repair finished ==="
   return 0  
