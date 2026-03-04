@@ -19,7 +19,7 @@ for id in "${ids[@]}"; do
   rhel|centos|fedora) install_dep "cronie" "command -v crontab" "cronie" "$pkg_mgr" true ;;
    *) printf '%s\n' "Unknown OS: $id"                                                    ;;
   esac
-fi
+done
 trap 'cron_menu' SIGUSR1
 draw_table_row() {
   local index="$1"
