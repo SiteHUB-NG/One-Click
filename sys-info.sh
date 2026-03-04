@@ -117,9 +117,9 @@ sys_info() {
       spinner="${spinner_frames[i]}"
       printf "\rRefresh: ON %s" "$spinner"
       if [[ "$hide_mode" == true ]]; then
-        printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide"
+        printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
       else
-        printf '\n%s' "Press $(tput setaf 217)h$(tput sgr 0) to hide"
+        printf '\n%s' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
       fi
     fi
     if read -t 0.5 -n 1 key; then
@@ -138,6 +138,11 @@ sys_info() {
           ;;
         r)
           refresh=true
+          if [[ "$hide_mode" == true ]]; then
+            printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
+          else
+            printf '\n%s' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
+          fi
           ;;
         q)
           clear
