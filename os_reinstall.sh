@@ -37,6 +37,13 @@ get_os() {
 }
 os_menu() {
   # ==== List all images presented by reinstall ====
+  printf '%s\n' \
+    "$(tput setaf 127)[$(tput setaf 67)[$(tput sgr 0) REINSTALL $(tput setaf 67)]$(tput setaf 127)]$(tput sgr 0)" \
+    "Reinstall your OS easily with One-Click Reinstall Wrapper" \
+    "This is a robust, interactive OS Reinstallation Tool" \
+    "Designed to automate the deployment of various Linux distributions and Windows versions on a target server." \
+    "This module functions as a wrapper for the underlying reinstall.sh script, providing a user-friendly \"One-Click\" experience for server imaging."
+    info " " "${ul}Available Images${ul_reset}"
   mapfile -t avail_images < <(
     bash $(basename "$reinstall") |
     sed -E '
@@ -56,6 +63,7 @@ os_menu() {
         }
       " \
     | column -t
+  
   # ==== Compare arrays ====
   mapfile -t images < <(
     bash $(basename "$reinstall") |
@@ -75,14 +83,11 @@ os_menu() {
       if [[ ! "$os_choice" =~ ^[0-9]+$ ]]; then
         error "Invalid input. Please enter a number."
         sleep 2
-        clear
         continue
       fi
-      # ==== Must only accept as many options as reinstall has available ====
       if (( os_choice < 1 || os_choice > $((${#images[@]} + 1)) )); then
-        info "Selection out of range. Please choose between 1 and ${#images[@]}."
+        warn "Selection out of range. Please choose between 1 and ${#images[@]}."
         sleep 2
-        clear
         continue
       fi
       # ==== Initial OS Mapping ====
@@ -163,11 +168,11 @@ map_image() {
     [[ "$ver" == "b" ]] && {
       clear
       back_button=1
-      return 0
+      return
     }
     grep -qw "$ver" <<< "${os_versions[$os]}" || {
       echo "Invalid version"
-      return 1
+      continue
     }
     case "$ver" in
       2012) iso_name="Windows Server 2012 SERVERSTANDARD"; iso="...ISO URL..." ;;
@@ -178,7 +183,7 @@ map_image() {
       *)
         error "Invalid selection. Please try again."
         back_button=1
-        return 0
+        return
         ;;
     esac
   else
@@ -230,38 +235,53 @@ set_pass() {
       req=y
       ssh_key
       ;;
+    *)
+      error "Invalid selection. Please try again"
   esac  
 }
 set_password() {
-  info "Please enter [password|pass] or [key|ssh|ssh_key]: " 
-  read -rp "${cyan}[USER]${reset} Would you like to use a password or SSH key: " req
-  req="${req,,}"
-  case "$req" in
-    password|pass)
-      req=n
-      read -s -rp "Please enter your password: " password
-      echo
-      password_strength "$password"
-      read -s -rp "Please re-enter your password: " password2
-      echo
-      password_strength "$password2"
-      # ==== Ensure password was entered accurately ====
-      while [[ ! "$password" == "$password2" ]]; do
-        warn "${red}Passwords do not match${reset}" "${green}Please try again${reset}"
-        set_password
-      done
-      ;;
-    key|ssh|ssh_key)
-      req=y
-      ssh_key
-      ;;
-  esac
+  while true; do
+    if [[ "$os" != "windows" ]]; then
+      info "Please enter [password|pass] or [key|ssh|ssh_key]: " 
+      read -rp "${cyan}[USER]${reset} Would you like to use a password or SSH key: " req
+    else
+      req="pass"
+    fi
+    req="${req,,}"   
+    case "$req" in
+      password|pass)
+        req=n
+        read -s -rp "Please enter your password: " password
+        echo
+        password_strength "$password"
+        read -s -rp "Please re-enter your password: " password2
+        echo
+        password_strength "$password2"
+        if [[ "$password" == "$password2" ]]; then
+          break 
+        else
+          warn "${red}Passwords do not match${reset}" "${green}Please try again${reset}"
+          continue 
+        fi
+        ;;
+      key|ssh|ssh_key)
+        req_key=y
+        ssh_key
+        break 
+        ;;
+      *)
+        error "Invalid selection: '$req'. Please type 'password','pass','ssh' or 'key'."
+        sleep 1
+        ;;
+    esac
+  done
+  # ==== Windows ====
   if [[ "$os" == "windows" ]]; then
-    read -rp "${cyan}[USER]${reset} Please enter the RDP port \# (will default to 3389 if empty): " rdp
-    if [ -z "${RDP_PORT:-}" ]; then
+    read -rp "${cyan}[USER]${reset} Please enter the RDP port (will default to 3389 if empty): " rdp
+    if [ -z "$rdp" ]; then
         rdp=3389
     fi
-    echo
+    echo "$(tput setaf 132)[FILLER]$(tput sgr 0)"
     printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
     "Select Windows installation language:" \
     "1) English (United States)" \
@@ -273,19 +293,21 @@ set_password() {
     "7) Spanish" \
     "8) Japanese" \
     "9) Korean"
-    read -rp "${cyan}[USER]${reset} Please select your preferred language[1-9]: " language
-    case "$language" in
-      1) WIN_LANG="en-US" ;;
-      2) WIN_LANG="en-GB" ;;
-      3) WIN_LANG="zh-CN" ;;
-      4) WIN_LANG="zh-TW" ;;
-      5) WIN_LANG="fr-FR" ;;
-      6) WIN_LANG="de-DE" ;;
-      7) WIN_LANG="es-ES" ;;
-      8) WIN_LANG="ja-JP" ;;
-      9) WIN_LANG="ko-KR" ;;
-      *) echo "Invalid choice" ; exit 1 ;;
-    esac 
+    while true; do
+      read -rp "${cyan}[USER]${reset} Please select your preferred language[1-9]: " language
+      case "$language" in
+        1) WIN_LANG="en-US" ; break ;;
+        2) WIN_LANG="en-GB" ; break ;;
+        3) WIN_LANG="zh-CN" ; break ;;
+        4) WIN_LANG="zh-TW" ; break ;;
+        5) WIN_LANG="fr-FR" ; break ;;
+        6) WIN_LANG="de-DE" ; break ;;
+        7) WIN_LANG="es-ES" ; break ;;
+        8) WIN_LANG="ja-JP" ; break ;;
+        9) WIN_LANG="ko-KR" ; break ;;
+        *) error "Invalid choice. Please select 1-9." ;;
+      esac 
+    done
   fi
 }
 confirm_install() {
@@ -296,15 +318,16 @@ confirm_install() {
   install_reinstall="${install_reinstall:-}"
   install_reinstall="${install_reinstall,,}"
   if [[ ! "${install_reinstall}" =~ ^(y|yes)$ ]]; then
-    die "You have chosen not to proceed."
+    error "You have chosen not to proceed."
+    return
   fi
-  warn "This may take a while to complete"
+  warn "This may take some time to complete"
 }
 # ==== Run reinstall to change OS pn server ====
 install_image() {
   confirm_install
   # ==== Linux with SSH key ====
-  if [[ "$os" != "windows" && "$req" == "y" ]]; then
+  if [[ "$os" != "windows" && "$req_key" == "y" ]]; then
     bash $(basename "$reinstall") "$os $ver" --password "$password" --ssh-key "$key" \
       | sed -E '/(Password: .)....(.).*/s//\1xxxx\2x/' \
       | sed -E "N;s,\nUsername:,\n                         _ _      _    \n  ___  _ __   ___    ___\| \(_\) ___\| \| __\\n / _ \\\| '_ \\\ / _ \\\  / __\| \| \|/ __\| \|/ /\n\| \(_\) \| \| \| \|  __/ \| \(__\| \| \| \(__\|   < \n \\\___/\|_\| \|_\|\\\___\|  \\\___\|_\|_\|\\\___\|_\|\\\_\\\&,"
@@ -353,13 +376,14 @@ finish(){
     sleep 10
     reboot
   else
-    exit 0
+    die "Reboot Aborted"
   fi
 }
 os_reinstall_run() {
   get_os
   while true; do
     os_menu
+    #os_select
     trap - ERR
     back_button=0
     map_image
