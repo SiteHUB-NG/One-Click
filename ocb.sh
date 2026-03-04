@@ -99,8 +99,8 @@ print_row() {
   visible=$(printf "%s" "$cleaned" | wc -m)
   pad=$((val_width - visible))
   case "$key" in
-    "AES-NI"|"VM-x/AMD-V"|"Connectivity"|"Disk") pad=$((pad + 2)) ;;
-    "Connectivity")                              pad=$((pad + 6)) ;;
+ #   "AES-NI"|"VM-x/AMD-V"|"Connectivity"|"Disk") pad=$((pad + 2)) ;;
+ #   "Connectivity")                              pad=$((pad + 6)) ;;
  #   "Disk")                                      pad=$((pad + 1)) ;;                                     
   esac
   (( pad < 0 )) && pad=0
@@ -142,7 +142,7 @@ print_table() {
       vendor=$(< /sys/block/$d/device/vendor)
       name="$vendor VirtIO Disk"
     else
-        name="Unknown Disk"
+      name="Unknown Disk"
     fi
     print_row "$key_width" "$val_width" "Disk Name$((++n))" "$(tput setaf 214)$name${blue}"
   done 
@@ -177,18 +177,18 @@ ram_bench() {
 gb_check() {
   if (( avail_mem < 1500 )); then
     printf "$(tput setaf 100) %s${reset}\n" \
-    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-    "│ ${yellow}Less than 1.5GB RAM." "Geekbench will not be run. Will use sysbench instead.$(tput setaf 100)                     │" \
-    printf "$(tput setaf 100) %s${reset}\n" \
-    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ ${yellow}Less than 1.5GB RAM. $(tput setaf 100)                                                                            │" \
+      "│Geekbench will not be run. Will use sysbench instead. $(tput setaf 100)                                            │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘${reset}"
     no_gb=1
   fi
   if (( avail_disk < 7 )); then
     printf "$(tput setaf 100) %s${reset}\n" \
-    "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-    "│ ${yellow}Less than 7GB Storage." "Geekbench will not be run. Will use sysbench instead.$(tput setaf 100)                   │" \
-    printf "$(tput setaf 100) %s${reset}\n" \
-    "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
+      "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
+      "│ ${yellow}Less than 7GB Storage.  $(tput setaf 100)                                                                         │" \
+      "│Geekbench will not be run. Will use sysbench instead. $(tput setaf 100)                                            │" \
+      "└──────────────────────────────────────────────────────────────────────────────────────────────────┘${reset}"
     no_gb=1
   fi
 }
@@ -196,7 +196,7 @@ iperf_run() {
   if ping -4 -c1 google.com &> /dev/null; then
     iperf_table "IPv4"
   else
-     printf "${red}%s${reset}\n" \
+    printf "${red}%s${reset}\n" \
       "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
       "│ No IPv4 connectivity detected. Skipping IPv4 iperf tests.                                        │" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
@@ -210,17 +210,17 @@ iperf_run() {
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
   fi
 }
-sysbench() {
+run_sysbench() {
   threads=$(nproc)
   time_sec=65
   cpu_max_prime=30000
   cpu_output=$(sysbench cpu --threads=$threads --time=$time_sec --cpu-max-prime=$cpu_max_prime run)
   # ==== PARSE RESULTS ====
-  total_time=$(echo "$cpu_output" | awk -F: '/total time:/ {gsub(/ /,"",$2); print $2}')
-  events_sec=$(echo "$cpu_output" | awk -F: '/events per second:/ {gsub(/ /,"",$2); print $2}')
-  min_time=$(echo "$cpu_output" | awk -F: '/min:/ {gsub(/ /,"",$2); print $2}')
-  avg_time=$(echo "$cpu_output" | awk -F: '/avg:/ {gsub(/ /,"",$2); print $2}')
-  max_time=$(echo "$cpu_output" | awk -F: '/max:/ {gsub(/ /,"",$2); print $2}')
+  total_time=$(awk -F: '/total time:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  events_sec=$(awk -F: '/events per second:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  min_time=$(awk -F: '/min:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  avg_time=$(awk -F: '/avg:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  max_time=$(awk -F: '/max:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
   # ==== PRINT TABLE ====
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -271,7 +271,7 @@ run_ocb() {
   iperf_run
   gb_check
   if (( no_gb == 1 )); then
-    sysbench
+    run_sysbench
   else
     geekbench_table "${version:-6}" "$gb_path"
   fi
