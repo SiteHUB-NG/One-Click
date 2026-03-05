@@ -17,8 +17,7 @@ rule_engine() {
   if [[ "pkg_mgr" == "apt" ]]; then
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
   elif [[ "$pkg_mgr" == "dnf" ]]; then
-    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
-    install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr" true
+    install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
   fi
   rule="$1"
   flag="${2:-}"
