@@ -178,16 +178,16 @@ gb_check() {
   if (( avail_mem < 1500 )); then
     printf "$(tput setaf 100) %s${reset}\n" \
       "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ ${yellow}Less than 1.5GB RAM. $(tput setaf 100)                                                                            │" \
-      "│Geekbench will not be run. Will use sysbench instead. $(tput setaf 100)                                            │" \
+      "│ RAM is not enough to run Geekbench.                                                              │" \
+      "│ Geekbench will not be run. Will use sysbench instead.                                            │" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘${reset}"
     no_gb=1
   fi
   if (( avail_disk < 7 )); then
     printf "$(tput setaf 100) %s${reset}\n" \
       "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
-      "│ ${yellow}Less than 7GB Storage.  $(tput setaf 100)                                                                         │" \
-      "│Geekbench will not be run. Will use sysbench instead. $(tput setaf 100)                                            │" \
+      "│ Storage is too small for Geekbench.                                                              │" \
+      "│ Geekbench will not be run. Will use sysbench instead.                                            │" \
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘${reset}"
     no_gb=1
   fi
