@@ -250,7 +250,7 @@ set_password() {
     req="${req,,}"   
     case "$req" in
       password|pass)
-        req=n
+        req_key=n
         read -s -rp "Please enter your password: " password
         echo
         password_strength "$password"
