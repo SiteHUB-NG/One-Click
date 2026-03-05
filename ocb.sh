@@ -83,7 +83,7 @@ if grep -q aes /proc/cpuinfo; then
 else
     aes="${red}✖ No${blue}"
 fi
-if egrep -q '(vmx|svm)' /proc/cpuinfo; then
+if grep -E -q '(vmx|svm)' /proc/cpuinfo; then
     x_v="${green}✔ Yes${blue}"
 else
     x_v="${red}✖ No${blue}"
