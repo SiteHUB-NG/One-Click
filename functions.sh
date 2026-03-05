@@ -716,14 +716,14 @@ detect_disk_type() {
     else
       type="HDD"
     fi
-  elif [[ -f "$rotational" ]]; then
-    if [[ $(<"$rotational") -eq 0 ]]; then
+  elif [[ -f "${rotational:-}" ]]; then
+    if [[ $(<"${rotational:-}") -eq 0 ]]; then
       type="SSD"
     else
       type="HDD"
     fi
   fi
-  echo "$type"
+  echo "${type:-???}"
   return
 }
 score_bw() {
