@@ -92,8 +92,7 @@ os_menu() {
       fi
       # ==== Initial OS Mapping ====
       if [[ "$os_choice" -eq "$((${#images[@]} + 1))" ]]; then
-        info "Exiting into TMUX session"
-        exit 0
+        tmux kill-session -t "one-click" 
       fi
       os_full="${avail_images[os_choice-1]}"
       os="${os_full#*_}"
