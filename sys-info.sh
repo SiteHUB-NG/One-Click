@@ -29,6 +29,23 @@ sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
   }
+  check_25=$(
+    (timeout 3 bash -c '</dev/tcp/smtp.gmail.com/25' 2>/dev/null) && \
+    echo "OPEN" || echo "BLOCKED"
+  )
+  check_ip_status() {
+    local report=$(curl -s "http://ip-api.com/json/$1?fields=proxy,hosting")
+    local is_proxy=$(grep -o '"proxy":true' <<< "$report")
+    local is_hosting=$(grep -o '"hosting":true' <<< "$report")
+    if [[ -n "$is_proxy" ]]; then
+      echo "DIRTY (Proxy/VPN detected)"
+    elif [[ -n "$is_hosting" ]]; then
+      echo "CLEAN (Data Center IP)"
+    else
+      echo "CLEAN (Residential/Other)"
+    fi
+  }
+  ip_status=$(check_ip_status "$whois_ip")
   center_block() {
     strip_ansi | awk -v w="$term_width" '
     {
@@ -89,6 +106,7 @@ sys_info() {
       | sed '1{s/├/┌/;s/┤/┐/;s/┴/─/}'
     print_row "IP Address" "$whois_ip"
     print_row "Gateway" "$sys_gw"
+    print_row "IP Status" "$ip_status"
     if command -v wg showconf wg0 &> /dev/null; then
       print_row "Cross-Site IP" "$x_site_ip"
       print_row "Cross-Site Endpoint" "$x_site_gw"
@@ -101,6 +119,7 @@ sys_info() {
       print_row "Nameserver$((++i))" "$n"
     done
     print_row "Hostname" "$HOSTNAME"
+    print_row "Port 25" "${check_25}"
     print_section "======================= ${yellow}OS INFO${blue} ============================│"
     print_row "OS" "$PRETTY_NAME"
     print_row "Kernel" "$kern"
@@ -115,7 +134,6 @@ sys_info() {
       steal=$(mpstat -P ALL | awk '{for (i=1;i<NF;i++) if ($i=="%steal") steal=i;}NR==4{print $steal}')
       print_row "Steal" "$steal"
     fi
-    print_row "Entropy" "$entropy"
     print_section "======================= ${yellow}MEMORY${blue} =============================│"
     print_row "RAM Usage" "$(awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { printf "%.2f / %.2f GB", (t-a)/1024/1024, t/1024/1024 }' /proc/meminfo)"
     print_row "Swap Usage" "$(awk '$1=="Swap:" {print $3" / "$2"B"}' <(free -h))"
@@ -129,7 +147,6 @@ sys_info() {
   pw='\'
   spinner_framess=('/' '|' '\' '-')
   i=0
-  lc=1
   refresh=true
   # ==== Main loop ====
   while true; do
@@ -195,7 +212,6 @@ sys_info() {
     else
       sleep 0.2
     fi
-    ((lc++))
   done
 }
 # ==== End Of System Info ==== #
