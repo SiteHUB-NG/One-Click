@@ -287,9 +287,9 @@ recovery_menu() {
           ls_table "${recovery_base:-}" 
         fi
         ;;
-      4) install_cron "-y" "Boot Recovery Tool" "r"      ;;
-      5) tmux kill-session -t "one-click"                ;;
-      *) echo "[ERROR] Invalid selection"                ;;
+      4) install_cron "-y" "Boot Recovery Tool" "r"                 ;;
+      5) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      *) echo "[ERROR] Invalid selection"                           ;;
     esac
     read -rp "${cyan}[USER]${reset} Press enter to continue"
   done
