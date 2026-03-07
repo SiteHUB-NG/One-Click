@@ -1773,8 +1773,8 @@ check_sensitive_ports() {
   done
 }
 parse_firewall_command() {
-  export LANG=en_US.UTF-8
-  export LC_ALL=en_US.UTF-8
+  #export LANG=en_US.UTF-8
+  #export LC_ALL=en_US.UTF-8
   export TERM=xterm-256color
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
   fw_bin="iptables"
