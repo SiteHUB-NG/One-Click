@@ -284,7 +284,7 @@ snapshot_state() {
   fi
 }
 restore_backup() {
-  if [[ "$recovery_restore" -ne 0 ]]; then
+  if [[ "${recovery_restore:-}" -ne 0 ]]; then
     warn "This will automatically restore known working network configurations"
     read -rp "${cyan}[USER]${reset} Please confirm you are happy to proceed [y|n]: " confirm_restore
     confirm_restore=${confirm_restore,,}
