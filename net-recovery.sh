@@ -361,7 +361,11 @@ repair() {
   out=$(ip -s link show "$nic")
   isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
   dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
-  retrans=$(netstat -s | grep "segments retransmitted" | awk '{print $1}')
+  if command -v netstat &> /dev/null; then
+    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
+  elif command -v nstat &> /dev/null; then
+    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+  fi
   gw=$(awk '/default/{print $3}' <(ip r))
   dev=$(awk '/default/{print $5}' <(ip r))
   gw6=$(awk '/default/{print $3}' <(ip -6 r))
@@ -417,9 +421,9 @@ repair() {
     fi
     echo -ne "  └─ TCP Retransmit Rate: "
     if [ "$retrans" -gt 5000 ]; then 
-      echo -e "\e[32mHIGH\e[0m ($retrans segments)"
+      echo -e "\e[33mHIGH\e[0m"
     else 
-      echo -e "\e[33mSTABLE\e[0m" 
+      echo -e "\e[32mSTABLE\e[0m" 
     fi
     echo -e "\n● ${cyan}[ACTIVE PORTS]${reset}"
     awk '/LISTEN/{printf "  ├─ %-15s %s\n", $5, $7}' <(ss -tulpn) | sed '$s/├/└/'
@@ -427,7 +431,7 @@ repair() {
     awk '{printf "  ├─ %-10s %-10s %s\n", $1, $2, $3}' <(ip -br link show) | sed '$s/├/└/'
     echo -e "\n● ${cyan}[GATEWAY & ROUTING]${reset}"
     if [ -n "$gw" ]; then
-      echo "  ├─ Gateway:  $gw (via $dev)"
+      echo "  ├─ Gateway:      $gw (via $dev)"
       echo "  ├─ Next Hop/MAC: ${next_hop:-Local Gateway Reachable}"
     fi
     if [ -n "$gw6" ]; then
@@ -610,10 +614,10 @@ fix_network() {
         fi
         ;;
      
-      6)restore_backup                                        ;;
-      7)install_cron "-x" "One-Click Network Repair Tool" "v" ;;
-      8)info "Exiting Network Repair" ; break                 ;;
-      *)warn "Invalid selection"                              ;;
+      6)restore_backup                                         ;;
+      7)install_cron "-x" "One-Click Network Repair Tool" "v"  ;;
+      8)tmux kill-session -t "one-click"                       ;;
+      *)warn "Invalid selection"                               ;;
     esac
     echo
     read -rp "${cyan}[USER]${reset} Press Enter to return to menu..."
