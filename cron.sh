@@ -441,12 +441,8 @@ cron_menu() {
         delete_cron_job
         read -rp "Press Enter to return to menu..."
         ;;
-      4)
-        exit 0
-        ;;
-      "")
-        continue
-        ;;
+      4) tmux kill-session -t "one-click"  ;;
+      "") continue                         ;;
       *)
         warn "Invalid option"
         sleep 1
