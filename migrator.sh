@@ -721,7 +721,7 @@ run_migrate_rsync() {
       -e "ssh -o StrictHostKeyChecking=no"
     )
     # ====  ====
-    [[ "$dry_run" -eq 3 ]] && tmux kill-session -t "one-click" 
+    [[ "$dry_run" -eq 3 ]] && ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 
     # ==== Add --dry-run flag if user opted for dry run ====
     [[ "$dry_run" -eq 1 ]] && rsync_opts+=(--dry-run)
     # ==== Migrate directories ====
