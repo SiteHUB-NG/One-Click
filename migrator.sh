@@ -530,7 +530,7 @@ set_pass() {
           read -s -rp "${cyan}[USER]${reset} Please re-enter your password: " pass2
           echo
           if [[ -n "$pass" && "$pass" == "$pass2" ]]; then
-            return 0 # Success! Exit the entire function
+            return 0 
           else
             warn "${red}Passwords do not match or are empty.${reset}" "Please try again."
           fi
@@ -539,7 +539,7 @@ set_pass() {
       key|ssh|ssh_key)
         req=y
         if ssh_key; then 
-          return 0 # Exit function if ssh_key setup succeeded
+          return 0 
         fi
         # If ssh_key fails or returns false, it will naturally loop back to the start
         ;;
@@ -721,7 +721,7 @@ run_migrate_rsync() {
       -e "ssh -o StrictHostKeyChecking=no"
     )
     # ====  ====
-    [[ "$dry_run" -eq 3 ]] && exit 0
+    [[ "$dry_run" -eq 3 ]] && tmux kill-session -t "one-click" 
     # ==== Add --dry-run flag if user opted for dry run ====
     [[ "$dry_run" -eq 1 ]] && rsync_opts+=(--dry-run)
     # ==== Migrate directories ====
