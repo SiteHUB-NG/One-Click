@@ -899,8 +899,8 @@ run_menu() {
         profile_name=$(basename "$config" .conf)
         install_cron "-z" "One-Click Backup Tool" "y" "$profile_name" "$backup_dest"
         ;;
-      11) tmux kill-session -t "one-click" ;;
-      *) warn "Invalid selection"; sleep 1 ;;
+      11) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      *) warn "Invalid selection"; sleep 1                           ;;
     esac
     read -rp "${cyan}[USER]${reset} Press Enter to return to menu..."
   done
