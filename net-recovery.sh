@@ -614,10 +614,10 @@ fix_network() {
         fi
         ;;
      
-      6)restore_backup                                         ;;
-      7)install_cron "-x" "One-Click Network Repair Tool" "v"  ;;
-      8)tmux kill-session -t "one-click"                       ;;
-      *)warn "Invalid selection"                               ;;
+      6)restore_backup                                             ;;
+      7)install_cron "-x" "One-Click Network Repair Tool" "v"      ;;
+      8)( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      *)warn "Invalid selection"                                   ;;
     esac
     echo
     read -rp "${cyan}[USER]${reset} Press Enter to return to menu..."
