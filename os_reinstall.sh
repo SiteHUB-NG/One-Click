@@ -92,7 +92,7 @@ os_menu() {
       fi
       # ==== Initial OS Mapping ====
       if [[ "$os_choice" -eq "$((${#images[@]} + 1))" ]]; then
-        tmux kill-session -t "one-click" 
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 
       fi
       os_full="${avail_images[os_choice-1]}"
       os="${os_full#*_}"
