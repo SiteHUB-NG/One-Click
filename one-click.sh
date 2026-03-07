@@ -96,7 +96,7 @@ recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 updated="March 2026"
-version="1.1.4"
+version="1.1.6"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
@@ -602,7 +602,7 @@ if [[ $# -gt 0 ]]; then
             rm -rf "$log_dir" "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
           fi
           rm -rf "$log_dir" "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
-          success "One-Click has been uninstalled."
+          printf "${green}[SUCCESS]${reset}%s\n" "One-Click has been uninstalled."
           complete -r one-click
           unset -f _one-click
           exit 0
