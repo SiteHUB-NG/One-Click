@@ -23,6 +23,8 @@ who_ip="$whois_ip"
 sys_gwd="$sys_gw"
 x_site_gwd="$x_site_gw"
 x_site_ipd="$x_site_ip"
+st=$(date +%s)
+virt=$(systemd-detect-virt)
 sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -51,19 +53,40 @@ sys_info() {
   }
   hidden
   print_row() {
-    printf "│ %-20s │ %-36s │\n" "${1:-}" "$2"
+    printf "${blue}│$(tput setaf 195) %-20s ${blue}│${reset} %-36s ${blue}│\n" "${1:-}" "$2"
   }
   # ==== Info Header ====
   print_section() {
-    printf "┌─────────────────────────────────────────────────────────────┐\n"
+    #printf "${blue}┌─────────────────────────────────────────────────────────────┐\n"
+    printf "${blue}├──────────────────────┴──────────────────────────────────────┤\n"
     printf "│ %-63s \n" "${1:-}"
-    printf "├─────────────────────────────────────────────────────────────┤\n"
+    printf "├──────────────────────┬──────────────────────────────────────┤${reset}\n"
+  }
+  legend() {
+    local current_time=$(date +%s)
+    local elapsed=$(( current_time - st ))
+    key_col=$(tput setaf 217)
+    desc_col=$(tput setaf 195)
+    local timer=$(printf '%02d:%02d:%02d' $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+    printf '%s\n' \
+      " " " " \
+      "${blue}┌───┬────────┐" \
+      "│ ${key_col}p ${blue}│${desc_col} Pause${blue}  │" \
+      "│ ${key_col}r ${blue}│${desc_col} Resume${blue} │" \
+      "│ ${key_col}h ${blue}│${desc_col} Hide${blue}   │" \
+      "│ ${key_col}u ${blue}│${desc_col} Unhide${blue} │" \
+      "│ ${key_col}q ${blue}│${desc_col} Quit${blue}   │" \
+      "├───┴────────┼──────────┐" \
+      "│${key_col}System Time ${blue}│${desc_col} $(date +'%T')${blue} │" \
+      "│${key_col}Time Elapsed${blue}│${desc_col} ${timer}${blue} │" \
+      "└────────────┴──────────┘${reset}"
   }
   # ==== Info Table ====
   print_table() {
     clear
     # ==== Build System Info ====
-    print_section "==================== NETWORK INFO ==========================│"
+    print_section "==================== ${yellow}NETWORK INFO${blue} ==========================│" \
+      | sed '1{s/├/┌/;s/┤/┐/;s/┴/─/}'
     print_row "IP Address" "$whois_ip"
     print_row "Gateway" "$sys_gw"
     if command -v wg showconf wg0 &> /dev/null; then
@@ -78,52 +101,62 @@ sys_info() {
       print_row "Nameserver$((++i))" "$n"
     done
     print_row "Hostname" "$HOSTNAME"
-    printf "└─────────────────────────────────────────────────────────────┘\n"
-    print_section "======================= OS INFO ============================│"
+    print_section "======================= ${yellow}OS INFO${blue} ============================│"
     print_row "OS" "$PRETTY_NAME"
     print_row "Kernel" "$kern"
     print_row "Shell" "$SHELL"
     print_row "Uptime" "$(uptime -p)"
     print_row "Up Since" "$(uptime -s)"
     print_row "Load" "$(cut -d' ' -f1-3 /proc/loadavg)"
+    print_row "Virtualization" "${virt^^}"
     print_row "CPU" "$cpu_model"
     print_row "Cores" "$cpu"
     if command -v mpstat &> /dev/null; then
       steal=$(mpstat -P ALL | awk '{for (i=1;i<NF;i++) if ($i=="%steal") steal=i;}NR==4{print $steal}')
       print_row "Steal" "$steal"
     fi
-    printf "└─────────────────────────────────────────────────────────────┘\n"
-    print_section "======================= MEMORY =============================│"
+    print_row "Entropy" "$entropy"
+    print_section "======================= ${yellow}MEMORY${blue} =============================│"
     print_row "RAM Usage" "$(awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { printf "%.2f / %.2f GB", (t-a)/1024/1024, t/1024/1024 }' /proc/meminfo)"
     print_row "Swap Usage" "$(awk '$1=="Swap:" {print $3" / "$2"B"}' <(free -h))"
-    printf "└─────────────────────────────────────────────────────────────┘\n"
-    print_section "===================== DISK HEALTH ==========================│"
+    print_row "Dirty Wait" "$(awk '/^Dirty:/{print $2 $3}' <(cat /proc/meminfo))"
+    print_section "===================== ${yellow}DISK HEALTH${blue} ==========================│"
     print_row "Disk Used" "$(awk '$NF == "/" {print $3" / "$2}' <(df -h))"
-    print_row "Disk Capacity" "$drive_cap"
     print_row "Disk IO" "$(awk '{for (i=1;i<NF;i++) if ($i=="%iowait") steal=i;}NR==4{ print $steal}' <(iostat -x 1 1))"
-    #print_row "Disk IO" "$(iostat -xz | awk '$1 ~ /^[svn][vd][ma]/{print $3}')"
-    printf "└─────────────────────────────────────────────────────────────┘\n"
+    printf "${blue}└──────────────────────┴──────────────────────────────────────┘${reset}\n"
   }
   spinner_frames=('-' '\' '|' '/')
+  pw='\'
+  spinner_framess=('/' '|' '\' '-')
   i=0
+  lc=1
   refresh=true
   # ==== Main loop ====
   while true; do
+    entropy=$(cat /proc/sys/kernel/random/entropy_avail)
+    ent_val="$entropy"
     if [[ "$refresh" = true ]]; then
       clear
-      print_table
+      paste <(print_table) <(legend) 
       [[ "$hide_mode" == true ]] && status_text="ON (HIDDEN)"
       i=$(( (i + 1) % 4 ))
       spinner="${spinner_frames[i]}"
+      spinner2="${spinner_framess[i]}"
       printf "\rRefresh: ON %s" "$spinner"
       if [[ "$hide_mode" == true ]]; then
+        printf "\nHidden: ON %s" "$spinner2"
         printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
       else
-        printf '\n%s' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
+        printf "\nHidden: OFF %s" "$spinner2"
+        printf '\n%s\n' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
       fi
     fi
-    if read -t 0.5 -n 1 key; then
+    if read -s -t 0.5 -n 1 key; then
       case "$key" in
+        e)
+          install_dep "havged" "grep haveged <(systemctl list-unit-files)" "haveged" "$pkg_mgr"
+          systemctl enable haveged --now
+          ;;
         h) 
           hide_mode=true
           hidden
@@ -162,6 +195,7 @@ sys_info() {
     else
       sleep 0.2
     fi
+    ((lc++))
   done
 }
 # ==== End Of System Info ==== #
