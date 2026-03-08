@@ -37,7 +37,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  (engine|rule-engine)    Converts natural language into iptables commands" \
     "      $(tput smul)subcommands:$(tput rmul)        Subcommands are delimited by $(tput setaf 373)and$(tput sgr 0) and $(tput setaf 373),$(tput sgr 0)(comma) can be chained e.g '$(tput setaf 228)allow udp port 100 and reject 200 output and tcp 300$(tput sgr0)'." \
     "      --dry-run           Show what commands would be executed without applying them." \
-    "      (open|show) <arg>?  Opens firewall table view. Can optionally be extended by specifying the $(tput setaf 228)table arg$(tput sgr0) or with the '$(tput setaf 228)all$(tput sgr0)' flag." \
+    "      (open|show)<alias>? Opens firewall table view. Can optionally be extended by specifying the $(tput setaf 228)table arg$(tput sgr0) or with the '$(tput setaf 228)all$(tput sgr0)' flag." \
     "      flush <table>       Flush rules in specified table e.g '$(tput setaf 228)flush mangle$(tput sgr0)'." \
     "      flush all           Flush all tables e.g '$(tput setaf 228)one-click firewall flush all$(tput sgr0)'." \
     "      (backup|save)       Create a backup file of the firewall configuration e.g '$(tput setaf 228)one-click engine backup$(tput sgr0)'." \
@@ -45,11 +45,12 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      allow <arg>         (ACCEPT) Open ports e.g '$(tput setaf 228)allow 443$(tput sgr0)' or  '$(tput setaf 228)allow apache$(tput sgr0)' to accept packets on ports 80 and 443" \
     "      (deny|drop) <arg>   (DROP) Drop packets e.g '$(tput setaf 228)deny https$(tput sgr0)' or '$(tput setaf 228)close smtp$(tput sgr0)' or '$(tput setaf 228)drop smtp$(tput sgr0)'" \
     "      (reject|decline)    (REJECT) Reject packets e.g '$(tput setaf 228)bounce https$(tput sgr0)' or '$(tput setaf 228)reject 22$(tput sgr0)'" \
-    "      (delete|remove)     (DELETE) Delete rule entries from tables e.g '$(tput setaf 228)remove line 3 from nat$(tput sgr0)'. Use '$(tput setaf 228)open$(tput sgr0)' command first" \
+    "      (delete|remove)     (DELETE) Delete rule entries from tables, firewall backups and alias mapping e.g '$(tput setaf 228)remove line 3 nat$(tput sgr0)' or '$(tput setaf 228) delete firewall$(tput sgr0)' or '$(tput setaf 228) delete alias$(tput sgr0)'. Use '$(tput setaf 228)open$(tput sgr0)' command first when removing firewall tables to know the exact line number." \
     "      (mask|hide)         (MASQUERADE) e.g 'hide from 1.1.1.1'" \
     "      enable (icmp|echo)  Enable ICMP protocol e.g '$(tput setaf 228)allow enable echo$(tput sgr0)'" \
     "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
     "      raw: <iptables cmd> Enter raw commands for extended functionality" \
+    "      (remember|include)  The remember|include commands allow you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" 
     "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
     "      range               A range of ports e.g '$(tput setaf 228)range 1000-2000$(tput sgr0)'" \
     "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
@@ -96,7 +97,7 @@ recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 updated="March 2026"
-version="1.1.6"
+version="1.1.7"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
