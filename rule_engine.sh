@@ -14,11 +14,12 @@
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 rule_engine() {
-  if [[ "pkg_mgr" == "apt" ]]; then
+  if [[ "$pkg_mgr" == "apt" ]]; then
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
   fi
+  real_ssh=$(sed -En '/sshd/{/0.0:/{s/^[^:]*:([0-9]+).*/\1/p}}' <(ss -ltnp))
   rule="$1"
   flag="${2:-}"
   dry_run=0
@@ -32,7 +33,7 @@ rule_engine() {
   fi
   # ==== Default Sensitive Ports (Remove from here) ====
   declare -A default_sensitive_ports=(
-    [22]="SSH (Remote Access)"
+    ["${real_ssh:-22}"]="SSH (Remote Access)"
     [21]="FTP (Unencrypted File Transfer)"
     [25]="SMTP (Mail Routing)"
     [443]="HTTPS (Web Traffic)"
@@ -74,7 +75,7 @@ rule_engine() {
   for cmd in "${generated_cmds[@]}"; do
     read -r -a arr <<< "$cmd"
     if [[ "${fw_bin:-}" == "iptables" || "${fw_bin:-}" == "ip6tables" ]]; then
-        if iptables -C "${arr[@]}" &>/dev/null; then
+        if "${fw_bin:-}" -C "${arr[@]}" &>/dev/null; then
             info "Skipping duplicate rule already in kernel: $cmd"
             duplicate_skipped=1
             continue
@@ -115,7 +116,7 @@ rule_engine() {
     i=""
     # ==== Take snapshot BEFORE applying rule ====
     tmp_snapshot=$(mktemp /tmp/iptables_backup.XXXXXX)
-    iptables-save > "$tmp_snapshot"
+    "${fw_bin:-}-save" > "$tmp_snapshot"
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
       # ==== Handle RAW Entries ====
