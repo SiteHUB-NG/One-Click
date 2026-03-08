@@ -1569,6 +1569,44 @@ restore_firewall() {
     die "Restore not confirmed" "Aborting..."
   fi  
 }
+display_alias_ui() {
+  local alias_file="/etc/one-click/rule-engine/.alias.conf"
+  local i=1
+  [[ -f "$alias_file" ]] || { warn "No aliases found."; return 1; }
+  echo
+  printf '%s\n' " " \
+    "${blue}┌───┬───────────────┬──────────────────────────────────────────────────┐" \
+    "${blue}│${yellow}ID ${blue}│ ${cyan}ALIAS NAME    ${blue}│ ${cyan}MAPPED IP(S)                                     ${blue}│${reset}" \
+    "${blue}├───┼───────────────┼──────────────────────────────────────────────────┤${reset}"
+  while IFS='=' read -r name ips; do
+    [[ -z "$name" || "$name" =~ ^# ]] && continue
+    local display_ips="${ips//,/ }"
+    printf "${blue}│${reset} %-1s ${blue}│${reset} %-13s ${blue}│${reset} %-48s ${blue}│${reset}\n" "$i" "$name" "$display_ips"
+    ((i++))
+  done < "$alias_file"
+  printf '%s\n' "${blue}└───┴───────────────┴──────────────────────────────────────────────────┘${reset}" " "
+}
+delete_alias() {
+  [[ -f "$alias_file" ]] || { warn "No aliases to delete."; return 1; }
+  mapfile -t alias_names < <(cut -d'=' -f1 "$alias_file" | grep -v '^#')
+  if [[ ${#alias_names[@]} -eq 0 ]]; then
+    warn "Alias file is empty."
+    return 1
+  fi
+  display_alias_ui
+  read -rp "${cyan}[USER]: ${reset}Enter the number of the alias to delete: " choice
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice > 0 && choice <= ${#alias_names[@]} )); then
+    local target="${alias_names[$((choice-1))]}"
+    read -rp "${red}[CONFIRM]:${reset} Permanently delete alias '$target'? (y/n): " confirm
+    if [[ "${confirm,,}" == "y" ]]; then
+      sed -i "/^${target}=/d" "$alias_file"
+      success "Alias '$target' removed."
+      load_host_aliases
+    fi
+  else
+    error "Invalid selection."
+  fi
+}
 get_existing_rules() {
   local backend="$1"
   case "$backend" in
@@ -1840,6 +1878,15 @@ parse_firewall_command() {
       info "Current sensitive ports:" 
 	  printf "$(tput setaf 267)[$(tput setaf 299)SENSITIVE PORT$(tput setaf 267)]${reset} %s\n" "${sensitive_ports[@]}"
     fi
+    exit 0
+  fi
+  # ==== Detect Alias Management ====
+  if [[ "$rule_lower" =~ (show|list|display|view)[[:space:]]+(alias|aliases|names) ]]; then
+    display_alias_ui
+    exit 0
+  fi
+  if [[ "$rule_lower" =~ (delete|remove|purge|forget)[[:space:]]+(alias|aliases|name) ]]; then
+    delete_alias
     exit 0
   fi
   # ==== ICMP Alias ====
@@ -2133,7 +2180,7 @@ parse_firewall_command() {
     if [[ "$rule_lower" =~ (line|number)[^0-9]*([0-9]+) ]]; then
       del_line="${BASH_REMATCH[2]}"
     else
-      die "Delete requires line number."
+      die "Delete requires line, number, firewall or alias arguements."
     fi
   fi
   # ==== Service Name Mapping ====
