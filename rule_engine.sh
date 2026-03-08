@@ -19,6 +19,8 @@ rule_engine() {
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
   fi
+  declare -gA alerted_ports=()
+  alias_file=/etc/one-click/rule-engine/.alias.conf
   real_ssh=$(sed -En '/sshd/{/0.0:/{s/^[^:]*:([0-9]+).*/\1/p}}' <(ss -ltnp))
   rule="$1"
   flag="${2:-}"
@@ -41,6 +43,15 @@ rule_engine() {
     [9090]="Cockpit"
     [51820]="WireGuard VPN"
   )
+  # ==== Persistent Alias System ====
+  declare -A host_aliases
+  load_host_aliases() {
+    [[ -f "$alias_file" ]] || return
+    while IFS='=' read -r name ip; do
+      [[ -z "$name" || "$name" =~ ^# ]] && continue
+      host_aliases[$name]=$ip
+    done < "$alias_file"
+  }
   rule_lower=${rule,,}
   rule_lower=$(sed -E 's/ ?(how to|please|can you|help|fix|this) ?//g' <<< "$rule_lower")
   last_action=""
@@ -50,6 +61,7 @@ rule_engine() {
   if iptables -V 2>/dev/null | grep -qi nf_tables; then
     info "iptables is running in nf_tables compatibility mode."
   fi
+  load_host_aliases
   clean_duplicate_rules
   check_firewall_available
   rule_normalized=$(sed -E 's/[\t ]+and[\t ]+|,+/|/g' <<< "$rule_lower")
