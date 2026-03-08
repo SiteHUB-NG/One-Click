@@ -182,6 +182,7 @@ EOF
 # ==== End Essential Variables ==== #
 collect_sysinfo() {
   whois_ip="$(sed -En '/inet /{s,^[^/]* ([^/]*).*,\1,p}' <(ip a s "$nic"))"
+  whois_ipv6=$(sed -En '/inet6.*global/{s,^[^/]* ([^/]*/[0-9]+).*,\1,p}' <(ip a s "$nic"))
   api_response=$(curl -sL https://ipinfo.io/${whois_ip}/json)
   api_response2=$(curl -sL http://ip-api.com/json/${whois_ip})
   sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
