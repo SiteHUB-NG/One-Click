@@ -19,6 +19,7 @@ ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
 x_site_ip="$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s))"
 x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0 2> /dev/null))"
+who_ipv6="$whois_ipv6"
 who_ip="$whois_ip"
 sys_gwd="$sys_gw"
 x_site_gwd="$x_site_gw"
@@ -58,11 +59,13 @@ sys_info() {
   hidden() {
     if [[ "$hide_mode" == true ]]; then
       whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ip")
+      whois_ipv6=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ipv6")
       sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_gw")
       x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_ip")
       x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_gw")
     else
       whois_ip="$who_ip"
+      whois_ipv6="$who_ipv6"
       sys_gw="$sys_gwd"
       x_site_ip="$x_site_ipd"
       x_site_gw="$x_site_gwd"
@@ -105,6 +108,9 @@ sys_info() {
     print_section "==================== ${yellow}NETWORK INFO${blue} ==========================│" \
       | sed '1{s/├/┌/;s/┤/┐/;s/┴/─/}'
     print_row "IP Address" "$whois_ip"
+    if grep -Eqi 'inet6.*global' <(ip a s "$nic") &> /dev/null; then
+      print_row "IPv6 Address" "$whois_ipv6"
+    fi
     print_row "Gateway" "$sys_gw"
     print_row "IP Status" "$ip_status"
     if command -v wg showconf wg0 &> /dev/null; then
