@@ -199,6 +199,22 @@ install_dependancies() {
     esac
   done
 }
+check_for_updates() {
+  local version_check current_version 
+  current_version="$version"
+  version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
+  remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
+  if [[ -z "$remote_version" ]]; then
+    return 0
+  fi
+  if [[ "$remote_version" != "$current_version" ]]; then
+    printf '%s\n' "${yellow}╔══════════════════════════════════════════════════════════════════╗${reset}" \
+      "${yellow}║ [UPDATE] A newer version ($remote_version) is available!                   ║${reset}" \
+      "${yellow}║ Run 'one-click update' to get the latest features.               ║${reset}" \
+      "${yellow}╚══════════════════════════════════════════════════════════════════╝${reset}" " "
+  fi
+}
+check_for_updates
 if [[ ! -f "$deps_ok" ]]; then
   install_dependancies
   mkdir -p "$base"
@@ -477,6 +493,7 @@ map_one_click() {
       logs)        echo "--log"       ;;
       log-browser) echo "--log"       ;;
       uninstall)   echo "--uninstall" ;;
+      update)       echo "--update"    ;;
       *)           echo "$i"          ;;
     esac
   done
@@ -591,6 +608,31 @@ if [[ $# -gt 0 ]]; then
       ;;
     --log)  log_browser_menu ;;
     --cron) cron_menu        ;;
+    -r|--update) 
+      if command -v one-click >/dev/null 2>&1; then
+        mkdir -p /etc/one-click/upgrade-staging/var
+        warn "This will update one-click to the latest version $remote_version"
+        read -rp "Please confirm you are happy to proceed? (y|n): " update_version
+        update_version="$update_version"
+        if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
+          mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
+          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/var/ 2>/dev/null
+          if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click; then
+            success "Successfully updated to $remote_version"
+            chmod +x /usr/local/bin/one-click
+            rm -rf /etc/one-click/upgrade-staging/
+            exit 0
+          else
+            error "Upgrade Failed. Reverting changes"
+            mv -f /etc/one-click/upgrade-staging/one-click /usr/local/bin/one-click
+            cp -R /etc/one-click/upgrade-staging/var/* /var/cache/one-click/
+            success "Revert successful"
+          fi
+        else
+          warn "Version update has been cancelled." "Please update at your nearest opportunity"
+        fi
+      fi
+      ;;
     -u|--uninstall)
       if command -v one-click >/dev/null 2>&1; then
         warn "This will completely remove One-Click and all related files."
