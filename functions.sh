@@ -1749,32 +1749,40 @@ check_sensitive_ports() {
   current_action="$3"
   load_sensitive_ports
   for p in "${ports_ref[@]}"; do
+    if [[ -n "${alerted_ports[$p]:-}" ]]; then
+      continue
+    fi
     if [[ -n "${default_sensitive_ports[$p]:-}" ]]; then
-      local service_desc="${default_sensitive_ports[$p]}"
+      local service_desc alert1 alert2 len1 len2 width border border2
+	  service_desc="${default_sensitive_ports[$p]}"
+	  alert1="[ALERT] Action: $current_action detected on Port $p ($service_desc)."
+      alert2="[ALERT] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+      len1=${#alert1}
+      len2=${#alert2}
+      width=$(( len1 > len2 ? len1 : len2 ))
+      border=$(printf '═%.0s' $(seq 1 "$((width + 2))"))
+	  border2=$(printf '═%.0s' $(seq 1 "$(((width / 2)-10))"))
       case "$current_action" in
         DROP|REJECT|DELETE)
-          echo -e "${red}╔══════════════════════════ [ CRITICAL WARNING ] ══════════════════════════╗${reset}"
-          printf '%s\n' "${red}║${yellow}[ALERT]${reset} Action: $current_action detected on Port $p ($service_desc).          ${red} ║" \
-            "${red}║${yellow}[ALERT]${reset} This is a CORE SERVICE. Proceeding may cause connectivity issues! ${red}║"
-          echo -e "${red}╚══════════════════════════════════════════════════════════════════════════╝${reset}"
-          #read -rp "${cyan}[USER]:${reset} Confirm you want to restrict $service_desc? (yes/no): " confirm
-          #if [[ "${confirm,,}" != "yes" ]]; then
-          #  die "Safety Abort: Prevented restriction of $service_desc."
-          #fi
+          echo -e "${red}╔${border2} ${yellow}[ CRITICAL WARNING ]${red} ${border2}╗${reset}"
+          printf "${red}║${reset} %-*s ${red}║${reset}\n" "$width" "$alert1"
+          printf "${red}║${reset} %-*s ${red}║${reset}\n" "$width" "$alert2"
+          echo -e "${red}╚${border}╝${reset}"
+          alerted_ports[$p]=1
           ;;
         ACCEPT|OPEN|ALLOW)
           warn "Note: You are opening $p ($service_desc). Ensure this is intended."
+		  alerted_ports[$p]=1
           ;;
         LOG)
           info "Monitoring $service_desc activity..."
+		  alerted_ports[$p]=1
           ;;
       esac
     fi
   done
 }
 parse_firewall_command() {
-  #export LANG=en_US.UTF-8
-  #export LC_ALL=en_US.UTF-8
   export TERM=xterm-256color
   local rule rule_lower action port port_range src_ip dst_ip proto chain mode table del_line fw_bin ip_version
   fw_bin="iptables"
@@ -2001,7 +2009,6 @@ parse_firewall_command() {
     chain="POSTROUTING"
     mode="-A"
     fw_bin="iptables"
-    # Extract source CIDR directly here (fresh parse)
     if [[ "$rule_lower" =~ from[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?) ]]; then
         src_ip="${BASH_REMATCH[1]}"
     fi
@@ -2046,12 +2053,32 @@ parse_firewall_command() {
   elif grep -Eq "\bmultiport\b" <<< "$rule_lower"; then
     proto="tcp"
   fi
+  # ==== Detect Alias ====
+  if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)+?) ]]; then
+    local alias_name alias_ip alias_mapped 
+	alias_name="${BASH_REMATCH[2]}"
+    alias_ip="${BASH_REMATCH[3]}"
+	alias_mapped=$(sed -n "/$alias_name/s/[^=]*=//p" "$alias_file")
+	alias_ip=$(echo "$alias_ip" | tr ' ' ',')
+    if [[ -f "$alias_file" ]] && grep -q "^${alias_name}=" "$alias_file"; then
+	  warn "$alias_name has already been defined and maps to $alias_mapped"
+	  read -rp "Replace $alias_mapped with ${alias_ip} [y|n]: " rep_alias
+	  rep_alias="${rep_alias,,}"
+	  if [[ "$rep_alias" == "y" || "$rep_alias" == "yes" ]]; then
+        local tmp_alias=$(mktemp)
+        sed -i "s|^${alias_name}=.*|${alias_name}=${alias_ip}|" "$alias_file"
+        info "Alias updated: $alias_name → $alias_ip"
+	  fi
+    else
+      echo "${alias_name}=${alias_ip}" >> "$alias_file"
+      info "Alias Added: $alias_name → $alias_ip"
+    fi
+    exit 0
+  fi
   # ==== Detect connection state ====
-  # ==== Detect connection state (Concatenation) ====
   conn_state=""
   if grep -Eqi "\bestablished\b" <<< "$rule_lower"; then
     conn_state="ESTABLISHED"
-    # Note: We don't force proto="tcp" here as states apply to UDP/ICMP too
   fi
   if grep -Eqi "\brelated\b" <<< "$rule_lower"; then
     if [[ -n "$conn_state" ]]; then conn_state+=",RELATED"; else conn_state="RELATED"; fi
@@ -2063,11 +2090,37 @@ parse_firewall_command() {
     if [[ -n "$conn_state" ]]; then conn_state+=",INVALID"; else conn_state="INVALID"; fi
   fi
   # ==== Detect Source IP ====
-  if [[ "$rule_lower" =~ from[[:space:]]+([0-9a-fA-F:.\/]+) ]]; then
+  if [[ "$rule_lower" =~ from[[:space:]]+([0-9a-fA-F:.\/]+) ]]; then 
     src_ip="${BASH_REMATCH[1]}"
-    # Explicitly set version to prevent unbound errors
     valid_ip "$src_ip" && ip_version="ipv4"
     valid_ipv6 "$src_ip" && { ip_version="ipv6"; fw_bin="ip6tables"; }
+  fi
+  if [[ "$rule_lower" =~ from[[:space:]]+([a-zA-Z0-9._:-]+) ]]; then
+    src_ip="${BASH_REMATCH[1]}"
+    if [[ -n "${host_aliases[$src_ip]:-}" ]]; then
+      local alias_val="${host_aliases[$src_ip]}"
+	  if [[ "$alias_val" == *","* ]]; then
+        IFS=',' read -ra addr_list <<< "$alias_val"
+        for ip in "${addr_list[@]}"; do
+          parse_firewall_command "${rule/from $src_ip/from $ip}" "$inherited_proto"
+        done
+        return 0 
+      else
+	    src_ip="$alias_val"
+        valid_ip "$src_ip" && ip_version="ipv4"
+        valid_ipv6 "$src_ip" && { ip_version="ipv6"; fw_bin="ip6tables"; }
+	  fi
+    else
+      if valid_ip "$src_ip"; then
+        ip_version="ipv4"
+      elif valid_ipv6 "$src_ip"; then
+        ip_version="ipv6"
+        fw_bin="ip6tables"
+      else
+        echo -e "${red}[ERROR]:${reset} Unknown host/alias '$src_ip'. Command aborted."
+        exit 1
+      fi
+	fi
   fi
   # ==== Detect Destination IP ====
   if [[ "$rule_lower" =~ (to|dst|destination)[[:space:]]+([0-9a-fA-F:.\/]+) ]]; then
