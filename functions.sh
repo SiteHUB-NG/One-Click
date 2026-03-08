@@ -1880,6 +1880,22 @@ parse_firewall_command() {
     fi
     exit 0
   fi
+  # ==== Detect Append Alias ====
+  if [[ "$rule_lower" =~ ^(add-to:?|append:?)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)*) ]]; then
+    local alias_name new_ips_raw existing_ips new_ips_comma combined_list
+	alias_name="${BASH_REMATCH[2]}"
+    new_ips_raw="${BASH_REMATCH[3]}"
+    if [[ ! -f "$alias_file" ]] || ! grep -q "^${alias_name}=" "$alias_file"; then
+      error "Alias '$alias_name' does not exist. Use 'remember' or 'include' to create it first."
+      exit 1
+    fi
+    existing_ips=$(sed -n "s/^${alias_name}=//p" "$alias_file")
+    new_ips_comma=$(echo "$new_ips_raw" | tr ' ' ',')
+    combined_list=$(echo "${existing_ips},${new_ips_comma}" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//;s/^,//')
+    sed -Ei "s|^(${alias_name}=).*|\1${combined_list}|" "$alias_file"
+    success "Alias '$alias_name' updated. Total IPs: $(echo "$combined_list" | tr ',' ' ')"
+    exit 0
+  fi
   # ==== Detect Alias Management ====
   if [[ "$rule_lower" =~ (show|list|display|view)[[:space:]]+(alias|aliases|names) ]]; then
     display_alias_ui
