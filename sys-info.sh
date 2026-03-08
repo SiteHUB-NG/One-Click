@@ -18,7 +18,7 @@ cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
 x_site_ip="$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s))"
-x_site_gw="$(awk -F"[=: ]" '/Endpoint/{print $4}' <(wg showconf wg0 2> /dev/null))"
+x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0) 2> /dev/null)"
 who_ip="$whois_ip"
 sys_gwd="$sys_gw"
 x_site_gwd="$x_site_gw"
