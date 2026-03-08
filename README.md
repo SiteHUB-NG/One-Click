@@ -296,12 +296,14 @@ one-click engine --dry-run "open https"
 
 | Subcommand Syntax                        | Description |
 |-----------------------------------------|-------------|
-| `(show\|list)`                           | List filter table |
+| `(show\|list)`                           | List rule tables by including an arguement such as show nat. Default will show defaul table. Can also be used to show alias mapping with alias as the arg. |
 | `show mangle`                            | Show mangle table |
+| `show alias `                            | Show alias mapping |
 | `show <table>`                           | Show selected table |
 | `(backup\|save\|retain)`                 | Backup rules |
-| `(restore\|reinstate\|import)`           | Restore rules |
-| `(delete\|remove\|purge) (firewall\|config\|rules)` | Delete a saved backup |
+| `(restore\|reinstate\|import) <arg>`     | Restore snapshot rules |
+| `(remember\|include) <alias> <ip/s>`     | Alias mapping for batch processing. Multiple IP's must be delimited with a space |
+| `(delete\|remove\|purge) (firewall\|config\|rules\|alias)` | Delete a saved backup, firewall table and alias |
 | `raw: <COMMAND>` | Directly input raw commands|
 
 **Usage Examples:**
