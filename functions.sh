@@ -1375,7 +1375,7 @@ detect_firewall_backend() {
     firewall_backend="nft"
   elif command -v ufw > /dev/null 2>&1; then
     firewall_backend="ufw"
-  elif command -v firewalld &> /dev/null; then
+  elif command -v firewall-cmd &> /dev/null; then
     firewall_backend="firewalld"
   else
     firewall_backend="none"
@@ -1445,7 +1445,7 @@ backup_firewall() {
     nft)       ext="nft-$timestamp.backup"; nft list ruleset > "${engine_backup_dir}${ext}" 2>/dev/null || return 1     ;;
     iptables)  ext="iptables-$timestamp.backup";iptables-save > "${engine_backup_dir}${ext}" 2>/dev/null || return 1    ;;
     ufw)       ext="ufw-$timestamp.backup"; ufw status verbose > "${engine_backup_dir}${ext}" 2>/dev/null || return 1   ;;
-    firewalld) ext="firewalld-$timetamp.backup"; firewall-cmd --runtime-to-permanent >/dev/null 2>&1
+    firewalld) ext="firewalld-$timestamp.backup"; firewall-cmd --runtime-to-permanent >/dev/null 2>&1
                firewall-cmd --permanent --list-all --zone=public > "${engine_backup_dir}${ext}" 2>/dev/null || return 1 ;;
     *)         die "Unsupported firewall backend."                                                                      ;;
   esac
@@ -1719,7 +1719,7 @@ clean_duplicate_rules() {
   success "Duplicate cleanup complete." "Firewall reconfigured retaining one copy of each duplicate."
 }
 load_sensitive_ports() {
-  sensitive_ports=("${default_sensitive_ports[@]}")
+  sensitive_ports=("${!default_sensitive_ports[@]}")
   if [[ -f "$sensitive_ports_file" ]]; then
     while IFS= read -r s_port; do
       [[ -z "$s_port" ]] && continue
@@ -1732,11 +1732,11 @@ load_sensitive_ports() {
   _unique_sensitive_ports=()
   for unique in "${sensitive_ports[@]}"; do
     if [[ -z "${_seen[$unique]:-}" ]]; then
-      _unique_ports+=("$unique")
+      _unique_sensitive_ports+=("$unique")
       _seen[$unique]=1
     fi
   done
-  sensitive_ports=("${_unique_ports[@]}")
+  sensitive_ports=("${_unique_sensitive_ports[@]}")
   }
 save_sensitive_ports() {
   mkdir -p "$(dirname "$sensitive_ports_file")"
