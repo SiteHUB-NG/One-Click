@@ -18,13 +18,13 @@ cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
 x_site_ip="$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s))"
-x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0) 2> /dev/null)"
+x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0 2> /dev/null))"
 who_ip="$whois_ip"
 sys_gwd="$sys_gw"
 x_site_gwd="$x_site_gw"
 x_site_ipd="$x_site_ip"
 st=$(date +%s)
-virt=$(systemd-detect-virt)
+virt=$(systemd-detect-virt || true)
 sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -57,10 +57,10 @@ sys_info() {
   }
   hidden() {
     if [[ "$hide_mode" == true ]]; then
-      whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$whois_ip")
-      sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$sys_gw")
-      x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$x_site_ip")
-      x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;ta' <<< "$x_site_gw")
+      whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ip")
+      sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_gw")
+      x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_ip")
+      x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_gw")
     else
       whois_ip="$who_ip"
       sys_gw="$sys_gwd"
