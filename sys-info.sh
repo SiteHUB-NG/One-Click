@@ -124,7 +124,7 @@ sys_info() {
     print_row "OS" "$PRETTY_NAME"
     print_row "Kernel" "$kern"
     print_row "Shell" "$SHELL"
-    print_row "Uptime" "$(uptime -p)"
+    print_row "Uptime" "$(sed -E 's/up //;:a;s/([0-9]+) ([[:alpha:]]+),*/\1\2/;ta' <(uptime -p))"
     print_row "Up Since" "$(uptime -s)"
     print_row "Load" "$(cut -d' ' -f1-3 /proc/loadavg)"
     print_row "Virtualization" "${virt^^}"
