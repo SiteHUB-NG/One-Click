@@ -20,6 +20,7 @@ rule_engine() {
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
   fi
   declare -gA alerted_ports=()
+  engine_dir="/etc/one-click/rule-engine/"
   alias_file=/etc/one-click/rule-engine/.alias.conf
   real_ssh=$(sed -En '/sshd/{/0.0:/{s/^[^:]*:([0-9]+).*/\1/p}}' <(ss -ltnp))
   rule="$1"
@@ -33,6 +34,8 @@ rule_engine() {
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
+  mkdir -p "$engine_dir"
+  touch "$alias_file"
   # ==== Default Sensitive Ports (Remove from here) ====
   declare -A default_sensitive_ports=(
     ["${real_ssh:-22}"]="SSH (Remote Access)"
