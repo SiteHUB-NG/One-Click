@@ -50,7 +50,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      enable (icmp|echo)  Enable ICMP protocol e.g '$(tput setaf 228)allow enable echo$(tput sgr0)'" \
     "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
     "      raw: <iptables cmd> Enter raw commands for extended functionality" \
-    "      (remember|include)  The remember|include commands allow you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" 
+    "      (remember|include)  The remember|include commands allow you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" \
     "      (add-to|append)     Add additional IPs mapped to aliases to extend batch processing functionality. Key alias must already exist else use the remember command first." \
     "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
     "      range               A range of ports e.g '$(tput setaf 228)range 1000-2000$(tput sgr0)'" \
