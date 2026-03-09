@@ -58,6 +58,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      sensitive-list      List all of the ports in the sensitive list." \
     "      sensitive-remove:   Remove ports from the sensitive list" \
     "      from                From source IP" \
+    "      audit               Visual inspection of rules." \
     "      to                  To destination IP " \
     "      $(tput smul)Protocols:$(tput rmul) " \
     "      tcp                 TCP Traffic is the deafult for most chains" \
@@ -423,27 +424,102 @@ if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
   if [[ ! -f "$tab_complete" ]]; then
     cat <<'EOF'> "$tab_complete"
 _one_click() {
-  local cur
-  COMPREPLY=()
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  COMPREPLY=( $(compgen -W "
-    backup
-    bench
-    cron
-    engine
-    migrator
-    net-repair
-    reinstall
-    recovery
-    rule-engine
-    system
-    system-info
-    logs
-    log-browser
-    help
-    uninstall
-    --version
-  " -- "$cur") )
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    declare -A cmds
+    
+    cmds["backup"]=""
+    cmds["bench"]=""
+    cmds["cron"]=""
+    cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+    cmds["migrator"]=""
+    cmds["net-repair"]=""
+    cmds["reinstall"]=""
+    cmds["recovery"]=""
+    cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+    cmds["system"]=""
+    cmds["sys-info"]=""
+    cmds["system-info"]=""
+    cmds["logs"]=""
+    cmds["log-browser"]=""
+    cmds["help"]=""
+    cmds["uninstall"]=""
+    cmds["--version"]=""
+
+    cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+    cmds["rule-engine:backup"]=
+    cmds["rule-engine:restore"]=
+    cmds["rule-engine:'raw:"]=
+    cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+    cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+    cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+    cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+    cmds["rule-engine:mask"]=
+    cmds["rule-engine:'enable icmp'"]=
+    cmds["rule-engine:'disable icmp"]=
+    cmds["rule-engine:'remember office' 'remember drop-list' 'remember home'"]=
+    cmds["rule-engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["rule-engine:'multiport"]=
+    cmds["rule-engine:'range"]=
+    cmds["rule-engine:'sensitive:"]=
+    cmds["rule-engine:sensitive-list"]=
+    cmds["rule-engine:'sensitive-remove:"]=
+    cmds["rule-engine:'from"]=
+    cmds["rule-engine:'to"]=
+    cmds["rule-engine:audit"]=
+
+    cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+    cmds["engine:backup"]=
+    cmds["engine:restore"]=
+    cmds["engine:'raw:"]=
+    cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+    cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+    cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+    cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+    cmds["engine:mask"]=
+    cmds["engine:'enable icmp'"]=
+    cmds["engine:'disable icmp"]=
+    cmds["engine:'remember office' 'remember drop-list' 'remember home'"]=
+    cmds["engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["engine:'multiport"]=
+    cmds["engine:'range"]=
+    cmds["engine:'sensitive:"]=
+    cmds["engine:sensitive-list"]=
+    cmds["engine:'sensitive-remove:"]=
+    cmds["engine:'from"]=
+    cmds["engine:'to"]=
+    cmds["engine:audit"]=
+    
+    _complete_tree() {
+      local path="$1"
+      local cur="$2"
+      local possible=""
+      local prefix
+      for k in "${!cmds[@]}"; do
+        prefix="${k%%:*}"
+        if [[ "$k" == "$path"* || "$path" == "" ]]; then
+          local sub="${k#*:}"
+          if [[ "$sub" == "$k" ]]; then
+            possible+="$prefix "
+          else
+            if [[ "$prefix" == "${path##*:}" ]]; then
+               possible+="$sub "
+            fi
+          fi
+        fi
+      done
+      COMPREPLY=( $(compgen -W "$possible" -- "$cur") )
+    }
+    local path=""
+    for ((i=1; i<COMP_CWORD; i++)); do
+        path+="${COMP_WORDS[i]}:"
+    done
+    path="${path%:}"  # remove trailing colon
+    _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
 EOF
@@ -452,28 +528,102 @@ elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
   if [[ ! -f "$tab_complete2" ]]; then
     cat <<'EOF'> "$tab_complete2"
 _one_click() {
-  local cur
-  COMPREPLY=()
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  COMPREPLY=( $(compgen -W "
-        backup
-    bench
-    cron
-    engine
-    migrator
-    net-repair
-    reinstall
-    recovery
-    rule-engine
-    system
-    sys-info
-    system-info
-    logs
-    log-browser
-    help
-    uninstall
-    --version
-  " -- "$cur") )
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    declare -A cmds
+    
+    cmds["backup"]=""
+    cmds["bench"]=""
+    cmds["cron"]=""
+    cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+    cmds["migrator"]=""
+    cmds["net-repair"]=""
+    cmds["reinstall"]=""
+    cmds["recovery"]=""
+    cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+    cmds["system"]=""
+    cmds["sys-info"]=""
+    cmds["system-info"]=""
+    cmds["logs"]=""
+    cmds["log-browser"]=""
+    cmds["help"]=""
+    cmds["uninstall"]=""
+    cmds["--version"]=""
+
+    cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+    cmds["rule-engine:backup"]=
+    cmds["rule-engine:restore"]=
+    cmds["rule-engine:'raw:"]=
+    cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+    cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+    cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+    cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+    cmds["rule-engine:mask"]=
+    cmds["rule-engine:'enable icmp'"]=
+    cmds["rule-engine:'disable icmp"]=
+    cmds["rule-engine:'remember office' 'remember drop-list' 'remember home'"]=
+    cmds["rule-engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["rule-engine:'multiport"]=
+    cmds["rule-engine:'range"]=
+    cmds["rule-engine:'sensitive:"]=
+    cmds["rule-engine:sensitive-list"]=
+    cmds["rule-engine:'sensitive-remove:"]=
+    cmds["rule-engine:'from"]=
+    cmds["rule-engine:'to"]=
+    cmds["rule-engine:audit"]=
+
+    cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+    cmds["engine:backup"]=
+    cmds["engine:restore"]=
+    cmds["engine:'raw:"]=
+    cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+    cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+    cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+    cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+    cmds["engine:mask"]=
+    cmds["engine:'enable icmp'"]=
+    cmds["engine:'disable icmp"]=
+    cmds["engine:'remember office' 'remember drop-list' 'remember home'"]=
+    cmds["engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["engine:'multiport"]=
+    cmds["engine:'range"]=
+    cmds["engine:'sensitive:"]=
+    cmds["engine:sensitive-list"]=
+    cmds["engine:'sensitive-remove:"]=
+    cmds["engine:'from"]=
+    cmds["engine:'to"]=
+    cmds["engine:audit"]=
+    
+    _complete_tree() {
+      local path="$1"
+      local cur="$2"
+      local possible=""
+      local prefix
+      for k in "${!cmds[@]}"; do
+        prefix="${k%%:*}"
+        if [[ "$k" == "$path"* || "$path" == "" ]]; then
+          local sub="${k#*:}"
+          if [[ "$sub" == "$k" ]]; then
+            possible+="$prefix "
+          else
+            if [[ "$prefix" == "${path##*:}" ]]; then
+               possible+="$sub "
+            fi
+          fi
+        fi
+      done
+      COMPREPLY=( $(compgen -W "$possible" -- "$cur") )
+    }
+    local path=""
+    for ((i=1; i<COMP_CWORD; i++)); do
+        path+="${COMP_WORDS[i]}:"
+    done
+    path="${path%:}"  # remove trailing colon
+    _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
 EOF
