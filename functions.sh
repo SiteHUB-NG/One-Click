@@ -2207,21 +2207,31 @@ parse_firewall_command() {
   if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
     local cmd_type="${BASH_REMATCH[1]}"
     local alias_name="${BASH_REMATCH[2]}"
-      printf '%s\n' "${red}╔═════════════════════ [ ERROR ] ════════════════════╗${reset}" \
-        "${red}║${reset} Incomplete Command: ${yellow}$cmd_type $alias_name${reset}                ${red}║${reset}" \
-        "${red}║${reset} You must provide at least one or more IP addresses.${red}║${reset}" \
-        "${red}║${reset} Usage: ${cyan}$cmd_type $alias_name ${yellow}1.2.3.4${red}                     ${red}║${reset}" \
-        "${red}╚════════════════════════════════════════════════════╝${reset}"
-      exit 1
+    printf '%s\n' "${red}╔═════════════════════ [ ERROR ] ════════════════════╗${reset}" \
+      "${red}║${reset} Incomplete Command: ${yellow}$cmd_type $alias_name${reset}                ${red}║${reset}" \
+      "${red}║${reset} You must provide at least one or more IP addresses.${red}║${reset}" \
+      "${red}║${reset} Usage: ${cyan}$cmd_type $alias_name ${yellow}1.2.3.4${red}                     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════╝${reset}"
+    exit 1
   fi
   # ==== Detect Invalid Range ====
   if [[ "$rule_lower" =~ (^|[[:space:]]+)range[[:space:]]+?$ || "$rule_lower" =~ ^range ]]; then
-      printf '%s\n' "${red}╔═══════════════════════ [ ERROR ] ══════════════════════╗${reset}" \
-        "${red}║${reset} Incomplete Command! Allow, drop or reject not detected ${red}║${reset}" \
-        "${red}║${reset} You must provide a range of ports with -               ${red}║${reset}" \
-        "${red}║${reset} Usage: ${cyan}allow range 2000-3000                           ${red}║${reset}" \
-        "${red}╚════════════════════════════════════════════════════════╝${reset}"
-      exit 1
+    printf '%s\n' "${red}╔═══════════════════════ [ ERROR ] ══════════════════════╗${reset}" \
+      "${red}║${reset} Incomplete Command! Allow, drop or reject not detected ${red}║${reset}" \
+      "${red}║${reset} You must provide a range of ports with -               ${red}║${reset}" \
+      "${red}║${reset} Usage: ${cyan}allow range 2000-3000                           ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
+  # ==== Detect Passthroughs ====
+  if [[ "$rule_lower" =~ ^[[:space:]]+?(multiport|alias|disable|enable|drop|allow|filter|nat|mangle)[[:space:]]+?$ ]]; then
+    cmd="${BASH_REMATCH[1]}"
+    printf '%s\n' \
+	  "${red}╔═══════════════════════ [ ERROR ] ══════════════════════╗${reset}" \
+      "${red}║${reset} Incomplete Command!                                    ${red}║${reset}" \
+      "${red}║${reset} ${cyan}${cmd}${reset} requires a valid arguement                     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
   fi
   # ==== Detect Alias ====
   if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)+?) ]]; then
@@ -2260,12 +2270,12 @@ parse_firewall_command() {
     if [[ -n "$conn_state" ]]; then conn_state+=",INVALID"; else conn_state="INVALID"; fi
   fi
   # ==== Detect Source IP ====
-  if [[ "$rule_lower" =~ from[[:space:]]+([0-9a-fA-F:.\/]+) ]]; then 
+  if [[ "$rule_lower" =~ from[[:space:]]+([0-9a-fA-F:./]+(/[0-9]+)?) ]]; then 
     src_ip="${BASH_REMATCH[1]}"
     valid_ip "$src_ip" && ip_version="ipv4"
     valid_ipv6 "$src_ip" && { ip_version="ipv6"; fw_bin="ip6tables"; }
   fi
-  if [[ "$rule_lower" =~ from[[:space:]]+([a-zA-Z0-9._:-]+) ]]; then
+  if [[ "$rule_lower" =~ from[[:space:]]+([a-zA-Z0-9._:/-]+(/[0-9]+)?) ]]; then
     src_ip="${BASH_REMATCH[1]}"
     if [[ -n "${host_aliases[$src_ip]:-}" ]]; then
       local alias_val="${host_aliases[$src_ip]}"
@@ -2378,8 +2388,8 @@ parse_firewall_command() {
   fi
   # ==== Extract all numeric ports from human input ====
   rule_ports_only="$rule_lower"
-  rule_ports_only=$(sed -E 's/\b(to|from)[[:space:]]+[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
-  rule_ports_only=$(sed -E 's/\b(to|dst|destination)[[:space:]]+(address[[:space:]]+)?[0-9a-fA-F:.\/]+\b//g' <<< "$rule_ports_only")
+  rule_ports_only=$(sed -E 's/\b(to|from)[[:space:]]+[0-9a-fA-F:./]+(\/[0-9]+)?\b//g' <<< "$rule_ports_only")
+  rule_ports_only=$(sed -E 's/\b(to|dst|destination)[[:space:]]+(address[[:space:]]+)?[0-9a-fA-F:./]+(\/[0-9]+)?\b//g' <<< "$rule_ports_only")
   mapfile -t all_ports < <(grep -oE '[0-9]{1,5}-[0-9]{1,5}|[0-9]{1,5}' <<< "$rule_ports_only")
   for p in "${all_ports[@]}"; do
     if valid_port "$p"; then
@@ -2403,7 +2413,7 @@ parse_firewall_command() {
       action="DROP"
       mode="-A"
     fi
-    skip_service_ports=1   # prevent TCP/UDP port logic
+    skip_service_ports=1  
   fi
   # ==== Build Port Args ====
   build_port_args() {
