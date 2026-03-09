@@ -2223,17 +2223,6 @@ parse_firewall_command() {
         "${red}╚════════════════════════════════════════════════════════╝${reset}"
       exit 1
   fi
-  # ==== Generic catch all ====
-  if [[ "$rule_lower" =~ ^(sensitive|)[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
-    local cmd_type="${BASH_REMATCH[1]}"
-    local alias_name="${BASH_REMATCH[2]}"
-      printf '%s\n' "${red}╔═════════════════════ [ ERROR ] ════════════════════╗${reset}" \
-        "${red}║${reset} Incomplete Command: ${yellow}$cmd_type $alias_name${reset}                ${red}║${reset}" \
-        "${red}║${reset} You must provide at least one or more IP addresses.${red}║${reset}" \
-        "${red}║${reset} Usage: ${cyan}$cmd_type $alias_name ${yellow}1.2.3.4${red}                     ${red}║${reset}" \
-        "${red}╚════════════════════════════════════════════════════╝${reset}"
-      exit 1
-  fi
   # ==== Detect Alias ====
   if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)+?) ]]; then
     local alias_name alias_ip alias_mapped 
