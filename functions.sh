@@ -197,6 +197,7 @@ collect_sysinfo() {
   cpu_cores=$(nproc)
   freq=$(awk -F: '/cpu MHz/ {freq=$2} END {print freq " MHz"}' /proc/cpuinfo | sed 's/^[ \t]*//')
   location=$(jq -r '.region' <<< $api_response)
+  magenta=$(tput setaf 5)
   country="$ip_country"
   uptime=$(sed 's/up //' <(uptime -p))
   distro=$(awk -F= '/PRETTY_NAME/{print $2}' /etc/os-release)
@@ -1610,6 +1611,79 @@ delete_alias() {
     error "Invalid selection."
   fi
 }
+show_rules() {
+  local fw_bin total_blocked_pkts total_blocked_bytes clean_rule
+  fw_bin="${fw_bin:-iptables}"
+  total_blocked_pkts=0
+  total_blocked_bytes=0
+  printf '%s\n' "${cyan}One-Click Firewall: Logical Traffic Flow & Audit${reset}" \
+    "${blue}================================================================${reset}" \
+    "  [ Internet / LAN ] " \
+    "          │          " \
+    "  ▼───────┴───────▼  " \
+    "  │  ${yellow}INPUT CHAIN${reset}  │  (Total Intake)" \
+    "  └───────┬───────┘  " \
+    "          │" \
+    "          ├─▶ [${green}ALLOW${reset}] Whitelist Logic"
+  ($fw_bin -vnL INPUT | grep "ACCEPT" | grep -v "policy" | while read -r pkts bytes target prot opt in out src dst rest; do
+    clean_rule=$(echo "$src to $dst $rest" | sed 's/0.0.0.0\/0/anywhere/g')
+    printf '%s\n' "          │    └── [${pkts} pkts] ${clean_rule}"
+  done) || true
+  printf '%s\n' "          │" \
+    "          ├─▶ [${red}BLOCK${reset}] Security Filters"
+  while read -r pkts bytes target rest; do
+    clean_rule=$(echo "$rest" | sed -E 's/all  --  \* \* //; s/0.0.0.0\/0/anywhere/g')
+    printf '%s\n' "          │    └── [${pkts} pkts] ${clean_rule}"
+    [[ "$pkts" != "0" ]] && total_blocked_pkts=$((total_blocked_pkts + pkts))
+  done < <($fw_bin -vnL INPUT | grep -E "DROP|REJECT")
+  local policy_line=$($fw_bin -vnL INPUT | grep "policy")
+  local default_policy=$(echo "$policy_line" | awk '{print $4}')
+  local policy_pkts=$(echo "$policy_line" | awk '{print $6}')
+  printf '%s\n' "          │" \
+    "  ▼───────┴───────▼  " \
+    "  │ ${magenta}FINAL POLICY${reset}  │  ▶ ${magenta}$default_policy${reset} (${policy_pkts} pkts matched)" \
+    "  └───────────────┘  "
+  individual_table_rules() {
+    local tables=("filter" "nat" "mangle" "raw")
+    printf '%s\n' "${cyan}Individual Tables${reset}" \
+      "${blue}=====================${reset}"
+    for tbl in "${tables[@]}"; do
+      if ! $fw_bin -t "$tbl" -S | grep -qE "^-A"; then
+        continue
+      fi
+      printf '%s\n' "  [ TABLE: ${yellow}${tbl^^}${reset} ]"
+      local chains=$( $fw_bin -t "$tbl" -L | grep "Chain" | awk '{print $2}' )
+      for chain in $chains; do
+        local rules=$($fw_bin -t "$tbl" -vnL "$chain" --line-numbers | grep -E "^[0-9]")
+        [[ -z "$rules" ]] && continue
+        printf '%s\n' "          │" \
+          "          ├─▶ Chain: ${magenta}${chain}${reset}"
+        while read -r num pkts bytes target prot opt in out src dst rest; do
+          local clean_src=$( [[ "$src" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$src" )
+          local clean_dst=$( [[ "$dst" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$dst" )
+          local color=$reset
+          [[ "$target" == "ACCEPT" ]] && color=$green
+          [[ "$target" == "DROP" || "$target" == "REJECT" ]] && color=$red
+          [[ "$target" == "LOG" ]] && color=$yellow
+
+          printf '%s\n' "          │    └── [${num}] ${pkts} pkts ▶ ${color}${target}${reset} (${clean_src} → ${clean_dst} ${rest})"
+        done <<< "$rules"
+      done
+      printf '%s\n' "          │"
+    done
+    printf '%s\n' \
+	  "  ▼──────────────────▼" \
+      "  │ ${cyan}END OF TRAVERSAL${reset} │" \
+      "  └──────────────────┘" \
+      "${blue}================================================================${reset}" \
+      "${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} malicious packets today."
+    if [[ "$total_blocked_pkts" -gt 1000 ]]; then
+        printf '%s\n' "${red}[ALERT]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
+    fi
+    printf '%s\n' "${blue}================================================================${reset}"
+  }
+  individual_table_rules
+}
 get_existing_rules() {
   local backend="$1"
   case "$backend" in
@@ -2039,6 +2113,16 @@ parse_firewall_command() {
   fi
   if grep -Eqi "\bpostrouting\b" <<< "$rule_lower"; then
     chain="POSTROUTING"
+  fi
+  # ==== Detect Audit ====
+  if [[ "$rule_lower" =~ ^audit$ ]]; then
+    info "Starting Deep Traffic Intelligence Audit..."
+    local total_conns=$(ss -tun | grep -c "ESTAB")
+    echo -e "${cyan}Active Connections:${reset} $total_conns"
+    echo -e "${cyan}Top Listening Services:${reset}"
+    ss -ltpn | grep "LISTEN" | awk '{print $4}' | cut -d: -f2 | sort -n | uniq -c | awk '{print "  Port "$2" ("$1" instances)"}'
+    show_rules
+    exit 0
   fi
   # ==== Detect Action ====
   if grep -Eq "\b(drop|deny|block|stop|close|exclude)\b" <<< "$rule_lower"; then
