@@ -763,14 +763,19 @@ if [[ $# -gt 0 ]]; then
     --cron) cron_menu        ;;
     -r|--update) 
       if command -v one-click >/dev/null 2>&1; then
-        mkdir -p /etc/one-click/upgrade-staging/var
+        mkdir -p /etc/one-click/upgrade-staging/
         warn "This will update one-click to the latest version $remote_version"
         read -rp "Please confirm you are happy to proceed? (y|n): " update_version
-        update_version="$update_version"
+        update_version="${update_version,,}"
         if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
           mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
-          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/var/ 2>/dev/null
-          if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click; then
+          mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
+          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/ 2>/dev/null
+          if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
+            if [[ ! -s "$manpage" ]]; then
+              wget -P "$man_dir" "$one_click_1" &> /dev/null
+              mandb -q &> /dev/null
+            fi
             success "Successfully updated to $remote_version"
             chmod +x /usr/local/bin/one-click
             rm -rf /etc/one-click/upgrade-staging/
@@ -778,7 +783,8 @@ if [[ $# -gt 0 ]]; then
           else
             error "Upgrade Failed. Reverting changes"
             mv -f /etc/one-click/upgrade-staging/one-click /usr/local/bin/one-click
-            cp -R /etc/one-click/upgrade-staging/var/* /var/cache/one-click/
+            cp -R /etc/one-click/upgrade-staging/var/ /var
+            mv -f /etc/one-click/upgrade-staging/$(basename "$manpage") "$manpage"
             success "Revert successful"
           fi
         else
