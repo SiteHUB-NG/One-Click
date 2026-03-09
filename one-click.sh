@@ -553,6 +553,7 @@ _one_click() {
     cmds["--version"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["engine:'show alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
     cmds["rule-engine:backup"]=
     cmds["rule-engine:restore"]=
@@ -575,7 +576,8 @@ _one_click() {
     cmds["rule-engine:'to"]=
     cmds["rule-engine:audit"]=
 
-    cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+    cmds["engine:'open filter' 'open mangle' 'open raw'"]=
+    cmds["engine:'show alias'"]=
     cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
     cmds["engine:backup"]=
     cmds["engine:restore"]=
