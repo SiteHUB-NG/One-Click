@@ -34,7 +34,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  reinstall               OS reinstallation" \
     "  backup                  Backup with rsync + rclone" \
     "  bench                   Benchmarking tool automates the execution of tests" \
-    "  (engine|rule-engine)    Converts natural language into iptables commands" \
+    "  (engine|rule-engine)    Converts natural language into iptables commands. RuleEngine is an atomic firewall wrapper that supports transaction commits with a self healing 10 second rollback if confirmation is not received." \
     "      $(tput smul)subcommands:$(tput rmul)        Subcommands are delimited by $(tput setaf 373)and$(tput sgr 0) and $(tput setaf 373),$(tput sgr 0)(comma) can be chained e.g '$(tput setaf 228)allow udp port 100 and reject 200 output and tcp 300$(tput sgr0)'." \
     "      --dry-run           Show what commands would be executed without applying them." \
     "      (open|show)<alias>? Opens firewall table view. Can optionally be extended by specifying the $(tput setaf 228)table arg$(tput sgr0) or with the '$(tput setaf 228)all$(tput sgr0)' flag." \
