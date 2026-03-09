@@ -132,6 +132,21 @@ rule_engine() {
     # ==== Take snapshot BEFORE applying rule ====
     tmp_snapshot=$(mktemp /tmp/iptables_backup.XXXXXX)
     "${fw_bin:-iptables}-save" > "$tmp_snapshot"
+    # ==== Launch background rollback timer (10s) ====
+    (
+      sleep 13
+      if [[ ! -f /tmp/fw_confirmed ]]; then
+        warn "No confirmation received. Reverting firewall to previous state..."
+        if iptables-restore < "$tmp_snapshot"; then
+          success "Firewall successfully reverted to previous state."
+        else
+          error "Failed to revert firewall from snapshot!"
+        fi
+      fi
+    ) &
+    rollback_pid=$!
+    fail=()
+    fatal=0
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
       # ==== Handle RAW Entries ====
@@ -139,7 +154,6 @@ rule_engine() {
         sed -E '
           s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
           s/input|output|forward|prerouting/\U&/g;
-  
       ' <<< "$cmd")
       read -r -a arr <<< "$cmd"
        # ==== Execute Commands ====
@@ -171,17 +185,17 @@ rule_engine() {
     safety_confirm=""
   fi
   safety_confirm="${safety_confirm,,}"
-  if [[ "$safety_confirm" != "y" && "$safety_confirm" != "yes" ]]; then
-    warn "No confirmation received. Reverting firewall to previous state..."
-    if iptables-restore < "$tmp_snapshot"; then
-      success "Firewall successfully reverted to previous state."
-    else
-      error "Failed to revert firewall from snapshot!"
-      fatal=1
-    fi
+  echo
+  if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
+    touch /tmp/fw_confirmed
+    kill "$rollback_pid" 2>/dev/null
+    success "Rule confirmed and persisted in memory."
+    info "Please save your rules with ${cyan}one-click engine backup${reset}"
+    sleep 1
+    success "Firewall rules persisted."
+    rm -f "$tmp_snapshot" /tmp/fw_confirmed
   else
-    success "Rule confirmed and kept."
+    wait "$rollback_pid"
+    warn "No changes applied"
   fi
-  # ==== Remove temporary snapshot ====
-  rm -f "$tmp_snapshot"
 }
