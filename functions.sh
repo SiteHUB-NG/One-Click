@@ -295,8 +295,10 @@ dir_contents() {
 cleanup() {
   rm -f "${trap[@]}"
   rm -rf /etc/one-click/ocb/geekbench_*
-  systemctl daemon-reexec
-  systemctl daemon-reload
+  if [[ -S /run/dbus/system_bus_socket ]]; then
+    systemctl daemon-reexec &> /dev/null
+    systemctl daemon-reload &> /dev/null
+  fi
   if [[ -n "${TMUX:-}" ]]; then
     printf '%s\n' "To exit from TMUX, please type $(tput setab 4)exit${reset:-}"
     return
