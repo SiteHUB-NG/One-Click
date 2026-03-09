@@ -1,5 +1,5 @@
 .\" Man page for one-click
-.TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "System Administration"
+.TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "One-Click Manual"
 
 .SH DESCRIPTION
 
@@ -108,94 +108,302 @@ Uninstall toolkit:
 .B one-click uninstall
 .RE
 
-.SH NAME
-One-Click-RuleEngine \- Human-readable firewall rule parser and executor for Linux
+.SH RULE-ENGINE
 
-.SH SYNOPSIS
-.B One-Click RuleEngine
-[\fI--dry-run\fR] "<human-readable rule>"
-
-.SH DESCRIPTION
-.B One-Click RuleEngine
-is a sub-tool of the
-.B One-Click
-suite designed to simplify firewall management on Linux systems.
+The
+.B rule-engine
+module provides human-readable firewall management within the
+.B one-click
+toolkit.
 
 .PP
-It converts human-readable commands into fully-formed
-.BR iptables (8)
-or
-.BR ip6tables (8)
-rules, supporting both IPv4 and IPv6. 
-It is aimed to extend capability to work with multiple firewall backends including:
-.B nftables,
-.B ufw, and
+It allows administrators to construct firewall rules using natural language,
+which are automatically translated into valid commands for the active firewall backend.
+
+Supported backends include:
+
+.IP \(bu 2
+.B iptables / ip6tables
+
+.IP \(bu 2
+.B nftables
+
+.IP \(bu 2
+.B ufw
+
+.IP \(bu 2
 .B firewalld
 
-.PP
-Key features include:
-
-.IP \(bu 2
-Automatic detection of the system firewall backend
-
-.IP \(bu 2
-Parsing of natural language rules for actions such as open, allow, accept, drop, reject, block, or delete
-
-.IP \(bu 2
-Support for TCP, UDP, ICMP, and multiport specifications
-
-.IP \(bu 2
-Source and destination IP filtering, including CIDR ranges
-
-.IP \(bu 2
-Port and port-range detection, including service name mapping
-
-.IP \(bu 2
-Connection state filtering (NEW, ESTABLISHED)
-
-.IP \(bu 2
-Interactive preview with confirmation before applying rules
-
-.IP \(bu 2
-Dry-run mode for safe testing without modifying system firewall
-
-.IP \(bu 2
-Warnings for sensitive ports (e.g., 22, 80, 443, 3389) to prevent accidental lockout
-
-.SH COMMANDS
-.B one-click rule-engine
-accepts a single human-readable rule as an argument:
-
-.TS
-tab(|) box;
-l l.
-Command | Description
-_
-"open <service|port>" | Allow traffic to a specific service or port
-"close <port|range>" | Block traffic to a port or port range
-"delete <line number>" | Remove a rule from the current chain
-"list table <table>" | Display rules in a specific table (filter, nat, mangle, etc.)
-"enable icmp" | Accept ICMP traffic
-"disable icmp" | Drop ICMP traffic
-.TE
 
 .PP
-Rules can be chained using "and" or commas, e.g.:
+The rule-engine combines natural language parsing with a transactional
+execution model designed to prevent accidental lockouts.
+
+.PP
+Firewall changes are applied using a staged commit process with automatic rollback protection.
+
+.SH RULE-ENGINE FEATURES
+
+.IP \(bu 2
+Human-readable firewall rule parsing
+
+.IP \(bu 2
+Support for TCP, UDP, ICMP and multiport rules
+
+.IP \(bu 2
+Source and destination filtering with IPv4, IPv6 and CIDR ranges
+
+.IP \(bu 2
+Service-name to port mapping (e.g. ssh → 22)
+
+.IP \(bu 2
+Automatic detection of firewall backend
+
+.IP \(bu 2
+Natural language and raw command chaining
+
+.IP \(bu 2
+Firewall rule alias system for IP groups
+
+.IP \(bu 2
+Sensitive port protection
+
+.IP \(bu 2
+Dry-run preview mode
+
+.IP \(bu 2
+Audit mode for rule inspection
+
+.IP \(bu 2
+Full firewall backup and restore management
+
+.IP \(bu 2
+Transactional commit system with rollback protection
+
+
+.SH TRANSACTION SAFETY
+
+Firewall rule modifications are executed using a multi-stage safety system.
+
+.PP
+When rules are applied:
+
+.IP \(bu 2
+Rules are first staged and displayed to the user.
+
+.IP \(bu 2
+A confirmation prompt is required before committing changes.
+
+.IP \(bu 2
+After committing, a
+.B 10-second verification timer
+begins.
+
+.IP \(bu 2
+If confirmation is not received before the timer expires, the firewall
+automatically reverts to the previous configuration.
+
+.PP
+This prevents administrators from accidentally locking themselves out of
+remote systems.
+
+.PP
+Previous firewall state is automatically preserved and restored if a rollback occurs.
+
+.SH RULE CHAINING
+
+Multiple commands may be executed in a single invocation.
+
+.PP
+Commands may be chained using:
+
+.IP \(bu 2
+.B and
+
+.IP \(bu 2
+.B ,
+
+.PP
+Example:
+
 .RS
-.B one-click rule-engine "open ssh and allow http"
-.B one-click engine 'drop https and close ftp and enable icmp'
+.B one-click rule-engine "allow ssh and allow https"
 .RE
 
-.SH OPTIONS
-.IP \(bu 2
-\fB--dry-run\fR
-Parse the rule and display the generated firewall commands without applying them. Useful for verification and testing.
+.PP
+Example with comma chaining:
 
-.SH EXAMPLES
-Allow SSH and HTTP traffic:
 .RS
-.B one-click rule-engine "open ssh and open http"
-.B one-click firewall 'Allow SSH and HTTP traffic'
+.B one-click rule-engine "allow 80,allow 443"
+.RE
+
+
+.SH RAW COMMAND MODE
+
+Advanced users may bypass natural language parsing and inject native firewall commands.
+
+.PP
+Raw mode is enabled using the
+.B raw:
+prefix.
+
+.PP
+Example:
+
+.RS
+.B one-click rule-engine "raw: iptables -A INPUT -p tcp --dport 443 -j ACCEPT"
+.RE
+
+.PP
+Raw commands can be chained with natural language rules.
+
+.PP
+Example:
+
+.RS
+.B one-click rule-engine "allow ssh and raw: iptables -L"
+.RE
+
+
+.SH ALIAS SYSTEM
+
+RuleEngine supports alias mapping for groups of IP addresses.
+
+.PP
+Aliases allow administrators to reference multiple IPs using a single name.
+
+.PP
+Example:
+
+.RS
+.B one-click rule-engine "include office 192.168.1.10 192.168.1.11"
+.RE
+
+.PP
+The alias may then be used in rules:
+
+.RS
+.B one-click rule-engine "allow ssh from office"
+.RE
+
+
+.SH FIREWALL BACKUP MANAGEMENT
+
+Firewall configurations may be backed up, restored, or deleted using
+human-readable commands.
+
+.PP
+Backups are stored in:
+
+.I /etc/one-click/rule-engine/
+
+.PP
+Backups are timestamped and saved with restricted permissions.
+
+.IP \(bu 2
+Backup firewall configuration
+
+.IP \(bu 2
+Restore previous configuration
+
+.IP \(bu 2
+Delete stored backups
+
+
+.SH SENSITIVE PORT PROTECTION
+
+Certain ports are considered sensitive and may trigger warnings before
+rules are applied.
+
+.PP
+Examples include:
+
+.IP \(bu 2
+22 (SSH)
+
+.IP \(bu 2
+80 (HTTP)
+
+.IP \(bu 2
+443 (HTTPS)
+
+.IP \(bu 2
+3389 (RDP)
+
+.PP
+Administrators may extend this list using the
+.B sensitive
+command.
+
+
+.SH MIGRATE
+
+The migrate command transfers the One-Click toolkit configuration
+between systems.
+
+This includes user configuration, rule-engine aliases,
+firewall backups, and scheduled automation tasks.
+
+Migration archives are created as compressed tar files
+which can be transferred to another system and imported.
+
+Examples:
+
+Export configuration:
+
+one-click migrate export
+
+Import configuration:
+
+one-click migrate import one-click-migration.tar.gz
+
+Direct remote migration:
+
+one-click migrate to root@server2
+
+
+.SH RULE-ENGINE EXAMPLES
+
+Allow SSH:
+
+.RS
+.B one-click rule-engine "allow ssh"
+.RE
+
+Block SMTP:
+
+.RS
+.B one-click rule-engine "drop smtp"
+.RE
+
+Allow HTTP and HTTPS:
+
+.RS
+.B one-click rule-engine "allow http and allow https"
+.RE
+
+Enable ICMP:
+
+.RS
+.B one-click rule-engine "enable icmp"
+.RE
+
+Preview rules without applying them:
+
+.RS
+.B one-click rule-engine --dry-run "allow 443"
+.RE
+
+Backup firewall configuration:
+
+.RS
+.B one-click rule-engine "backup firewall"
+.RE
+
+Restore firewall configuration:
+
+.RS
+.B one-click rule-engine "restore firewall"
 .RE
 
 .SH REINSTALL
