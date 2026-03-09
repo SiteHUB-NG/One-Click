@@ -131,7 +131,7 @@ rule_engine() {
     i=""
     # ==== Take snapshot BEFORE applying rule ====
     tmp_snapshot=$(mktemp /tmp/iptables_backup.XXXXXX)
-    "${fw_bin:-}-save" > "$tmp_snapshot"
+    "${fw_bin:-iptables}-save" > "$tmp_snapshot"
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
       # ==== Handle RAW Entries ====
