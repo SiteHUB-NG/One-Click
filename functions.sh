@@ -1372,6 +1372,66 @@ password_strength() {
 }
 # =========================================== End Of Secure Password ============================================== #
 # =============================================== Rule Engine =======================================================
+dry_run() {
+  local cmds ns critical_ports broken
+  cmds=("$@")
+  ns="one-click_dry-run_namespace"
+  broken=0
+  printf '%s\n' "${magenta}[DRY-RUN]${reset} Preparing dry run environment..."
+  ip netns add "$ns"
+  ip -n "$ns" link set lo up
+  ip link add oneclick_vetdry type veth peer name oneclick_vethst
+  ip link set oneclick_vetdry netns "$ns"
+  ip addr add 10.200.200.1/24 dev oneclick_vethst
+  ip link set oneclick_vethst up
+  ip -n "$ns" addr add 10.200.200.2/24 dev oneclick_vetdry
+  ip -n "$ns" link set oneclick_vetdry up
+  ip -n "$ns" route add default via 10.200.200.1
+  ip netns exec "$ns" iptables -F
+  ip netns exec "$ns" iptables -X
+  # ==== Isolated Dry Run ====
+  for cmd in "${cmds[@]}"; do
+    cmd="${cmd#raw: }"
+    # ==== Handle RAW Entries ====
+    cmd=$(
+      sed -E '
+      s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
+      s/input|output|forward|prerouting/\U&/g;
+    ' <<< "$cmd")
+    read -r -a arr <<< "$cmd"
+	used_port=$(sed -E 's/.*port ([0-9]+).*/\1/' <<< "$cmd")
+	used_ports+=($used_port)
+	if ! ip netns exec "$ns" "${arr[@]}"; then
+      printf '%s\n' "${red}[DRY-RUN]${reset}  Failed to apply rule in namespace: $cmd"
+      broken=1
+    fi
+  done
+  # ==== Test connectivity in namespace ====
+  for port in "${used_ports[@]}"; do
+    ip netns exec "$ns" nc -l -p "$port" &
+	sleep 2
+    if ! nc -zv -w 1 10.200.200.2 "$port" 2>/dev/null; then
+      printf '%s\n' "${yellow}[DRY-RUN]${reset} Your firewall rule will block port ${port}!"
+      broken=1
+    else
+      printf '%s\n' "${green}[DRY-RUN]${reset}  Port $port OK"
+    fi
+  done
+  ip link delete oneclick_vethst 2>/dev/null || true
+  ip netns delete "$ns" 2>/dev/null
+  if [[ "$broken" -eq 1 ]]; then
+    printf '%s\n' "${magenta}[DRY-RUN]${red} Firewall rules failed dry-run test.${reset}"
+    return 1
+  fi
+  printf '%s\n' "${green}[DRY-RUN] Rules passed dry-run test.${reset}"
+  read -rp "${cyan}Would you like to apply these rules now? (y|n): " apply_rules
+  apply_rules="${apply_rules,,}"
+  if [[ "$apply_rules" =~ ^(y|yes)$ ]]; then
+    return 0
+  else
+    warn "Rule Engine will now abort!"
+  fi
+}
 detect_firewall_backend() {
   if command -v iptables >/dev/null 2>&1; then
     firewall_backend="iptables"
@@ -1796,7 +1856,11 @@ clean_duplicate_rules() {
 	msg="Would you like to clean the duplicate $rule_plural retaining one copy of each? (y|n): "
   fi
   if [[ ! -s "$cleanfile" ]]; then
-    success "No duplicate rules found."
+    if [[ "$dry_run" -eq 1 ]]; then
+      printf "${magenta}[DRY-RUN]${reset} %s\n" "No duplicate rules found."
+	else
+      success "No duplicate rules found."
+	fi
     rm -f "$tmpfile" "$cleanfile"
     return 0
   fi
@@ -1870,8 +1934,13 @@ check_sensitive_ports() {
     if [[ -n "${default_sensitive_ports[$p]:-}" ]]; then
       local service_desc alert1 alert2 len1 len2 width border border2
 	  service_desc="${default_sensitive_ports[$p]}"
-	  alert1="[ALERT] Action: $current_action detected on Port $p ($service_desc)."
-      alert2="[ALERT] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+	  if [[ "$dry_run" -eq 1 ]]; then
+        alert1="[DRY-RUN] Action: $current_action detected on Port $p ($service_desc)."
+        alert2="[DRY-RUN] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+	  else
+        alert1="[ALERT] Action: $current_action detected on Port $p ($service_desc)."
+        alert2="[ALERT] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+	  fi
       len1=${#alert1}
       len2=${#alert2}
       width=$(( len1 > len2 ? len1 : len2 ))
