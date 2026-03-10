@@ -27,9 +27,9 @@ rule_engine() {
   flag="${2:-}"
   dry_run=0
   duplicate_skipped=0
-  if [[ "$flag" == "--dry-run" ]]; then
+  if [[ "$rule" == "--dry-run" ]]; then
     dry_run=1
-    shift
+    rule="$flag"
   fi
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
@@ -62,7 +62,11 @@ rule_engine() {
   generated_cmds=()
   detect_firewall_backend
   if iptables -V 2>/dev/null | grep -qi nf_tables; then
-    info "iptables is running in nf_tables compatibility mode."
+    if [[ "$dry_run" -eq 1 ]]; then
+      printf "${magenta}[DRY-RUN]${reset} %s\n" "iptables is running in nf_tables compatibility mode."
+    else
+      info "iptables is running in nf_tables compatibility mode."
+    fi
   fi
   load_host_aliases
   clean_duplicate_rules
@@ -103,18 +107,19 @@ rule_engine() {
         info "All rules already exist. Nothing to change."
         exit 0
     fi
-    die "No valid commands generated."
-  fi
-  # ==== Dry-run preview ====
-  if [[ "$dry_run" -eq 1 ]]; then
-    info "[DRY RUN] The following commands would be executed:"
-    for cmd in "${unique_cmds[@]}"; do
-        echo "  $cmd"
-    done
-    exit 0
+    if [[ "$dry_run" -eq 1 ]]; then
+      printf "${red}[DRY-RUN]${reset} %s\n" "No valid commands generated." "DRY-RUN Failed!"
+      exit 1
+    else
+      die "No valid commands generated."
+    fi
   fi
   # ==== Preview & Confirm ==== 
-  info "The following commands will be executed:"
+  if [[ "$dry_run" -eq 1 ]]; then
+    printf "${magenta}[DRY-RUN]${reset} %s\n" "The following commands will be executed:"
+  else
+    info "The following commands will be executed:"
+  fi
   for cmd in "${unique_cmds[@]}"; do
     # ==== Capitalize RAW Display Entries ====
     cmd=$(
@@ -122,10 +127,17 @@ rule_engine() {
         s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
         s/input|output|forward|prerouting/\U&/g
     ' <<< "$cmd")
-    printf "${cyan}[COMMAND]: %s${reset}\n" "$cmd"
+    if [[ "$dry_run" -eq 1 ]]; then
+      printf "${magenta}[DRY-RUN]${cyan} %s${reset}\n" "$cmd"
+    else
+      printf "${cyan}[COMMAND]: %s${reset}\n" "$cmd"
+    fi
   done
-  echo
-  read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
+  if [[ "$dry_run" -eq 1 ]]; then
+    read -rp "${magenta}[DRY-RUN]:${reset} Apply ALL rules? (y|n): " confirm
+  else
+    read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
+  fi
   confirm="${confirm,,}"
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
     i=""
@@ -135,18 +147,28 @@ rule_engine() {
     # ==== Launch background rollback timer (10s) ====
     (
       sleep 13
-      if [[ ! -f /tmp/fw_confirmed ]]; then
-        warn "No confirmation received. Reverting firewall to previous state..."
-        if iptables-restore < "$tmp_snapshot"; then
-          success "Firewall successfully reverted to previous state."
-        else
-          error "Failed to revert firewall from snapshot!"
+      if [[ "$dry_run" -ne 1 ]]; then
+        if [[ ! -f /tmp/fw_confirmed ]]; then
+          warn "No confirmation received. Reverting firewall to previous state..."
+          if iptables-restore < "$tmp_snapshot"; then
+            success "Firewall successfully reverted to previous state."
+          else
+            error "Failed to revert firewall from snapshot!"
+          fi
         fi
       fi
     ) &
     rollback_pid=$!
     fail=()
     fatal=0
+    # ==== Dry-run preview ====
+    if [[ "$dry_run" -eq 1 ]]; then
+      dry_run "${unique_cmds[@]}" || {
+        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" "Dry run failed. Exiting without applying rules."
+        exit 1
+      }
+    fi
+    # ==== Real run ====
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
       # ==== Handle RAW Entries ====
