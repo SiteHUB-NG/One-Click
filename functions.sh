@@ -1671,6 +1671,33 @@ delete_alias() {
     error "Invalid selection."
   fi
 }
+remove_ip_from_alias() {
+  local alias_name ip_to_remove alias_file
+  alias_name="$1"
+  ip_to_remove="$2"
+  alias_file="/etc/one-click/rule-engine/.alias.conf" 
+  if [[ -z "$alias_name" || -z "$ip_to_remove" ]]; then
+    error "Usage: alias-prune [alias] [IP]"
+    return 1
+  fi
+  if grep -q "^$alias_name=" "$alias_file"; then
+    if ! grep -q "$ip_to_remove" "$alias_file"; then
+	  warn "$alias_name does not contain $ip_to_remove in it's array"
+	  return 1
+	fi
+    sed -Ei "/^$alias_name=/ {
+	  s/(=)${ip_to_remove},|,${ip_to_remove}(,|$)/\1\2/g;
+	}" "$alias_file"
+    if grep -q "^$alias_name=$" "$alias_file"; then
+      warn "Alias '$alias_name' is now empty. Deleting alias entry entirely."
+      sed -i "/^$alias_name=$/d" "$alias_file"
+    else
+      success "IP $ip_to_remove removed from $alias_name."
+    fi
+  else
+    error "Alias '$alias_name' not found."
+  fi
+}
 show_rules() {
   local fw_bin total_blocked_pkts total_blocked_bytes clean_rule
   fw_bin="${fw_bin:-iptables}"
@@ -2027,12 +2054,12 @@ parse_firewall_command() {
     exit 0
   fi
   # ==== Detect Append Alias ====
-  if [[ "$rule_lower" =~ ^(add-to:?|append:?)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)*) ]]; then
+  if [[ "$rule_lower" =~ ^(alias-append):?[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)*) ]]; then
     local alias_name new_ips_raw existing_ips new_ips_comma combined_list
 	alias_name="${BASH_REMATCH[2]}"
     new_ips_raw="${BASH_REMATCH[3]}"
     if [[ ! -f "$alias_file" ]] || ! grep -q "^${alias_name}=" "$alias_file"; then
-      error "Alias '$alias_name' does not exist. Use 'remember' or 'include' to create it first."
+      error "Alias '$alias_name' does not exist. Use 'alias-create' to create it first."
       exit 1
     fi
     existing_ips=$(sed -n "s/^${alias_name}=//p" "$alias_file")
@@ -2273,7 +2300,7 @@ parse_firewall_command() {
     proto="tcp"
   fi
   # ==== Detect and trap invalid IP ====
-  if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
+  if [[ "$rule_lower" =~ ^(alias-create)[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
     local cmd_type="${BASH_REMATCH[1]}"
     local alias_name="${BASH_REMATCH[2]}"
     printf '%s\n' "${red}╔═════════════════════ [ ERROR ] ════════════════════╗${reset}" \
@@ -2303,7 +2330,7 @@ parse_firewall_command() {
     exit 1
   fi
   # ==== Detect Alias ====
-  if [[ "$rule_lower" =~ ^(remember|include)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)+?) ]]; then
+  if [[ "$rule_lower" =~ ^(alias-create)[[:space:]]+([a-z0-9_-]+)[[:space:]]+([0-9./:]+([[:space:]]+[0-9./:]+)+?) ]]; then
     local alias_name alias_ip alias_mapped 
 	alias_name="${BASH_REMATCH[2]}"
     alias_ip="${BASH_REMATCH[3]}"
@@ -2321,6 +2348,26 @@ parse_firewall_command() {
     else
       echo "${alias_name}=${alias_ip}" >> "$alias_file"
       info "Alias Added: $alias_name → $alias_ip"
+    fi
+    exit 0
+  fi
+  # ==== Detect IP Removal from Alias ====
+  if [[ "$rule_lower" =~ ^(alias-remove|alias-delete|alias-prune)([[:space:]]+[a-zA-Z0-9_-]+|$)[[:space:]]*$ ]]; then
+    die "Usage: alias-prune [alias] [IP]"
+    return 1
+  fi
+  if [[ "$rule_lower" =~ ^(alias-remove|alias-delete|alias-prune)[[:space:]]+([a-zA-Z0-9_-]+)[[:space:]]+([a-fA-F0-9./:]+)$ ]]; then
+    local alias_name="${BASH_REMATCH[2]}"
+    local ip_to_remove="${BASH_REMATCH[3]}"
+    if [[ -f "$alias_file" ]] && grep -q "^${alias_name}=" "$alias_file"; then
+      if sed -n "/^${alias_name}=.*${ip_to_remove}/p" "$alias_file" &> /dev/null; then
+        info "Detecting $ip_to_remove in $alias_name... initiating removal."
+        remove_ip_from_alias "$alias_name" "$ip_to_remove"
+      else
+        error "IP $ip_to_remove not found in alias $alias_name"
+      fi
+    else
+      error "Alias $alias_name does not exist."
     fi
     exit 0
   fi
