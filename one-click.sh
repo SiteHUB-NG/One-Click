@@ -551,6 +551,7 @@ _one_click() {
     cmds["help"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
+    cmds["--dry-run"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
