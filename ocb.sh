@@ -176,7 +176,7 @@ ram_bench() {
 }
 gb_check() {
   if (( avail_mem < 1500 )); then
-    printf "$(tput setaf 100) %s${reset}\n" \
+    printf "$(tput setaf 100)%s${reset}\n" \
       "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
       "│ RAM is not enough to run Geekbench.                                                              │" \
       "│ Geekbench will not be run. Will use sysbench instead.                                            │" \
@@ -184,7 +184,7 @@ gb_check() {
     no_gb=1
   fi
   if (( avail_disk < 7 )); then
-    printf "$(tput setaf 100) %s${reset}\n" \
+    printf "$(tput setaf 100)%s${reset}\n" \
       "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐" \
       "│ Storage is too small for Geekbench.                                                              │" \
       "│ Geekbench will not be run. Will use sysbench instead.                                            │" \
