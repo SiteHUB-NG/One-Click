@@ -397,7 +397,7 @@ fi
 # ==== Firewall Rule Engine - Skip TMUX ====
 if [[ "${1:-}" == "rule-engine" || "${1:-}" == "engine" || "${1:-}" == "firewall" ]]; then
   load_rule_engine
-  rule_engine "${2:-}"
+  rule_engine "${2:-}" "${3:-}"
   exit 0
 fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
