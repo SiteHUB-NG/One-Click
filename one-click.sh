@@ -50,8 +50,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      enable (icmp|echo)  Enable ICMP protocol e.g '$(tput setaf 228)allow enable echo$(tput sgr0)'" \
     "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
     "      raw: <iptables cmd> Enter raw commands for extended functionality" \
-    "      (remember|include)  The remember|include commands allow you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" \
-    "      (add-to|append)     Add additional IPs mapped to aliases to extend batch processing functionality. Key alias must already exist else use the remember command first." \
+    "      alias-create        The remember|include commands allow you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" \
+    "      alias-append        Add additional IPs mapped to aliases to extend batch processing functionality. Key alias must already exist else use the alias-create command first." \
+    "      alias-prune         Remove IPs from an aliases array e.g '$(tput setaf 228)alias-prune home 1.2.3.4$(tput sgr0)'" \
     "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
     "      range               A range of ports e.g '$(tput setaf 228)range 1000-2000$(tput sgr0)'" \
     "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
@@ -461,8 +462,9 @@ _one_click() {
     cmds["rule-engine:mask"]=
     cmds["rule-engine:'enable icmp'"]=
     cmds["rule-engine:'disable icmp"]=
-    cmds["rule-engine:'remember office' 'remember drop-list' 'remember home'"]=
-    cmds["rule-engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["rule-engine:alias-create"]=
+    cmds["rule-engine:alias-append"]=
+    cmds["rule-engine:alias-prune"]=
     cmds["rule-engine:'multiport"]=
     cmds["rule-engine:'range"]=
     cmds["rule-engine:'sensitive:"]=
@@ -484,8 +486,9 @@ _one_click() {
     cmds["engine:mask"]=
     cmds["engine:'enable icmp'"]=
     cmds["engine:'disable icmp"]=
-    cmds["engine:'remember office' 'remember drop-list' 'remember home'"]=
-    cmds["engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["engine:alias-create"]=
+    cmds["engine:alias-append"]=
+    cmds["engine:alias-prune"]=
     cmds["engine:'multiport"]=
     cmds["engine:'range"]=
     cmds["engine:'sensitive:"]=
@@ -567,8 +570,9 @@ _one_click() {
     cmds["rule-engine:mask"]=
     cmds["rule-engine:'enable icmp'"]=
     cmds["rule-engine:'disable icmp"]=
-    cmds["rule-engine:'remember office' 'remember drop-list' 'remember home'"]=
-    cmds["rule-engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["rule-engine:alias-create"]=
+    cmds["rule-engine:alias-append"]=
+    cmds["rule-engine:alias-prune"]=
     cmds["rule-engine:'multiport"]=
     cmds["rule-engine:'range"]=
     cmds["rule-engine:'sensitive:"]=
@@ -591,8 +595,9 @@ _one_click() {
     cmds["engine:mask"]=
     cmds["engine:'enable icmp'"]=
     cmds["engine:'disable icmp"]=
-    cmds["engine:'remember office' 'remember drop-list' 'remember home'"]=
-    cmds["engine:'append office' 'append drop-list' 'append home'"]=
+    cmds["engine:alias-create"]=
+    cmds["engine:alias-append"]=
+    cmds["engine:alias-prune"]=
     cmds["engine:'multiport"]=
     cmds["engine:'range"]=
     cmds["engine:'sensitive:"]=
