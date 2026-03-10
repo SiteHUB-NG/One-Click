@@ -73,6 +73,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  help                    Show this help message" \
     "  uninstall               Remove one-click and all associated files and configurations." \
     "  --version               Check version" \
+    "  --dry-run               Check the effect of rules before globally applying" \
     " " "$(tput smul)Examples:$(tput rmul)" \
     "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
     "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" 
@@ -853,6 +854,7 @@ if [[ $# -gt 0 ]]; then
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  --version               Check version" \
+        "  --dry-run               Check the effect of rules before globally applying" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
