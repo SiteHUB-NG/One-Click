@@ -773,6 +773,7 @@ if [[ $# -gt 0 ]]; then
           mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
           mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
           cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/ 2>/dev/null
+          rm -rf /var/cache/one-click
           if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
             if [[ ! -s "$manpage" ]]; then
               wget -P "$man_dir" "$one_click_1" &> /dev/null
