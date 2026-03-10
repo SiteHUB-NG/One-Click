@@ -30,6 +30,9 @@ rule_engine() {
   if [[ "$rule" == "--dry-run" ]]; then
     dry_run=1
     rule="$flag"
+    if [[ -f /tmp/fw_confirmed ]]; then
+      rm -f /tmp/fw_confirmed
+    fi
   fi
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
