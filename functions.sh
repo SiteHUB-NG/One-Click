@@ -280,10 +280,8 @@ dir_contents() {
   (
     echo "FILE_PATH SIZE DATE"
     echo "------------- ---- ----"
-    # Find directories up to 2 levels deep
     find "$dir" -maxdepth 2 -not -path '*/.*' -printf "%p %k %TY-%Tm-%Td\n" | 
     awk -v dir="$dir" '{
-      # Remove the base directory path to make it cleaner
       sub(dir"/", "", $1); 
       if ($1 != dir) print $1, $2"KB", $3 
     }'
@@ -1027,16 +1025,16 @@ iperf_table() {
 }
 is_online() {
   if ping -4 -c 1 -W 2 8.8.8.8 &>/dev/null; then
-    return 0  # online
+    return 0 
   else
-    return 1  # offline
+    return 1
   fi
 }
 is_v6_online() {
   if ping -6 -c 1 -W 2 2001:4860:4860::8888 &>/dev/null; then
-    return 0  # online
+    return 0
   else
-    return 1  # offline
+    return 1
   fi
 }
 total_time() {
@@ -1703,8 +1701,8 @@ show_rules() {
   fw_bin="${fw_bin:-iptables}"
   total_blocked_pkts=0
   total_blocked_bytes=0
-  printf '%s\n' "${cyan}One-Click Firewall: Logical Traffic Flow & Audit${reset}" \
-    "${blue}================================================================${reset}" \
+  printf '%s\n' "${cyan}One-Click Firewall: Logical Traffic Flow${reset}" \
+    "${blue}============================================${reset}" \
     "  [ Internet / LAN ] " \
     "          │          " \
     "  ▼───────┴───────▼  " \
@@ -1732,8 +1730,10 @@ show_rules() {
     "  └───────────────┘  "
   individual_table_rules() {
     local tables=("filter" "nat" "mangle" "raw")
-    printf '%s\n' "${cyan}Individual Tables${reset}" \
-      "${blue}=====================${reset}"
+    printf '%s\n' \
+	  "${blue}╔══════════════════════════════╗" \
+	  "║ ${cyan}Transverse Individual Tables ${blue}║" \
+      "╚══════════════════════════════╝${reset}"
     for tbl in "${tables[@]}"; do
       if ! $fw_bin -t "$tbl" -S | grep -qE "^-A"; then
         continue
@@ -1762,12 +1762,12 @@ show_rules() {
 	  "  ▼──────────────────▼" \
       "  │ ${cyan}END OF TRAVERSAL${reset} │" \
       "  └──────────────────┘" \
-      "${blue}================================================================${reset}" \
+      "${blue}==========================================================================${reset}" \
       "${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} malicious packets today."
     if [[ "$total_blocked_pkts" -gt 1000 ]]; then
         printf '%s\n' "${red}[ALERT]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
     fi
-    printf '%s\n' "${blue}================================================================${reset}"
+    printf '%s\n' "${blue}==========================================================================${reset}"
   }
   individual_table_rules
 }
