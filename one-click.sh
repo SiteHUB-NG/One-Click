@@ -473,6 +473,7 @@ _one_click() {
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
     cmds["rule-engine:audit"]=
+    cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -497,6 +498,7 @@ _one_click() {
     cmds["engine:'from"]=
     cmds["engine:'to"]=
     cmds["engine:audit"]=
+    cmds["engine:--dry-run"]=""
     
     _complete_tree() {
       local path="$1"
@@ -555,8 +557,7 @@ _one_click() {
     cmds["help"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
-    cmds["--dry-run"]=""
-
+    
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -581,6 +582,7 @@ _one_click() {
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
     cmds["rule-engine:audit"]=
+    cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw'"]=
     cmds["engine:'show alias'"]=
@@ -606,6 +608,7 @@ _one_click() {
     cmds["engine:'from"]=
     cmds["engine:'to"]=
     cmds["engine:audit"]=
+    cmds["engine:--dry-run"]=""
     
     _complete_tree() {
       local path="$1"
