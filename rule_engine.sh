@@ -16,8 +16,10 @@
 rule_engine() {
   if [[ "$pkg_mgr" == "apt" ]]; then
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
+    install_dep "fail2ban" "type fail2ban" "fail2ban" "$pkg_mgr" true
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
+    install_dep "fail2ban" "type fail2ban" "fail2ban" "$pkg_mgr" true
   fi
   declare -gA alerted_ports=()
   engine_dir="/etc/one-click/rule-engine/"
