@@ -313,7 +313,7 @@ trap cleanup EXIT
 # ============================================= End Script Helpers ======================================== #
 # =============================================== Country Mapping ===========================================
 expand_country() {
-  local code="${1^^}"  # uppercase input
+  local code="${1^^}" 
   case "$code" in
     AF) country="Afghanistan"                        ;;
     AL) country="Albania"                            ;;
@@ -1744,9 +1744,9 @@ start_journal_dispatcher() {
   if [[ -f "$pid_file" ]]; then
     local old_pid=$(cat "$pid_file")
     if ps -p "$old_pid" > /dev/null 2>&1; then
-      return # Truly already running
+      return
     else
-      rm "$pid_file" # Stale PID, clean it up
+      rm "$pid_file"
     fi
   fi
   journalctl -fn0 -u ssh.service 2>/dev/null | while read -r line; do
@@ -1916,7 +1916,6 @@ show_rules() {
   if [[ "$track_flag" -eq 0 ]]; then
 	printf '%s\n' "${blue}═══════════════════════════════════════════════════════════════════════════════════${reset}"
   fi
-      #echo -e "${red}--- NEW ALERTS SINCE LAST AUDIT ---${reset}"
   if [[ -z "$last_view_ts" ]]; then
     jq -r -s --arg last "$last_view_ts" '
       map(select(.ts > ($last|tonumber))) | 
@@ -3135,7 +3134,6 @@ browse_files() {
 }
 browse_journal() {
   while true; do
-    # Get total journal disk usage
     journal_usage=$(journalctl --disk-usage 2>/dev/null | awk '{print $3,$4}')
     selection=$(
       systemctl list-units --type=service --no-legend \
