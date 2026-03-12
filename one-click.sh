@@ -58,8 +58,17 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
     "      sensitive-list      List all of the ports in the sensitive list." \
     "      sensitive-remove:   Remove ports from the sensitive list" \
-    "      from                From source IP" \
-    "      audit               Visual inspection of rules." \
+    "      audit               Visual inspection of active rules, drops and intrusion attempts." \
+    "      audit ssh           View Brute Force attempts on port 22 with a count of attempts, the usernames tried, IP and last seen." \
+    "      audit block <ID>    Drop brute force detected users. ID must be taken from the '$(tput setaf 228)audit ssh$(tput sgr0)' table" \
+    "      audit block ID perm Rather than a 60 minute block, this will ban the IP permanently." \
+    "      audit unblock <ID>  Revert the blocking of detected brute force IP." \
+    "      audit history       View persisted history of brute force users who have has action taken against them." \
+    "      audit key <KEY>     Used to integrate reporting and banning of IPs with AbuseIPDB. Insert AbuseIPDB API key only with this command." \
+    "      audit lookup <IP>   Check an IPs reputation before acting on it. AbuseIPDB needs to be added beforehand." \
+    "      audit banlist       View IPs that have been ban both by RuleEngine and Fail2ban." \
+    "      audit jail <args>   Add a new jail '$(tput setaf 228)Usage: audit jail [name] port [port] retry [count]$(tput sgr0)'" \
+    "      from                From source IP" \    
     "      to                  To destination IP " \
     "      $(tput smul)Protocols:$(tput rmul) " \
     "      tcp                 TCP Traffic is the deafult for most chains" \
