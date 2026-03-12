@@ -1696,43 +1696,179 @@ remove_ip_from_alias() {
     error "Alias '$alias_name' not found."
   fi
 }
+record_event() {
+  local file ip proto port reason user ts
+  file="$1"
+  ip="$2"
+  proto="$3"
+  port="$4"
+  reason="$5"
+  user="$6"
+  ts=$(date +%s)
+  echo "{\"ts\":$ts,\"ip\":\"$ip\",\"proto\":\"$proto\",\"port\":\"$port\",\"reason\":\"$reason\",\"user\":\"$user\"}" >> "$file"
+}
+alert_if_threshold() {
+  local ip file threshold message count
+  ip="$1"
+  file="$2"
+  threshold="$3"
+  message="$4"
+  count=$(grep -c "\"ip\":\"$ip\"" "$file")
+  if (( count >= threshold )); then
+    printf '[ALERT] %s for IP %s (%d occurrences)\n' "$message" "$ip" "$count"
+  fi
+}
+apply_block() {
+  local ip proto port action duration file
+  ip="$1"
+  proto="$2"
+  port="$3"
+  action="$4"      
+  duration="$5"
+  file="$6"
+  $fw_bin -I INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action"
+  local ts
+  ts=$(date +%s)
+  echo "{\"ts\":$ts,\"ip\":\"$ip\",\"proto\":\"$proto\",\"port\":\"$port\",\"action\":\"$action\",\"duration\":$duration}" >> "$monitor_history_file"
+  (
+    sleep "$duration"
+    if $fw_bin -C INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action" &>/dev/null; then
+        $fw_bin -D INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action"
+        echo "{\"ts\":$(date +%s),\"ip\":\"$ip\",\"action\":\"UNBLOCKED\",\"reason\":\"Timeout\"}" >> "$monitor_history_file"
+    fi
+  ) &
+}
+# ==== Dispatcher ====
+start_journal_dispatcher() {
+  local pid_file="/var/run/one_click_journal.pid"
+  if [[ -f "$pid_file" ]]; then
+    local old_pid=$(cat "$pid_file")
+    if ps -p "$old_pid" > /dev/null 2>&1; then
+      return # Truly already running
+    else
+      rm "$pid_file" # Stale PID, clean it up
+    fi
+  fi
+  journalctl -fn0 -u ssh.service 2>/dev/null | while read -r line; do
+    [[ "$line" =~ "Failed password" ]] && guard_ssh "$line"
+  done &
+  echo $! > "$pid_file"
+}
+toggle_mitigation() {
+  echo -e "${cyan}--- Mitigation Settings ---${reset}"
+  echo "Current Mode: $( (( auto_mitigate == 1 )) && echo -e "${red}AUTOMATIC${reset}" || echo -e "${yellow}PASSIVE (Alert Only)${reset}" )"
+  read -p "Enable automatic IP blocking? (y/n): " choice
+  if [[ "$choice" =~ ^[Yy]$ ]]; then
+    auto_mitigate=1
+    echo "auto_mitigate=1" > "$guard_file"
+    echo -e "${green}Automatic mitigation enabled.${reset}"
+  else
+    auto_mitigate=0
+    echo "auto_mitigate=0" > "$guard_file"
+    echo -e "${yellow}Passive mode enabled.${reset}"
+  fi
+}
+show_mitigation_audit() {
+  local ts ip act dur date 
+  printf '%s\n' "${blue}╔══════════════════════════════════════════════════════════╗"
+  printf "║ ${magenta}ACTIVE MITIGATION LOGS (Last 10 Blocks)${blue}                  ║\n"
+  printf '╚══════════════════════════════════════════════════════════╝%s\n' "${reset}"
+  for file in "$monitor_ssh_file" "$monitor_ddos_file"; do
+    [[ ! -f "$file" ]] && continue
+    echo -e "${yellow}[ Source: $(basename "$file") ]${reset}"       
+    tail -n 20 "$file" | grep "\"action\":" | while read -r line; do
+    ts=$(sed -E 's/.*"ts":([0-9]+).*/\1/' <<< "$line")
+    ip=$(sed -E 's/.*"ip":"([^"]+)".*/\1/' <<< "$line")
+    act=$(sed -E 's/.*"action":"([^"]+)".*/\1/' <<< "$line")
+    dur=$(sed -E 's/.*"duration":([0-9]+).*/\1/' <<< "$line")
+    date_str=$(date -d @"$ts" "+%H:%M:%S") 
+    printf "  ${cyan}%s${reset} | IP: ${red}%-15s${reset} | Action: ${yellow}%-5s${reset} | Duration: %ss\n" \
+      "$date_str" "$ip" "$act" "$dur"
+    done
+  done
+  echo ""
+}
+# ==== SSH Monitor ====
+guard_ssh() {
+  local line ip user fail_threshold
+  line="$1"
+  fail_threshold=5
+  ip=$(sed -E 's/.*from ([0-9.]+|[0-9:a-fA-F:]+).*/\1/' <<< "$line")
+  user=$(sed -E 's/.*for (invalid user )?([a-zA-Z0-9_-]+).*/\2/' <<< "$line")
+  [[ -z "$ip" ]] && return
+  record_event "$monitor_ssh_file" "$ip" "tcp" 22 "SSH failed login" "$user"
+  if (( auto_mitigate == 1 )); then
+    apply_block "$ip" "tcp" 22 "DROP" 300 "$monitor_ssh_file"
+  fi
+}
+# ==== DDoS Monitor ====
+monitor_ddos() {
+  [[ -f /var/run/monitor_ddos.pid ]] && return
+  touch "$monitor_ddos_file"
+  while true; do
+    ss -Htn src : | awk '{print $5}' | sort | uniq -c | while read -r count ip; do
+      (( count > 50 )) || continue
+      record_event "$monitor_ddos_file" "$ip" "tcp" "any" "High connection rate ($count)"
+      alert_if_threshold "$ip" "$monitor_ddos_file" 50 "Possible DDoS detected"
+    done
+      sleep 1
+  done &
+  echo $! > /var/run/monitor_ddos.pid
+}
+start_monitors() {
+  start_journal_dispatcher
+  monitor_ddos
+}
+view_ssh_stats() {
+  local last_view_ts=$(cat "$last_audit" 2>/dev/null || echo 0)
+  local current_ts=$(date +%s)
+  printf '%s\n' " " "Take action against brute force attemps towards with useful insight into the actor and hintable patterns" \
+    "You can drop malicious actors at the firewall with ${cyan}one-click engine 'audit drop <ID number>'${reset}" " "
+  printf "${blue}%s${reset}\n" \
+    "╔════╦═════════════════╦═════════╦═══════════════════════════════╦════════════════════╗" \
+    "║ ${magenta}ID${blue} ║ ${magenta}IP${blue}              ║ ${magenta}COUNT${blue}   ║ ${magenta}USERS${blue}                         ║ ${magenta}LAST SEEN${blue}          ║" \
+    "╠════╬═════════════════╬═════════╬═══════════════════════════════╬════════════════════╣"
+  local id_counter=1
+  jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length, ([.[] | .user | select(. != null and . != "")] | unique | join(",")), ([.[] | .ts] | max)] | @tsv' "$monitor_ssh_file" | sort -rnk2 | while IFS=$'\t' read -r ip count users last; do
+    local d_last=$(date -d @"$last" "+%m-%d %H:%M")
+    local display_users="${users:0:18}"; [[ ${#users} -gt 18 ]] && display_users="${display_users}.."
+	if (( count <= 5 )); then
+	  ip="${green}${ip}${reset}"
+      count="${green}${count}${reset}"
+	  display_users="${green}${display_users}${reset}"
+	  d_last="${green}${d_last}${reset}"
+    elif (( count > 5 && count <= 20 )); then
+	  ip="${yellow}${ip}${reset}"
+      count="${yellow}${count}${reset}"
+	  display_users="${yellow}${display_users}${reset}"
+	  d_last="${yellow}${d_last}${reset}"
+    else
+	  ip="${red}${ip}${reset}"
+      count="${red}${count}${reset}"
+	  display_users="${red}${display_users}${reset}"
+	  d_last="${red}${d_last}${reset}"
+    fi
+  printf "${blue}║${reset} %-14s ${blue}║${reset} %-27s ${blue}║${reset} %-19s ${blue}║${reset} %-41s ${blue}║${reset} %-30s ${blue}║${reset}\n" \
+    "${magenta}$id_counter${reset}" "$ip" "$count" "$display_users" "$d_last"
+    ((id_counter++))
+  done
+  printf "${blue}%s${reset}\n" "╚════╩═════════════════╩═════════╩═══════════════════════════════╩════════════════════╝${reset}"
+  date +%s > "$last_audit"
+}
 show_rules() {
-  local fw_bin total_blocked_pkts total_blocked_bytes clean_rule
+  local fw_bin total_blocked_pkts total_blocked_pkts total_blocked_bytes clean_rule clean_src clean_dst clean_pkts color
   fw_bin="${fw_bin:-iptables}"
   total_blocked_pkts=0
   total_blocked_bytes=0
-  printf '%s\n' "${cyan}One-Click Firewall: Logical Traffic Flow${reset}" \
-    "${blue}============================================${reset}" \
-    "  [ Internet / LAN ] " \
-    "          │          " \
-    "  ▼───────┴───────▼  " \
-    "  │  ${yellow}INPUT CHAIN${reset}  │  (Total Intake)" \
-    "  └───────┬───────┘  " \
-    "          │" \
-    "          ├─▶ [${green}ALLOW${reset}] Whitelist Logic"
-  ($fw_bin -vnL INPUT | grep "ACCEPT" | grep -v "policy" | while read -r pkts bytes target prot opt in out src dst rest; do
-    clean_rule=$(echo "$src to $dst $rest" | sed 's/0.0.0.0\/0/anywhere/g')
-    printf '%s\n' "          │    └── [${pkts} pkts] ${clean_rule}"
-  done) || true
-  printf '%s\n' "          │" \
-    "          ├─▶ [${red}BLOCK${reset}] Security Filters"
-  while read -r pkts bytes target rest; do
-    clean_rule=$(echo "$rest" | sed -E 's/all  --  \* \* //; s/0.0.0.0\/0/anywhere/g')
-    printf '%s\n' "          │    └── [${pkts} pkts] ${clean_rule}"
-    [[ "$pkts" != "0" ]] && total_blocked_pkts=$((total_blocked_pkts + pkts))
-  done < <($fw_bin -vnL INPUT | grep -E "DROP|REJECT")
-  local policy_line=$($fw_bin -vnL INPUT | grep "policy")
-  local default_policy=$(echo "$policy_line" | awk '{print $4}')
-  local policy_pkts=$(echo "$policy_line" | awk '{print $6}')
-  printf '%s\n' "          │" \
-    "  ▼───────┴───────▼  " \
-    "  │ ${magenta}FINAL POLICY${reset}  │  ▶ ${magenta}$default_policy${reset} (${policy_pkts} pkts matched)" \
-    "  └───────────────┘  "
+  total_blocked_pkts=0
+  clean_pkts="${clean_pkts:-0}"
+  track_flag=0
+  last_view_ts=$(cat "$last_audit" 2>/dev/null || echo 0)
   individual_table_rules() {
     local tables=("filter" "nat" "mangle" "raw")
     printf '%s\n' \
 	  "${blue}╔══════════════════════════════╗" \
-	  "║ ${cyan}Transverse Individual Tables ${blue}║" \
+      "║ ${cyan}Transverse Individual Tables ${blue}║" \
       "╚══════════════════════════════╝${reset}"
     for tbl in "${tables[@]}"; do
       if ! $fw_bin -t "$tbl" -S | grep -qE "^-A"; then
@@ -1746,30 +1882,136 @@ show_rules() {
         printf '%s\n' "          │" \
           "          ├─▶ Chain: ${magenta}${chain}${reset}"
         while read -r num pkts bytes target prot opt in out src dst rest; do
-          local clean_src=$( [[ "$src" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$src" )
-          local clean_dst=$( [[ "$dst" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$dst" )
-          local color=$reset
+		  clean_pkts=$(echo "$pkts" | sed 's/[KMG]//g; s/\..*//; s/[^0-9]//g')
+          clean_src=$( [[ "$src" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$src" )
+          clean_dst=$( [[ "$dst" == "0.0.0.0/0" ]] && echo "anywhere" || echo "$dst" )
+          color=$reset
           [[ "$target" == "ACCEPT" ]] && color=$green
           [[ "$target" == "DROP" || "$target" == "REJECT" ]] && color=$red
           [[ "$target" == "LOG" ]] && color=$yellow
-
           printf '%s\n' "          │    └── [${num}] ${pkts} pkts ▶ ${color}${target}${reset} (${clean_src} → ${clean_dst} ${rest})"
+          (( total_blocked_pkts += clean_pkts )) || true
         done <<< "$rules"
       done
       printf '%s\n' "          │"
     done
     printf '%s\n' \
-	  "  ▼──────────────────▼" \
+	  "  ▼───────┴──────────▼" \
       "  │ ${cyan}END OF TRAVERSAL${reset} │" \
-      "  └──────────────────┘" \
-      "${blue}==========================================================================${reset}" \
+      "  └──────────────────┘" 
+    printf '%s\n'  "${blue}═══════════════════════════════════════════════════════════════════════════════════╗${reset}" \
       "${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} malicious packets today."
     if [[ "$total_blocked_pkts" -gt 1000 ]]; then
-        printf '%s\n' "${red}[ALERT]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
+      printf '%s\n' "${red}[CRITICAL]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
     fi
-    printf '%s\n' "${blue}==========================================================================${reset}"
+	for file in "$monitor_ssh_file" "$monitor_ddos_file"; do
+      [[ ! -f "$file" ]] && continue
+      local count
+      count=$(wc -l < "$file")
+      printf "${yellow}[AUDIT]:${reset} %s malicious $(basename $file) events recorded in %s\n" "$count" "$file"
+    done
+    start_monitors
   }
   individual_table_rules
+  if [[ "$track_flag" -eq 0 ]]; then
+	printf '%s\n' "${blue}═══════════════════════════════════════════════════════════════════════════════════${reset}"
+  fi
+      #echo -e "${red}--- NEW ALERTS SINCE LAST AUDIT ---${reset}"
+  if [[ -z "$last_view_ts" ]]; then
+    jq -r -s --arg last "$last_view_ts" '
+      map(select(.ts > ($last|tonumber))) | 
+      group_by(.ip) | .[] | 
+      select(length >= 5) | 
+      [.[] | .reason][0] + " for IP " + .[0].ip + " (" + (length|tostring) + " occurrences)"
+    ' "$monitor_ssh_file" | while read -r alert; do
+      echo -e "${yellow}[ALERT]${reset} $alert"
+    done
+  fi
+}
+view_guard_history() {
+  local ts ip act rea d_str
+  [[ ! -s "$monitor_history_file" ]] && echo "No history found." && return
+  printf "${blue}%s${reset}\n" \
+    "╔══════════════════╦═════════════════╦═══════════════════════╗" \
+    "║ ${yellow}TIMESTAMP${blue}        ║ ${yellow}IP${blue}              ║ ${yellow}ACTION${blue}                ║" \
+    "╠══════════════════╬═════════════════╬═══════════════════════╣"
+  tail -n 15 "$monitor_history_file" | while read -r line; do
+    ts=$(echo "$line" | jq -r '.ts')
+    ip=$(echo "$line" | jq -r '.ip')
+    act=$(echo "$line" | jq -r '.action')
+    rea=$(echo "$line" | jq -r '.reason')
+    d_str=$(date -d @"$ts" "+%m-%d %H:%M:%S")
+    printf "${blue}║${reset} %-16s ${blue}║${reset} %-15s ${blue}║${reset} %-21s ${blue}║${reset}\n" \
+      "$d_str" "$ip" "$act ($rea)"
+  done
+  printf "${blue}╚══════════════════╩═════════════════╩═══════════════════════╝${reset}\n"
+}
+add_fail2ban_jail() {
+  local name="$1" port="$2" maxretry="$3" bantime="$4"
+   cat <<EOF >> "$f2b_conf"
+[$name]
+enabled = true
+port    = $port
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = $maxretry
+bantime  = $bantime
+action   = iptables-multiport[name=$name, port="$port", protocol=tcp]
+           abuseipdb-report[name=$name]
+EOF
+  systemctl restart fail2ban
+  success "Jail '$name' added and Fail2Ban restarted."
+}
+setup_abuse_reporting() {
+  cat <<'EOF' > /etc/fail2ban/action.d/abuseipdb-report.conf
+[Definition]
+actionban = curl https://api.abuseipdb.com/api/v2/report \
+  --data-urlencode "ip=<ip>" \
+  --data-urlencode "categories=18,22" \
+  --data-urlencode "comment=Brute force detected by One-Click Rule-Engine Guard" \
+  -H "Key: $(cat /etc/one-click/rule-engine/guard/abuseipdb.key)" \
+  -H "Accept: application/json"
+EOF
+}
+view_global_banlist() {
+    printf "${blue}%s\n${reset}" \
+	  "╔═══════════════════════════════════════════════════════════════╗" \
+      "║ ${cyan}RuleEngine Guard${blue} + Fail2Ban ${magenta}Banlist${blue}                           ║" \
+      "╠══════════════════╦═════════════════╦══════════════╦═══════════╣" \
+      "║ SOURCE           ║ IP              ║ JAIL/REASON  ║ STATUS    ║" \
+      "╠══════════════════╬═════════════════╬══════════════╬═══════════╣"
+    fail2ban-client status sshd | grep "Banned IP list:" | sed 's/.*list://' | tr ' ' '\n' | grep -v '^$' | while read -r f2b_ip; do
+      printf "${blue}║ ${yellow}%-16s${blue} ║${reset} %-15s${blue} ║${reset} %-12s${blue} ║ ${red}%-9s${blue} ║${reset}\n" "Fail2Ban" "$f2b_ip" "sshd" "BANNED"
+    done
+    jq -r -s 'map(select(.action == "DROP" or .action == "BLOCKED")) | unique_by(.ip) | .[] | [.ip, .reason] | @tsv' "$monitor_history_file" 2>/dev/null | while IFS=$'\t' read -r g_ip g_reason; do
+	  g_reason="${g_reason:-Brute Force}"
+      printf "${blue}║ ${magenta}%-16s${blue} ║${reset} %-15s${blue} ║${reset} %-12s${blue} ║ ${red}%-9s${blue} ║${reset}\n" "RuleEngine" "$g_ip" "${g_reason:0:12}" "BANNED"
+    done
+    printf "${blue}╚══════════════════╩═════════════════╩══════════════╩═══════════╝${reset}\n"
+}
+check_ip_reputation() {
+  local ip key_file api_key response score usage country color
+  ip="$1"
+  key_file="/etc/one-click/rule-engine/guard/abuseipdb.key"
+  [[ ! -f "$key_file" ]] && echo "Error: API Key not set." && return
+  api_key=$(cat "$key_file")
+  info "${cyan}Querying AbuseIPDB for IP:${reset} $ip"
+  response=$(curl -sG https://api.abuseipdb.com/api/v2/check \
+    --data-urlencode "ipAddress=$ip" \
+    -H "Key: $api_key" \
+    -H "Accept: application/json")
+  score=$(echo "$response" | jq -r '.data.abuseConfidenceScore')
+  usage=$(echo "$response" | jq -r '.data.usageType // "Unknown"')
+  country=$(echo "$response" | jq -r '.data.countryCode // "??"')
+  color=$green
+  (( score > 20 )) && color=$yellow
+  (( score > 50 )) && color=$red
+  info "  > ${cyan}Country:${reset} $country" \
+    "  > ${cyan}Usage:${reset}   $usage" \
+    "  > ${cyan}Abuse Score:${reset} ${color}${score}%${reset}"
+  if (( score > 75 )); then
+    error "${red}Highly malicious source detected!${reset}"
+  fi
 }
 get_existing_rules() {
   local backend="$1"
@@ -2010,8 +2252,29 @@ parse_firewall_command() {
   chain="" 
   mode="-I" 
   table="filter" 
+  last_audit="/etc/one-click/rule-engine/guard/last_audit"
   del_line=""
   rule_lower="${rule,,}"
+  f2b_conf="/etc/fail2ban/jail.local"
+  abuse_conf="/etc/one-click/rule-engine/guard/abuseipdb.key"
+  guard_dir="/etc/one-click/rule-engine/guard/"
+  monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
+  monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
+  monitor_history_file="/etc/one-click/rule-engine/guard/history"
+  auto_mitigate=0  # Flag: 0 = passive, 1 = auto mitigation
+  mkdir -p "$guard_dir"
+  # ==== Guard Conf ====
+  guard_file="${guard_dir}/guard.conf"
+  load_config() {
+    [[ -f "$guard_file" ]] && source "$guard_file"
+  }
+  # ==== Collect AbuseIPDB Key ====
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+(set|key|set-abuse-key)[[:space:]]+([a-zA-Z0-9]+) ]]; then
+    echo "${BASH_REMATCH[2]}" > "$abuse_conf"
+    chmod 600 "$abuse_conf"
+    success "AbuseIPDB API Key stored securely."
+    exit 0
+  fi
   # ==== Add Sensitive Ports ====
   if [[ "$rule_lower" =~ ^sensitive: ]]; then
     load_sensitive_ports
@@ -2069,8 +2332,79 @@ parse_firewall_command() {
     success "Alias '$alias_name' updated. Total IPs: $(echo "$combined_list" | tr ',' ' ')"
     exit 0
   fi
+  # ==== Detect Guard Jail ====
+  # = Usage: audit jail [name] port [port] retry [count] =
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+jail[[:space:]]+([a-z0-9]+)[[:space:]]+port[[:space:]]+([0-9]+)[[:space:]]+retry[[:space:]]+([0-9]+) ]]; then
+    local j_name="${BASH_REMATCH[1]}"
+    local j_port="${BASH_REMATCH[2]}"
+    local j_retry="${BASH_REMATCH[3]}"
+    add_fail2ban_jail "$j_name" "$j_port" "$j_retry" "3600"
+    exit 0
+  fi
+  # ==== Detect Banlist ====
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+banlist ]]; then
+    view_global_banlist
+    exit 0
+  fi
+  # ==== Detect Lookup ====
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+lookup[[:space:]]+([0-9.]+) ]]; then
+    check_ip_reputation "${BASH_REMATCH[1]}"
+    exit 0
+  fi
+  # ==== Detect Guard Unblock ====
+  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(unblock|unlock|release)([[:space:]]+guard)?[[:space:]]+([0-9]+) ]]; then
+    local target_id="${BASH_REMATCH[4]}"
+    local target_ip=$(jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length] | @tsv' "$monitor_ssh_file" | sort -rnk2 | sed -n "${target_id}p" | awk '{print $1}')
+    if [[ -z "$target_ip" ]]; then
+      error "Invalid ID: $target_id"
+      exit 1
+    fi
+    $fw_bin -D INPUT -p tcp --dport 22 -s "$target_ip" -j DROP &>/dev/null
+    $fw_bin -D INPUT -s "$target_ip" -j DROP &>/dev/null
+    echo "{\"ts\":$(date +%s),\"ip\":\"$target_ip\",\"action\":\"UNBLOCKED\",\"reason\":\"Manual Override\"}" >> "$monitor_history_file"
+    success "IP $target_ip has been manually unblocked and history updated."
+    exit 0
+  fi
+  # ==== Detect Guard Block ====
+  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(delete|drop|block|reject)[[:space:]]+(guard[[:space:]]+)?([0-9]+)$ ]]; then
+    local target_id="${BASH_REMATCH[4]}"
+    local target_ip=$(jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length] | @tsv' "$monitor_ssh_file" | sort -rnk2 | sed -n "${target_id}p" | awk '{print $1}')
+    if [[ -z "$target_ip" ]]; then
+      error "Invalid Guard ID: $target_id. Check 'audit ssh' for valid IDs."
+      exit 1
+    fi
+    info "Mitigating Guard ID $target_id: Blocking IP $target_ip"
+    apply_block "$target_ip" "tcp" 22 "DROP" 3600 "$monitor_ssh_file"
+    success "IP $target_ip has been dropped and logged for 60 minutes."
+    exit 0
+  fi
+  # ==== Detect Guard History ====
+  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(guard[[:space:]]+)?history ]]; then
+    view_guard_history
+    exit 0
+  fi
+  # ==== Detect Audit ====
+  if [[ "$rule_lower" =~ ^audit$ ]]; then
+    guard_dir="/etc/one-click/rule-engine/guard/"
+    monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
+    monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
+    auto_mitigate=0  # Flag: 0 = passive, 1 = auto mitigation
+    mkdir -p "$guard_dir"
+    info "Starting Deep Traffic Intelligence Audit..."
+    local total_conns=$(ss -tun | grep -c "ESTAB")
+    echo -e "${cyan}Active Connections:${reset} $total_conns"
+    echo -e "${cyan}Top Listening Services:${reset}"
+    ss -ltpn | grep "LISTEN" | awk '{print $4}' | cut -d: -f2 | sort -n | uniq -c | awk '{print "  Port "$2" ("$1" instances)"}'
+    show_rules
+    exit 0
+  fi
+  # ==== Detect SSH Audit ====
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+ssh$ ]]; then
+    view_ssh_stats
+	exit 0
+  fi
   # ==== Detect Alias Management ====
-  if [[ "$rule_lower" =~ (show|list|display|view)[[:space:]]+(alias|aliases|names) ]]; then
+  if [[ "$rule_lower" =~ (list|display|view)[[:space:]]+(alias|aliases|names) ]]; then
     display_alias_ui
     exit 0
   fi
@@ -2148,7 +2482,7 @@ parse_firewall_command() {
     table="filter"
   fi
   # ==== Detect Control ====
-  if grep -Eqi "\b(list|show|open|display)\b" <<< "$rule_lower"; then
+  if grep -Eqi "[ \t]+(list|show|open|display)[ \t]+" <<< "$rule_lower"; then
     local view_mode="-L -n -v"
     local view_header="Table Listing"
     if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
@@ -2212,6 +2546,11 @@ parse_firewall_command() {
   fi
   # ==== Detect Audit ====
   if [[ "$rule_lower" =~ ^audit$ ]]; then
+    guard_dir="/etc/one-click/rule-engine/guard/"
+    monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
+    monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
+    auto_mitigate=0  # Flag: 0 = passive, 1 = auto mitigation
+    mkdir -p "$guard_dir"
     info "Starting Deep Traffic Intelligence Audit..."
     local total_conns=$(ss -tun | grep -c "ESTAB")
     echo -e "${cyan}Active Connections:${reset} $total_conns"
@@ -2219,6 +2558,11 @@ parse_firewall_command() {
     ss -ltpn | grep "LISTEN" | awk '{print $4}' | cut -d: -f2 | sort -n | uniq -c | awk '{print "  Port "$2" ("$1" instances)"}'
     show_rules
     exit 0
+  fi
+  # ==== Detect SSH Audit ====
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+ssh$ ]]; then
+    view_ssh_stats
+	exit 0
   fi
   # ==== Detect Action ====
   if grep -Eq "\b(drop|deny|block|stop|close|exclude)\b" <<< "$rule_lower"; then
@@ -2300,7 +2644,7 @@ parse_firewall_command() {
     proto="tcp"
   fi
   # ==== Detect and trap invalid IP ====
-  if [[ "$rule_lower" =~ ^(alias-create)[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
+  if [[ "$rule_lower" =~ ^\b(alias-create)\b[[:space:]]+([a-z0-9_-]+)[[:space:]]+?$ ]]; then
     local cmd_type="${BASH_REMATCH[1]}"
     local alias_name="${BASH_REMATCH[2]}"
     printf '%s\n' "${red}╔═════════════════════ [ ERROR ] ════════════════════╗${reset}" \
