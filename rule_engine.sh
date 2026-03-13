@@ -40,6 +40,7 @@ rule_engine() {
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
   mkdir -p "$engine_dir"
+  mkdir -p "${engine_dir}guard/"
   touch "$alias_file"
   # ==== Default Sensitive Ports (Remove from here) ====
   declare -A default_sensitive_ports=(
