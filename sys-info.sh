@@ -151,7 +151,7 @@ sys_info() {
     print_row "Dirty Wait" "$(awk '/^Dirty:/{print $2 $3}' <(cat /proc/meminfo))"
     print_section "===================== ${yellow}DISK HEALTH${blue} ==========================│"
     print_row "Disk Used" "$(awk '$NF == "/" {print $3" / "$2}' <(df -h))"
-    print_row "Disk IO" "$(awk '{for (i=1;i<NF;i++) if ($i=="%iowait") steal=i;}NR==4{ print $steal}' <(iostat -x 1 1))"
+    print_row "Disk IO" "$(awk '{for (i=1;i<=NF;i++) if ($i=="%iowait") iowait=(i-1);}NR==4{ print $iowait}' <(iostat -x 1 1))"
     printf "${blue}└──────────────────────┴──────────────────────────────────────┘${reset}\n"
   }
   spinner_frames=('-' '\' '|' '/')
