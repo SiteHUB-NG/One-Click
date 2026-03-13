@@ -127,10 +127,10 @@ grub_dir="$(
   fi
 )"
 EOF
-  # Backup partition table
+  # ==== Backup partition table ====
   sgdisk --backup="$out_path/layout.bin" "$disk"
   sfdisk -d "$disk" > "$out_path/partition_table.txt"
-  # Detect boot type
+  # ==== Detect boot type ====
   if [ -d /sys/firmware/efi ]; then
     echo "boot_type=UEFI" >> "$out_path/recovery_map.conf"
     esp=$(detect_esp) || die "No EFI System Partition found"
@@ -149,7 +149,6 @@ EOF
   info "Backing up /boot and GRUB configuration"
   mkdir -p "$out_path/boot"
   mkdir -p "$out_path/grub"
-  # --- /boot ---
   if mountpoint -q /boot; then
     rsync -aHAX --numeric-ids /boot/ "$out_path/boot/" \
       || die "/boot backup failed"
@@ -159,7 +158,6 @@ EOF
     rsync -aHAX --numeric-ids /boot/ "$out_path/boot/" || true
     echo "boot_backup=partial" >> "$out_path/recovery_map.conf"
   fi
-  # --- GRUB directories (grub or grub2) ---
   for grubdir in /boot/grub /boot/grub2; do
     if [[ -d "$grubdir" ]]; then
       rsync -aHAX --numeric-ids "$grubdir/" "$out_path/grub/$(basename "$grubdir")/" \
@@ -167,7 +165,6 @@ EOF
       echo "grub_dir=$(basename "$grubdir")" >> "$out_path/recovery_map.conf"
     fi
   done
-  # --- GRUB configuration files ---
   mkdir -p "$out_path/grub/etc"
   [[ -f /etc/default/grub ]] && \
     cp -a /etc/default/grub "$out_path/grub/etc/"
@@ -189,14 +186,11 @@ recovery_restore() {
   mkdir -p "$recovery_base"
   current_snapshot=""
   [[ -f "$recovery_config" ]] && source "$recovery_config"
-  # --- Explicit snapshot passed as argument ---
   if [[ -n "${1:-}" ]]; then
     snap_path="$1"
-  # --- Auto-load last snapshot ---
   elif [[ -n "${current_snapshot:-}" && -d "$current_snapshot" ]]; then
     snap_path="$current_snapshot"
   else
-    # --- Enumerate snapshots ---
     mapfile -t snapshots < <(ls -1d "$recovery_base"/*/ 2>/dev/null | sort)
     [[ ${#snapshots[@]} -eq 0 ]] && die "No recovery snapshots found"
     echo "Available snapshots:"
@@ -276,7 +270,7 @@ recovery_menu() {
       "[3]. Snapshot Directory" \
       "[4]. Configure Cron" \
       "[5]. Exit"
-    read -rp "${cyan}[USER]${reset} Select an option [1-6]: " backup_run
+    read -rp "${cyan}[USER]${reset} Select an option [1-5]: " backup_run
     case "$backup_run" in
       1) recovery_backup  ;;
       2) recovery_restore ;;
