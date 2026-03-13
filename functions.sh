@@ -2481,7 +2481,7 @@ parse_firewall_command() {
     table="filter"
   fi
   # ==== Detect Control ====
-  if grep -Eqi "[ \t]+(list|show|open|display)[ \t]+" <<< "$rule_lower"; then
+  if grep -Eqi "(^|[ ]+)(list|show|open|display)[ \t]?" <<< "$rule_lower"; then
     local view_mode="-L -n -v"
     local view_header="Table Listing"
     if grep -Eqi "\bnat\b" <<< "$rule_lower"; then
