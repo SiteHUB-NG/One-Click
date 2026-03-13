@@ -69,6 +69,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      audit lookup <IP>   Check an IPs reputation before acting on it. AbuseIPDB needs to be added beforehand." \
     "      audit banlist       View IPs that have been ban both by RuleEngine and Fail2ban." \
     "      audit jail <args>   Add a new jail '$(tput setaf 228)Usage: audit jail [name] port [port] retry [count]$(tput sgr0)'" \
+    "      audit scan          Run a lightweight IDS to scan binaries and files. Use '$(tput setaf 228)-y$(tput sgr0)' flag to skip prompts." \
+    "      audit scan --deep   Same as above with a deeper scan." \
     "      from                From source IP" \    
     "      to                  To destination IP " \
     "      $(tput smul)Protocols:$(tput rmul) " \
@@ -118,6 +120,7 @@ man_dir="/usr/local/share/man/man1/"
 tab_complete="/etc/bash_completion.d/one-click"
 tab_complete2="/usr/share/bash-completion/completions/one-click"
 one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
+cache_dir="/var/cache/one-click"
 # ==== Alt Mirror ====
 #one_click_1="https://as214354.network/one-click.1"
 manpage="${man_dir}one-click.1"
@@ -253,11 +256,11 @@ load_body() {
   now=$(date +%s)
   local cache_age=0
   if [[ ! -f "$cache_file" || $cache_age -gt $ttl ]]; then
-    # ==== Try and pull from a214354.network ====
+    # ==== Try and pull from Github ====
     if curl -fsSL --connect-timeout 5 --max-time 10 \
          "$url" -o "$cache_file.tmp" &> /dev/null; then
         mv -f "$cache_file.tmp" "$cache_file"
-    # ==== Try Github if primary fails ====
+    # ==== Try as214354 if primary fails ====
     elif [[ -n "$backup_url" ]] && \
          curl -fsSL --connect-timeout 5 --max-time 10 \
          "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
@@ -276,22 +279,24 @@ load_body() {
   source "$cache_file"
 }
 # ==== Load Without Calling ====
+# ==== IDS Scanner ====
+if [[ ! -f /var/cache/one-click/scanner.py ]]; then
+  curl -fsSL --connect-timeout 5 --max-time 10 "https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/scanner.py" -o "/var/cache/one-click/scanner.py" &> /dev/null
+fi
 # ==== Functions ====
 func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
 backup_func_url=""
 # ==== Alt Mirror ====
 #backup_func_url="https://as214354.network/functions.sh"
-func_cache_dir="/var/cache/one-click/"
-func_cache_file="${func_cache_dir:-}/functions.sh"
-load_body "$func_url" "$backup_func_url" "$func_cache_dir" "$func_cache_file"
+func_cache_file="${cache_dir:-}/functions.sh"
+load_body "$func_url" "$backup_func_url" "$cache_dir" "$func_cache_file"
 # ==== Cron Logic ====
 cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/cron.sh"
 backup_cron_url=""
 # ==== Alt Mirror ====
 #backup_cron_url="https://as214354.network/cron.sh"
-cron_cache_dir="/var/cache/one-click/"
-cron_cache_file="${cron_cache_dir}/cron.sh"
-load_body "$cron_url" "$backup_cron_url" "$cron_cache_dir" "$cron_cache_file"
+cron_cache_file="${cache_dir}/cron.sh"
+load_body "$cron_url" "$backup_cron_url" "$cache_dir" "$cron_cache_file"
 # ==== None Essential Modules ====
 # ==== Network Repair ====
 load_net_repair() {
@@ -299,7 +304,6 @@ load_net_repair() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/net-recovery.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/net-recovery.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -310,7 +314,6 @@ load_system() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/sys-info.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/sys-info.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -321,7 +324,6 @@ load_recovery() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/boot-recovery.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/boot-recovery.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -332,7 +334,6 @@ load_migrator() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/migrator.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/migrator.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -343,7 +344,6 @@ load_reinstall() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/os_reinstall.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/reinstall.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -354,7 +354,6 @@ load_backup() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/oc-backup.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/oc-backup.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -365,7 +364,6 @@ load_ocb() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/ocb.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/ocb.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
@@ -375,7 +373,6 @@ load_rule_engine() {
   local backup_url=""
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/rule_engine.sh"
-  local cache_dir="/var/cache/one-click"
   local cache_file="${cache_dir}/rule_engine.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
