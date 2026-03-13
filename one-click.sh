@@ -285,7 +285,7 @@ backup_scanner_url=""
 # ==== Alt Mirror ====
 #backup_scanner_url="https://as214354.network/scanner.py"
 scanner_cache_file="${cache_dir:-}/scanner.py"
-load_body "$func_url" "$backup_func_url" "$cache_dir" "$func_cache_file"
+load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
 # ==== Functions ====
 func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
 backup_func_url=""
