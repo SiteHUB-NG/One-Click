@@ -482,7 +482,7 @@ _one_click() {
     cmds["rule-engine:'sensitive-remove:"]=
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
-    cmds["rule-engine:audit"]=
+    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -507,7 +507,7 @@ _one_click() {
     cmds["engine:'sensitive-remove:"]=
     cmds["engine:'from"]=
     cmds["engine:'to"]=
-    cmds["engine:audit"]=
+    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["engine:--dry-run"]=""
     
     _complete_tree() {
@@ -591,7 +591,7 @@ _one_click() {
     cmds["rule-engine:'sensitive-remove:"]=
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
-    cmds["rule-engine:audit"]=
+    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw'"]=
@@ -618,6 +618,7 @@ _one_click() {
     cmds["engine:'from"]=
     cmds["engine:'to"]=
     cmds["engine:audit"]=
+    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["engine:--dry-run"]=""
     
     _complete_tree() {
