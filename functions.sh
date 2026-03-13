@@ -1899,22 +1899,22 @@ show_rules() {
 	  "  ▼───────┴──────────▼" \
       "  │ ${cyan}END OF TRAVERSAL${reset} │" \
       "  └──────────────────┘" 
-    printf '%s\n'  "${blue}═══════════════════════════════════════════════════════════════════════════════════╗${reset}" \
-      "${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} malicious packets today."
+    printf '%s\n'  "${blue}╔════════════════════════════════════════════════════════════════════════════════════╗${reset}" \
+      "${blue}║ ${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} packets today."
     if [[ "$total_blocked_pkts" -gt 1000 ]]; then
-      printf '%s\n' "${red}[CRITICAL]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
+      printf '${blue}║ %s\n' "${red}[CRITICAL]: High volume of blocks detected. Check logs for brute-force attempts.${reset}"
     fi
 	for file in "$monitor_ssh_file" "$monitor_ddos_file"; do
       [[ ! -f "$file" ]] && continue
       local count
       count=$(wc -l < "$file")
-      printf "${yellow}[AUDIT]:${reset} %s malicious $(basename $file) events recorded in %s\n" "$count" "$file"
+      printf "${blue}║ ${yellow}[AUDIT]:${reset} %s malicious $(basename $file) events recorded in %s\n" "$count" "$file"
     done
     start_monitors
   }
   individual_table_rules
   if [[ "$track_flag" -eq 0 ]]; then
-	printf '%s\n' "${blue}═══════════════════════════════════════════════════════════════════════════════════${reset}"
+	printf '%s\n' "${blue}╚════════════════════════════════════════════════════════════════════════════════════╝${reset}"
   fi
   if [[ -z "$last_view_ts" ]]; then
     jq -r -s --arg last "$last_view_ts" '
@@ -2365,16 +2365,28 @@ parse_firewall_command() {
     exit 0
   fi
   # ==== Detect Guard Block ====
-  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(delete|drop|block|reject)[[:space:]]+(guard[[:space:]]+)?([0-9]+)$ ]]; then
+  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(delete|drop|block|reject)[[:space:]]+(guard[[:space:]]+)?([0-9]+) ]]; then
     local target_id="${BASH_REMATCH[4]}"
+	local duration=3600
     local target_ip=$(jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length] | @tsv' "$monitor_ssh_file" | sort -rnk2 | sed -n "${target_id}p" | awk '{print $1}')
-    if [[ -z "$target_ip" ]]; then
+	if [[ -z "$target_ip" ]]; then
       error "Invalid Guard ID: $target_id. Check 'audit ssh' for valid IDs."
       exit 1
     fi
-    info "Mitigating Guard ID $target_id: Blocking IP $target_ip"
-    apply_block "$target_ip" "tcp" 22 "DROP" 3600 "$monitor_ssh_file"
-    success "IP $target_ip has been dropped and logged for 60 minutes."
+	info "Mitigating Guard ID $target_id: Blocking IP $target_ip"
+	if [[ "$rule_lower" =~ (dur=|duration=)([0-9]+) ]]; then
+      duration="${BASH_REMATCH[2]}"
+    fi
+	if [[ "$rule_lower" =~ (perm|permanent) ]]; then
+      duration=315360000 
+    fi
+	total_seconds="$duration"
+    h=$(( total_seconds / 3600 ))
+    m=$(( (total_seconds % 3600) / 60 ))
+    s=$(( total_seconds % 60 ))
+	convert_duration=$(printf "%02d Hour %02d Minutes %02d Seconds\n" $h $m $s)
+    apply_block "$target_ip" "tcp" 22 "DROP" "$duration" "$monitor_ssh_file"
+    success "IP $target_ip has been dropped and logged for $duration seconds ($convert_duration)."
     exit 0
   fi
   # ==== Detect Guard History ====
