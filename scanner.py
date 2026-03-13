@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+# ============================================================================ #
+# **************************  Migrator / OS Reinstallation multipurpose Tool.  #
+# *Written By Chike Egbuna * DD + Rsync Migrations/Backup modes are available. #
+# ************************** Incremental, full + dry backup options available  #
+# Server System status available for basic server performance insight + stats. #
+# Please note this tool will install numerous required dependencies automatic. #
+# Network repair script *************************** OS install feature use tool#
+# available fo DD where * ONE-CLICK MULTI TOOLBOX * reinstall by ~bin456789 to #
+# grub + initramfs need *************************** reinstall OS' over network #
+# reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
+# ============================================================================ #
+# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# ===== IDS Scanner ===== #
+import os, hashlib, pwd, json, shutil, subprocess, time, stat, argparse, socket
+from datetime import datetime
+# ==== Configuration ====
+backup_dir = "/etc/one-click/backup/guard"
+binaries_dir = os.path.join(backup_dir, "binaries")
+baseline_file = os.path.join(backup_dir, "system_baseline.json")
+quarantine_dir = os.path.join(backup_dir, "quarantine")
+log_file = "/var/log/one-click/system_scans.log"
+retention_days = 30
+protected_files = [
+    "/bin/bash", "/bin/login", "/bin/ps", "/bin/netstat",
+    "/usr/bin/top", "/usr/bin/sudo", "/usr/bin/ssh",
+    "/usr/sbin/sshd", "/usr/bin/find", "/usr/bin/ss", "/bin/ls"
+]
+critical_auth = ["/bin/login", "/usr/bin/passwd", "/bin/bash", "/usr/sbin/sshd"]
+monitor_dirs = ["/bin", "/usr/bin", "/usr/sbin", "/etc"]
+risk_zones = ["/tmp", "/dev/shm", "/var/tmp", "/var/www/", "/root", "/etc/ssh/", "/etc/passwd", "/etc/shadow", "/etc/pam"]
+reset, blue, yellow, green, red = "\033[0m", "\033[94m", "\033[93m", "\033[92m", "\033[91m"
+# ==== Display & Logging ==== 
+def display(msg, level="INFO"):
+    colors = {"INFO": blue, "WARN": yellow, "SUCCESS": green, "ALERT": red, "CRITICAL": red}
+    print(f"{colors.get(level, blue)}[{level}]{reset} {msg}")
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    with open(log_file, "a") as f:
+        f.write(f"[{datetime.now()}] [{level}] {msg}\n")
+def emit_event(event_type, data):
+    event = {"timestamp": int(time.time()), "type": event_type, "data": data}
+    print(json.dumps(event))
+# ==== Confirmation ====
+# ==== Confirmation Helper ====
+def confirm_action(prompt_text):
+    prompt = f"{yellow}[CONFIRM]{reset} {prompt_text} (y/n): "
+    while True:
+        choice = input(prompt).lower().strip()
+        if choice in ['y', 'yes']:
+            return True
+        if choice in ['n', 'no']:
+            display("Action cancelled by user.", "ERROR")
+            return False
+        print(f"{red}Please enter 'y' or 'n'.{reset}")
+# ==== Hashing ====
+def sha256_file(path):
+    if not os.path.exists(path):
+        return None
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except:
+        return None
+# ==== Permissions Check =====
+def check_permissions(path):
+    try:
+        st = os.stat(path)
+        if st.st_uid != 0:
+            display(f"{path} not owned by root", "CRITICAL")
+        if st.st_mode & stat.S_IWOTH:
+            display(f"{path} world writable", "CRITICAL")
+    except Exception as e:
+        display(f"Permission check failed for {path}: {e}", "WARN")
+# ==== Active Sessions ====
+def active_ssh_sessions():
+    try:
+        out = subprocess.check_output(["who"]).decode()
+        return "pts/" in out
+    except:
+        return False
+# ==== Quarantine ====
+def quarantine(path):
+    os.makedirs(quarantine_dir, exist_ok=True)
+    ts = int(time.time())
+    q_path = os.path.join(quarantine_dir, f"{os.path.basename(path)}.quarantine.{ts}")
+    try:
+        shutil.copy2(path, q_path)
+        os.utime(q_path, None)
+        display(f"Moved to quarantine {q_path}", "ALERT")
+    except Exception as e:
+        display(f"Quarantine failed for {path}: {e}", "WARN")
+# ==== Reinstall Packages ====
+def reinstall_from_package(path):
+    pkg_mgr = "apt-get" if shutil.which("apt-get") else "dnf" if shutil.which("dnf") else None
+    if not pkg_mgr:
+        display("No supported package manager found.", "CRITICAL")
+        return False
+    try:
+        pkg_name = None
+        if pkg_mgr == "apt-get":
+            pkg = subprocess.check_output(["dpkg", "-S", path]).decode()
+            pkg_name = pkg.split(":")[0].split()[0].strip()
+            subprocess.call(["apt-get", "update", "-qq"])
+            subprocess.call(["apt-get", "install", "--reinstall", "-y", pkg_name])
+        else:
+            pkg = subprocess.check_output(["rpm", "-qf", path]).decode()
+            pkg_name = pkg.strip()
+            subprocess.call(["dnf", "reinstall", "-y", pkg_name])
+        display(f"Package {pkg_name} reinstalled", "SUCCESS")
+        return True
+    except Exception as e:
+        display(f"Package reinstall failed for {path}: {e}", "CRITICAL")
+        return False
+# ==== Sanitize ====
+def sanitize_file(file_path, stored_hash):
+    if file_path in critical_auth and active_ssh_sessions():
+        display(f"Skipping auto-restoration of {file_path} due to active session", "WARN")
+        return False
+    if os.path.exists(file_path):
+        quarantine(file_path)
+    backup_path = os.path.join(binaries_dir, os.path.basename(file_path))
+    if os.path.exists(backup_path) and sha256_file(backup_path) == stored_hash:
+        try:
+            shutil.copy2(backup_path, file_path)
+            display(f"Restored {file_path} from local backup", "SUCCESS")
+            return True
+        except Exception as e:
+            display(f"Local restore failed: {e}", "WARN")
+    if not active_ssh_sessions():
+        return reinstall_from_package(file_path)
+    display(f"Could not safely restore {file_path}", "CRITICAL")
+    return False
+# ==== Cleanup ====
+def cleanup_quarantine():
+    if not os.path.exists(quarantine_dir):
+        return
+    now = time.time()
+    for f in os.listdir(quarantine_dir):
+        f_path = os.path.join(quarantine_dir, f)
+        try:
+            if os.stat(f_path).st_mtime < now - (retention_days * 86400):
+                os.remove(f_path)
+                display(f"Purged old quarantine file: {f}", "INFO")
+        except:
+            pass
+# ==== Discovery ====
+def scan_temp():
+    display("Performing deep temp folder scan...", "SUCCESS")
+    for zone in risk_zones:
+        display(f"Scanning zone: {zone}", "INFO")
+        for root, dirs, files in os.walk(zone, followlinks=True):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    msg = f"Scanning {p} ..."
+                    if os.access(p, os.X_OK):
+                        msg += " [EXECUTABLE]"
+                    display(msg, "INFO")
+                    if os.access(p, os.X_OK):
+                        display(f"Executable found: {p}", "ALERT")
+                    if f.startswith(".") and os.access(p, os.X_OK):
+                        display(f"Hidden executable found: {p}", "ALERT")
+                except Exception as e:
+                    display(f"Failed to scan {p}: {e}", "WARN")
+# ==== Deep Checks ====
+def rootkit_checks():
+    if os.path.exists("/etc/ld.so.preload"):
+        display("Possible LD_PRELOAD rootkit detected", "CRITICAL")
+def check_path():
+    path_env = os.environ.get("PATH", "")
+    for unsafe in ["/tmp", "/dev/shm", "/var/tmp"]:
+        if unsafe in path_env:
+            display(f"Unsafe PATH detected: {unsafe}", "CRITICAL")
+# ==== Cron Checks ====
+def check_cron_systemd():
+    cron_dirs = ["/etc/cron.d", "/var/spool/cron"]
+    for d in cron_dirs:
+        if os.path.exists(d):
+            for f in os.listdir(d):
+                display(f"Cron entry detected: {f}", "INFO")
+    systemd_path = "/etc/systemd/system"
+    if os.path.exists(systemd_path):
+        for f in os.listdir(systemd_path):
+            if f.endswith(".service"):
+                display(f"Systemd service: {f}", "INFO")
+# ==== Cron Automation ====
+def initialize_automation():
+    cron_path = "/etc/cron.d/one-click-scanner"
+    script_path = os.path.abspath(__file__)
+    # ==== Cron Runs Every Hour ====
+    cron_entry = f"0 * * * * root /usr/bin/python3 {script_path} --deep -y\n"
+    try:
+        if os.path.exists(cron_path):
+            subprocess.call(["chattr", "-i", cron_path], stderr=subprocess.DEVNULL)
+        with open(cron_path, "w") as f:
+            f.write(cron_entry)
+        os.chmod(cron_path, 0o644)
+        display(f"Automation established at {cron_path}", "SUCCESS")
+    except Exception as e:
+        display(f"Failed to initialize automation: {e}", "CRITICAL")
+# ==== SSH & SUID ====
+def check_ssh_keys():
+    for u in pwd.getpwall():
+        home = u.pw_dir
+        auth = os.path.join(home, ".ssh", "authorized_keys")
+        if os.path.exists(auth):
+            display(f"SSH key found: {auth}", "INFO")
+def check_suid():
+    for d in ["/bin","/usr/bin","/usr/sbin"]:
+        for root, dirs, files in os.walk(d):
+            for f in files:
+                p = os.path.join(root,f)
+                try:
+                    st = os.stat(p)
+                    if st.st_mode & stat.S_ISUID:
+                        display(f"SUID binary: {p}", "INFO")
+                except:
+                    pass
+# ==== Listeners ====
+def check_ports():
+    try:
+        out = subprocess.check_output(["ss","-tuln"]).decode()
+        display("Listening ports detected", "INFO")
+    except:
+        pass
+# ==== File Integrity ====
+def check_integrity(baseline):
+    for f in protected_files:
+        check_permissions(f)
+        current_hash = sha256_file(f)
+        stored_hash = baseline["hashes"].get(f)
+        if current_hash != stored_hash:
+            display(f"Integrity failure: {f}", "CRITICAL")
+            emit_event("binary_integrity_failure", {"file": f})
+            sanitize_file(f, stored_hash)
+        else:
+            display(f"Verified {f}", "SUCCESS")
+# ==== Baseline ====
+def create_baseline():
+    os.makedirs(backup_dir, exist_ok=True)
+    os.makedirs(quarantine_dir, exist_ok=True)
+    os.makedirs(binaries_dir, exist_ok=True)
+    hashes = {}
+    display(f"Starting baseline creation. Scanning directories: {', '.join(monitor_dirs)}", "INFO")
+    for d in monitor_dirs:
+        for root, dirs, files in os.walk(d):
+            if os.path.abspath(root).startswith(os.path.abspath(backup_dir)):
+                continue
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    h = sha256_file(p)
+                    if h:
+                        hashes[p] = h
+                        shutil.copy2(p, os.path.join(binaries_dir, os.path.basename(p)))
+                        display(f"Hashed and backed up: {p}", "INFO")
+                except Exception as e:
+                    display(f"Failed to process {p}: {e}", "WARN")
+    users = {u.pw_name: u.pw_uid for u in pwd.getpwall()}
+    with open(baseline_file, "w") as f:
+        json.dump({"hashes": hashes, "users": users}, f, indent=4)
+    display(f"Baseline successfully created at {baseline_file}", "SUCCESS")
+    try:
+        subprocess.call(["chattr","+i",baseline_file])
+        display("Baseline file locked with chattr +i", "INFO")
+    except Exception as e:
+        display(f"Failed to lock baseline file: {e}", "WARN")
+# ==== Logical Scan ====
+def scan(deep=False):
+    if not os.path.exists(baseline_file):
+        display("Baseline missing. Run with --init first", "CRITICAL")
+        return
+    with open(baseline_file) as f:
+        baseline = json.load(f)
+    display("--- Scan Initiated ---", "INFO")
+    cleanup_quarantine()
+    check_path()
+    rootkit_checks()
+    check_cron_systemd()
+    check_ssh_keys()
+    check_ports()
+    check_suid()
+    check_integrity(baseline)
+    if deep:
+        scan_temp()
+# ==== Main Scan ====
+if __name__=="__main__":
+    if os.getuid()!=0:
+        print(f"{red}[ERROR]{reset} Root required.")
+        exit()
+    print(f"""{yellow}
+==============================
+ONE-CLICK SYSTEM IDS SCANNER
+==============================
+This is a lightweight Linux Host Intrusion Detection System (HIDS).
+It will perform the following actions:
+
+- Check system binaries for integrity
+- Quarantine suspicious files
+- Attempt safe self-healing of critical binaries
+- Check active SSH sessions to avoid lockouts
+- Inspect cron/systemd persistence
+- Detect SUID binaries and listening ports
+- Optionally perform deep temp folder scans
+- Maintain a baseline for future comparisons
+
+All actions are logged at {log_file}.
+Quarantined files will be stored in {quarantine_dir}.
+Backups of protected binaries are stored in {binaries_dir}.
+{reset}
+""")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--init", action="store_true")
+    parser.add_argument("--deep", action="store_true")
+    parser.add_argument("--yes", "-y", action="store_true", help="Proceed without confirmation")
+    args = parser.parse_args()
+    if not args.yes:
+        action_desc = "initialize baseline (this modifies/creates files)" if args.init else "start system scan"
+        if not confirm_action(f"Do you wish to proceed with {action_desc}?"):
+            sys.exit(0)
+    if args.init:
+        if os.path.exists(baseline_file):
+            try:
+                ts = os.path.getmtime(baseline_file)
+                created_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                created_str = "unknown"
+            msg = f"Baseline already exists at {baseline_file} (created/modified: {created_str}). Cannot initialize again."
+            display(msg, "WARN")
+        else:
+            display("Creating baseline. This may take several minutes...", "INFO")
+            create_baseline()
+            if args.yes or confirm_action("Would you like to schedule this scan to run hourly?"):
+                initialize_automation()
+            display("Cron job successfully configured.", "SUCCESS")
+            display("Baseline creation complete. You can now run scans with --deep if desired.", "SUCCESS")
+    else:
+        display("Starting system scan...", "INFO")
+        scan(deep=args.deep)
+        display("Scan complete. Review log and events above.", "SUCCESS")
