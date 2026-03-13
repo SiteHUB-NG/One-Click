@@ -61,7 +61,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      audit               Visual inspection of active rules, drops and intrusion attempts." \
     "      audit ssh           View Brute Force attempts on port 22 with a count of attempts, the usernames tried, IP and last seen." \
     "      audit block <ID>    Drop brute force detected users. ID must be taken from the '$(tput setaf 228)audit ssh$(tput sgr0)' table" \
-    "      audit block ID perm Rather than a 60 minute block, this will ban the IP permanently." \
+    "            dur=N         Used to set a custom durination for lockout in conjunction with the above command, e.g '$(tput setaf 228)audit block ID dur=N$(tput sgr0)'." \
+    "      audit block ID perm Rather than a 60 minute block or a custom timed block (with dur=N), this will ban the IP permanently." \
     "      audit unblock <ID>  Revert the blocking of detected brute force IP." \
     "      audit history       View persisted history of brute force users who have has action taken against them." \
     "      audit key <KEY>     Used to integrate reporting and banning of IPs with AbuseIPDB. Insert AbuseIPDB API key only with this command." \
