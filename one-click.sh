@@ -280,9 +280,12 @@ load_body() {
 }
 # ==== Load Without Calling ====
 # ==== IDS Scanner ====
-if [[ ! -f /var/cache/one-click/scanner.py ]]; then
-  curl -fsSL --connect-timeout 5 --max-time 10 "https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/scanner.py" -o "/var/cache/one-click/scanner.py" &> /dev/null
-fi
+scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/scanner.py"
+backup_scanner_url=""
+# ==== Alt Mirror ====
+#backup_scanner_url="https://as214354.network/scanner.py"
+scanner_cache_file="${cache_dir:-}/scanner.py"
+load_body "$func_url" "$backup_func_url" "$cache_dir" "$func_cache_file"
 # ==== Functions ====
 func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
 backup_func_url=""
