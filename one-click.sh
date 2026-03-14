@@ -822,12 +822,13 @@ if [[ $# -gt 0 ]]; then
         read -rp "${cyan}Are you sure? ${yellow}[y|n]:${reset} " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
+          python3 /var/cache/one-click/scanner.py --uninstall
           if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
-            rm -rf "$log_dir" "$base" "$manpage" "$tab_complete" "/var/cache/one-click" "$(command -v one-click)"
+            rm -rf "$base" "$manpage" "$tab_complete" "/var/cache/one-click" "$(command -v one-click)"
           elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
-            rm -rf "$log_dir" "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
+            rm -rf "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
           fi
-          rm -rf "$log_dir" "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
+          rm -rf "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
           printf "${green}[SUCCESS]${reset}%s\n" "One-Click has been uninstalled."
           complete -r one-click
           unset -f _one-click
