@@ -1861,7 +1861,8 @@ show_rules() {
   total_blocked_pkts=0
   total_blocked_bytes=0
   clean_pkts=0
-  local track_flag=0 
+  local track_flag=0
+  local cnt=1
   last_view_ts=$(cat "$last_audit" 2>/dev/null || echo 0)
   individual_table_rules() {
     if command -v nft >/dev/null; then
@@ -1877,22 +1878,26 @@ show_rules() {
         while read -r line; do
 		  [[ -z "$line" || "$line" == "{" || "$line" == "}" ]] && continue
           color=$reset
-          [[ "$line" == *"accept"* ]] && color=$green
-          [[ "$line" == *"drop"* || "$line" == *"reject"* ]] && color=$red
-          [[ "$line" == *"log"* ]] && color=$yellow
+          [[ "$line" == *"accept"* ]] && color="${green}ACCEPT${reset}"
+          [[ "$line" == *"drop"* || "$line" == *"reject"* ]] && color="${red}REJECT${reset}"
+          [[ "$line" == *"log"* ]] && color="${yellow}RETURN${reset}"
 		  p_count=0
+		  current_pkts=0
           if [[ "$line" == *"packets"* ]]; then
             p_count=$(echo "$line" | grep -oP 'packets \K[0-9]+')
-            (( total_blocked_pkts += ${p_count:-0} )) || true
+			current_pkts=${p_count:-0}
+            (( total_blocked_pkts += current_pkts )) || true
           fi
           if [[ "$line" == *"reject"* || "$line" == *"drop"* ]]; then
-            printf "          │    └── %b%s%b\n" "$color" "$(echo "$line" | sed 's/^[ \t]*//')" "$reset"
-          fi
+            printf "          │    └── [${cnt}] $current_pkts pkts ▶ %b%s%b\n" "$color " "$(echo "$line" | sed 's/^[ \t]*//')" "$reset"
+            ((cnt++))
+		  fi
           if [[ "$line" == *"@addr-set"* ]]; then
             local set_name=$(echo "$line" | grep -oP '@\K[a-zA-Z0-9_-]+')
              ips=$(nft list set "$family" "$table_name" "$set_name" 2>/dev/null | grep -oP '(\d{1,3}\.){3}\d{1,3}')
              for ip in $ips; do
-               printf "          │    └── ${red}Banned IP:${reset} %s\n" "$ip"
+               printf "          │    └── [${cnt}] $current_pkts pkts ▶ ${red}Banned IP:${reset} %s\n" "$ip"
+			   ((cnt++))
              done
           fi
         done <<< "$table_output"
@@ -1930,16 +1935,28 @@ show_rules() {
       done
     done
     printf '%s\n' "  ▼───────┴──────────▼" "  │ END OF TRAVERSAL │" "  └──────────────────┘" 
-    printf '%s\n' "${blue}╔════════════════════════════════════════════════════════════════════════════════════╗${reset}" \
-      "${blue}║ ${yellow}[AUDIT]:${reset} Your security rules have intercepted ${red}${total_blocked_pkts}${reset} packets today."
+    width=82
+    printf "${blue}╔%s╗${reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
+    local audit_line="[AUDIT]: Your security rules intercepted ${total_blocked_pkts} packets today."
+    local clean_audit=$(echo -e "$audit_line" | sed "s/\x1B\[[0-9;]*[mK]//g")
+    local padding=$((width - ${#clean_audit} - 1))
+    printf "${blue}║ ${yellow}[AUDIT]:${reset} Your security rules intercepted ${red}${total_blocked_pkts}${reset} packets today.%${padding}s${blue}║${reset}\n" ""
     for file in "$monitor_ssh_file" "$monitor_ddos_file"; do
       [[ ! -f "$file" ]] && continue
-      printf "${blue}║ ${yellow}[AUDIT]:${reset} %s malicious $(basename "$file") events recorded.\n" "$(wc -l < "$file")"
+      local count=$(wc -l < "$file")
+      local fname=$(basename "$file")
+      local file_line="[AUDIT]: $count malicious $fname events recorded."
+      local clean_file=$(echo "$file_line")
+      local f_padding=$((width - ${#clean_file} - 1))
+      printf "${blue}║ ${yellow}[AUDIT]:${reset} %s malicious ${cyan}%s${reset} events recorded.%${f_padding}s${blue}║${reset}\n" \
+        "$count" "$fname" ""
     done
     command -v start_monitors >/dev/null && start_monitors
   }
   individual_table_rules
-  [[ "$track_flag" -eq 0 ]] && printf '%s\n' "${blue}╚════════════════════════════════════════════════════════════════════════════════════╝${reset}"
+  if [[ "$track_flag" -eq 0 ]]; then
+    printf "${blue}╚%s╝${reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
+  fi
 }
 view_guard_history() {
   local ts ip act rea d_str
