@@ -1951,6 +1951,13 @@ show_rules() {
       printf "${blue}║ ${yellow}[AUDIT]:${reset} %s malicious ${cyan}%s${reset} events recorded.%${f_padding}s${blue}║${reset}\n" \
         "$count" "$fname" ""
     done
+	if [[ -f "/var/log/one-click/events.json" ]]; then
+	date_time=$(grep "integrity_mismatch" /var/log/one-click/system_events.log | jq -r '.datetime + " -> " + .data.file')
+    crit_count=$(grep -c "integrity_mismatch" /var/log/one-click/events.json)
+      if [[ $crit_count -gt 0 ]]; then
+        warn "${red}SCANNER ALERT:${yellow} ${crit_count} binary tampering events detected!${reset}"
+      fi
+    fi
     command -v start_monitors >/dev/null && start_monitors
   }
   individual_table_rules
@@ -2701,8 +2708,10 @@ parse_firewall_command() {
     done
     if grep -Eqi "\b(ipv6|ip6tables)\b" <<< "$rule_lower"; then
       fw_bin="ip6tables"
+	  nf_bin="ip6"
     else
       fw_bin="iptables"
+	  nf_bin="ip"
     fi
     if grep -Eqi "\ball\b" <<< "$rule_lower"; then
       info "Flushing all tables: ${tables_to_flush[*]} ($fw_bin)"
