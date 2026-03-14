@@ -880,7 +880,7 @@ if [[ $# -gt 0 ]]; then
         "  --dry-run               Check the effect of rules before globally applying" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
-        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool"
+        "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
         exit 1
       ;;
   esac
