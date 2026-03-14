@@ -14,10 +14,28 @@
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 rule_engine() {
+  if ! systemctl is-active --quiet firewalld; then
+    fail2ban_failed=true
+  else
+    fail2ban_failed=false
+  fi
+  if [[ -f "/var/log/auth.log" || -f "/var/log/secure" ]]; then
+    logs_exist=true
+  else
+    logs_exist=false
+  fi
   if [[ "$pkg_mgr" == "apt" ]]; then
+    if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
+      apt-get -y install rsyslog &> /dev/null
+      systemctl enable --now rsyslog &> /dev/null
+    fi
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
   elif [[ "$pkg_mgr" == "dnf" ]]; then
+    if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
+      dnf -y install rsyslog &> /dev/null
+      systemctl enable --now rsyslog &> /dev/null
+    fi
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
   fi
