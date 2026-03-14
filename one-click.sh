@@ -71,7 +71,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      audit jail <args>   Add a new jail '$(tput setaf 228)Usage: audit jail [name] port [port] retry [count]$(tput sgr0)'" \
     "      audit scan          Run a lightweight IDS to scan binaries and files. Use '$(tput setaf 228)-y$(tput sgr0)' flag to skip prompts." \
     "      audit scan --deep   Same as above with a deeper scan." \
-    "      from                From source IP" \    
+    "      from                From source IP" \
     "      to                  To destination IP " \
     "      $(tput smul)Protocols:$(tput rmul) " \
     "      tcp                 TCP Traffic is the deafult for most chains" \
