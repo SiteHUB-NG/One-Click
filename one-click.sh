@@ -276,7 +276,9 @@ load_body() {
   # ==== Use cache if both mirrors unavailable ====
   [[ -f "$cache_file" ]] || die "Backup module missing after load attempt"
   sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$cache_file"
-  source "$cache_file"
+  if [[ ! "${cache_file/*.}" == "py" ]]; then
+    source "$cache_file"
+  fi
 }
 # ==== Load Without Calling ====
 # ==== IDS Scanner ====
