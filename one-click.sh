@@ -29,68 +29,109 @@ path="$(realpath "$0")"
 # ==== Help Menu ====
 if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   printf '%s\n' \
-    "$(tput smul)Usage:$(tput rmul) $(tput setaf 11)one-click$(tput sgr 0) $(tput setaf 4)[ARG]$(tput sgr 0)" \
-    " " "$(tput smul)Options:$(tput rmul)                $(tput smul)Description$(tput rmul)" \
-    "  reinstall               OS reinstallation" \
-    "  backup                  Backup with rsync + rclone" \
-    "  bench                   Benchmarking tool automates the execution of tests" \
-    "  (engine|rule-engine)    Converts natural language into iptables commands. RuleEngine is an atomic firewall wrapper that supports transaction commits with a self healing 10 second rollback if confirmation is not received." \
-    "      $(tput smul)subcommands:$(tput rmul)        Subcommands are delimited by $(tput setaf 373)and$(tput sgr 0) and $(tput setaf 373),$(tput sgr 0)(comma) can be chained e.g '$(tput setaf 228)allow udp port 100 and reject 200 output and tcp 300$(tput sgr0)'." \
-    "      --dry-run           Show what commands would be executed without applying them." \
-    "      (open|show)<alias>? Opens firewall table view. Can optionally be extended by specifying the $(tput setaf 228)table arg$(tput sgr0) or with the '$(tput setaf 228)all$(tput sgr0)' flag." \
-    "      flush <table>       Flush rules in specified table e.g '$(tput setaf 228)flush mangle$(tput sgr0)'." \
-    "      flush all           Flush all tables e.g '$(tput setaf 228)one-click firewall flush all$(tput sgr0)'." \
-    "      (backup|save)       Create a backup file of the firewall configuration e.g '$(tput setaf 228)one-click engine backup$(tput sgr0)'." \
-    "      restore             Restore firewall configuration from an available backup e.g '$(tput setaf 228)one-click engine restore$(tput sgr0)'." \
-    "      allow <arg>         (ACCEPT) Open ports e.g '$(tput setaf 228)allow 443$(tput sgr0)' or  '$(tput setaf 228)allow apache$(tput sgr0)' to accept packets on ports 80 and 443" \
-    "      (deny|drop) <arg>   (DROP) Drop packets e.g '$(tput setaf 228)deny https$(tput sgr0)' or '$(tput setaf 228)close smtp$(tput sgr0)' or '$(tput setaf 228)drop smtp$(tput sgr0)'" \
-    "      (reject|decline)    (REJECT) Reject packets e.g '$(tput setaf 228)bounce https$(tput sgr0)' or '$(tput setaf 228)reject 22$(tput sgr0)'" \
-    "      (delete|remove)     (DELETE) Delete rule entries from tables, firewall backups and alias mapping e.g '$(tput setaf 228)remove line 3 nat$(tput sgr0)' or '$(tput setaf 228) delete firewall$(tput sgr0)' or '$(tput setaf 228) delete alias$(tput sgr0)'. Use '$(tput setaf 228)open$(tput sgr0)' command first when removing firewall tables to know the exact line number." \
-    "      (mask|hide)         (MASQUERADE) e.g 'hide from 1.1.1.1'" \
-    "      enable (icmp|echo)  Enable ICMP protocol e.g '$(tput setaf 228)allow enable echo$(tput sgr0)'" \
-    "      disable (icmp|echo) Disable ICMP protocol e.g '$(tput setaf 228)disable icmp$(tput sgr0)'" \
-    "      raw: <iptables cmd> Enter raw commands for extended functionality" \
-    "      alias-create        The alias-create command allows you to create custom aliases for IP addresses. Instead of typing a long string of numbers every time, you can give an IP (or a group of IPs) a name like office, home, or blacklist e.g '$(tput setaf 228)one-click engine 'include drop_list 92.23.34.56 18.23.45.54 1.23.1.21 2.1.3.22$(tput sgr 0)' and use it with e.g '$(tput setaf 228)one-click engine 'drop ssh from drop_list and allow ssh from office$(tput sgr 0)'" \
-    "      alias-append        Add additional IPs mapped to aliases to extend batch processing functionality. Key alias must already exist else use the alias-create command first." \
-    "      alias-prune         Remove IPs from an aliases array e.g '$(tput setaf 228)alias-prune home 1.2.3.4$(tput sgr0)'" \
-    "      multiport           Multiple Ports e.g '$(tput setaf 228)bounce https multiport 50 556 4000$(tput sgr0)'" \
-    "      range               A range of ports e.g '$(tput setaf 228)range 1000-2000$(tput sgr0)'" \
-    "      sensitive:          Add ports to the sensitive list to be alerted before carrying out actions on them e.g '$(tput setaf 228)sensitive: 3306 8080 8443$(tput sgr0)'." \
-    "      sensitive-list      List all of the ports in the sensitive list." \
-    "      sensitive-remove:   Remove ports from the sensitive list" \
-    "      audit               Visual inspection of active rules, drops and intrusion attempts." \
-    "      audit ssh           View Brute Force attempts on port 22 with a count of attempts, the usernames tried, IP and last seen." \
-    "      audit block <ID>    Drop brute force detected users. ID must be taken from the '$(tput setaf 228)audit ssh$(tput sgr0)' table" \
-    "            dur=N         Used to set a custom durination for lockout in conjunction with the above command, e.g '$(tput setaf 228)audit block ID dur=N$(tput sgr0)'." \
-    "      audit block ID perm Rather than a 60 minute block or a custom timed block (with dur=N), this will ban the IP permanently." \
-    "      audit unblock <ID>  Revert the blocking of detected brute force IP." \
-    "      audit history       View persisted history of brute force users who have has action taken against them." \
-    "      audit key <KEY>     Used to integrate reporting and banning of IPs with AbuseIPDB. Insert AbuseIPDB API key only with this command." \
-    "      audit lookup <IP>   Check an IPs reputation before acting on it. AbuseIPDB needs to be added beforehand." \
-    "      audit banlist       View IPs that have been ban both by RuleEngine and Fail2ban." \
-    "      audit jail <args>   Add a new jail '$(tput setaf 228)Usage: audit jail [name] port [port] retry [count]$(tput sgr0)'" \
-    "      audit scan          Run a lightweight IDS to scan binaries and files. Use '$(tput setaf 228)-y$(tput sgr0)' flag to skip prompts." \
-    "      audit scan --deep   Same as above with a deeper scan." \
-    "      from                From source IP" \
-    "      to                  To destination IP " \
-    "      $(tput smul)Protocols:$(tput rmul) " \
-    "      tcp                 TCP Traffic is the deafult for most chains" \
-    "      udp                 UDP Traffic '$(tput setaf 228)allow udp port 100$(tput sgr0)'" \
-    "  migrator                System migration tool. Rsync + DD options." \
-    "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
-    "  repair                  Repair network (Includes snapshots and backup of network files)" \
-    "  rule-engine             Converts human-readable commands into iptables commands" \
-    "  (system|sys-info)       System Information" \
-    "  (logs|log-browser)      System Log File Browswer" \
-    "  cron                    Configure a cron job" \
-    "  help                    Show this help message" \
-    "  uninstall               Remove one-click and all associated files and configurations." \
-    "  --version               Check version" \
-    "  --dry-run               Check the effect of rules before globally applying" \
-    " " "$(tput smul)Examples:$(tput rmul)" \
-    "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
-    "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" 
-  exit 0
+    "$(tput bold)Usage:$(tput sgr0) $(tput setaf 11)one-click$(tput sgr0) $(tput setaf 4)<command> [options]$(tput sgr0)" "" \
+    "$(tput bold)Global Commands$(tput sgr0)" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  backup                  Backup or restore system data using rsync + rclone." \
+    "  bench                   Run automated system benchmarks (CPU, disk, network)." \
+    "  cron                    Create or modify scheduled cron jobs." \
+    "  engine | rule-engine    Natural-language firewall interface for iptables." \
+    "  help                    Display this help menu." \
+    "  logs | log-browser      Browse and inspect system log files interactively." \
+    "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
+    "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
+    "  reinstall               Perform a full operating system reinstallation." \
+    "  repair                  Diagnose and repair network configuration issues." \
+    "  system | sys-info       Display detailed system information." \
+    "  uninstall               Remove one-click and all associated files." \
+    "  --version               Display installed version information." "" \
+    "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
+    "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  engine | rule-engine    Natural-language firewall interface for iptables." \
+    "                          RuleEngine performs atomic firewall transactions" \
+    "                          with an automatic rollback if confirmation is not" \
+    "                          received within 10 seconds." "" \
+    "$(tput smul)$(tput bold)General Operations$(tput sgr0)$(tput rmul)" \
+    "  --dry-run               Preview the firewall rules that would be generated" \
+    "                          without applying them to the system." \
+    "  open [table|all]        Display firewall rules in a readable table format." \
+    "                          Optionally specify a table or use 'all'." \
+    "  flush <table>           Remove all rules from a specific firewall table." \
+    "                          Example: one-click engine flush mangle" \
+    "  flush all               Remove rules from every firewall table." \
+    "  backup | save           Create a backup of the current firewall configuration." \
+    "  restore                 Restore firewall rules from a previously saved backup." \
+    "  raw <iptables cmd>      Execute raw iptables commands directly." \
+    "                          Useful for advanced or unsupported rules." "" \
+    "$(tput smul)$(tput bold)Traffic Rules$(tput sgr0)$(tput rmul)" \
+    "  allow <arg>             Accept incoming traffic." \
+    "                          Example: allow 443" \
+    "                                   allow apache" \
+    "  deny | drop <arg>       Silently discard packets matching the rule." \
+    "                          Example: drop smtp" \
+    "  reject | decline <arg>  Reject packets with a response notification." \
+    "                          Example: reject 22" \
+    "  delete | remove <arg>   Remove rules, firewall backups, or aliases." \
+    "                          Example: remove line 3 nat" \
+    "                                   delete firewall" \
+    "  mask | hide             Enable NAT masquerading." \
+    "                          Example: hide from 1.1.1.1" \
+    "  from <source>           Specify the source IP, CIDR range, or alias." \
+    "                          Example: allow ssh from office" \
+    "  to <destination>        Specify the destination IP or interface." \
+    "                          Example: allow 443 to 10.0.0.5" "" \
+    "$(tput smul)$(tput bold)Protocol Control$(tput sgr0)$(tput rmul)" \
+    "  enable icmp | echo      Enable ICMP echo requests (ping)." \
+    "  disable icmp | echo     Disable ICMP echo requests." \
+    "  tcp                     Apply rule to TCP traffic (default protocol)." \
+    "  udp                     Apply rule to UDP traffic." \
+    "                          Example: allow udp port 100" "" \
+    "$(tput smul)$(tput bold)Port Handling$(tput sgr0)$(tput rmul)" \
+    "  multiport <ports...>    Apply rule to multiple ports simultaneously." \
+    "                          Example: bounce https multiport 50 556 4000" "" \
+    "  range <start-end>       Apply rule across a port range." \
+    "                          Example: range 1000-2000" "" \
+    "$(tput smul)$(tput bold)IP Aliases$(tput sgr0)$(tput rmul)" \
+    "  alias-create            Create named IP groups for easier rule management." \
+    "                          Example: alias-create office 1.2.3.4 5.6.7.8" \
+    "  alias-append            Add additional IPs to an existing alias." \
+    "  alias-prune             Remove specific IPs from an alias." "" \
+    "$(tput smul)$(tput bold)Sensitive Ports$(tput sgr0)$(tput rmul)" \
+    "  sensitive <ports...>    Mark ports as sensitive to trigger confirmation" \
+    "                          before firewall changes." \
+    "  sensitive-list          Display all ports currently marked sensitive." \
+    "  sensitive-remove        Remove ports from the sensitive list." "" \
+    "$(tput smul)$(tput bold)Security Auditing$(tput sgr0)$(tput rmul)" \
+    "  audit                   Inspect active firewall rules, drops and activity." \
+    "  audit ssh               Display detected SSH brute-force attempts," \
+    "                          including usernames tried, IP address and count." "" \
+    "  audit block <ID>        Temporarily block an attacker identified in audit." \
+    "      dur=N               Optional duration (minutes) for the block." "" \
+    "  audit block <ID> perm   Permanently ban the IP address." \
+    "  audit unblock <ID>      Remove a previously applied block." \
+    "  audit history           View historical actions taken against attackers." \
+    "  audit banlist           Show combined ban list from RuleEngine and Fail2Ban." "" \
+    "$(tput smul)$(tput bold)AbuseIPDB Integration$(tput sgr0)$(tput rmul)" \
+    "  audit key <APIKEY>      Configure AbuseIPDB API key for IP reputation checks." \
+    "  audit lookup <IP>       Query AbuseIPDB to check reputation of an IP." "" \
+    "$(tput smul)$(tput bold)Intrusion Detection$(tput sgr0)$(tput rmul)" \
+    "  audit scan              Run a lightweight file integrity and malware scan." \
+    "  audit scan --deep       Perform a deeper filesystem inspection." "" \
+    "$(tput bold)Examples$(tput sgr0)" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  one-click repair" \
+    "      Diagnose and repair networking." "" \
+    "  one-click backup" \
+    "      Launch backup and restore interface." "" \
+    "  one-click engine allow 443" \
+    "      Allow HTTPS traffic." "" \
+    "  one-click engine 'allow udp port 100 and reject tcp 300'" \
+    "      Chain multiple firewall rules in a single command." "" \
+    "  one-click engine 'allow ssh from office and deny ssh from blacklist'" \
+    "      Combine alias groups with rule chaining." "" \
+    "  one-click engine 'audit scan --init'" "" 
+exit 0
 fi
 # ==== Confirm Package Manager ====
 if command -v dnf >/dev/null 2>&1; then
@@ -845,12 +886,13 @@ if [[ $# -gt 0 ]]; then
     # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ##
     *)
       if [[ "$1" == "setup" ]]; then
+        exit_code=0
         printf '%s\n' \
-"  ___                    ____ _ _      _    
- / _ \ _ __   ___       / ___| (_) ___| | __
-| | | | '_ \ / _ \_____| |   | | |/ __| |/ /
-| |_| | | | |  __/_____| |___| | | (__|   < 
- \___/|_| |_|\___|      \____|_|_|\___|_|\\_\\
+"  ___                 ____ _ _      _    
+ / _ \ _ __   ___    / ___| (_) ___| | __
+| | | | '_ \ / _ \  | |   | | |/ __| |/ /
+| |_| | | | |  __/  | |___| | | (__|   < 
+ \___/|_| |_|\___|   \____|_|_|\___|_|\\_\\
                                             
  ___           _        _ _          _ 
 |_ _|_ __  ___| |_ __ _| | | ___  __| |
@@ -859,6 +901,7 @@ if [[ $# -gt 0 ]]; then
 |___|_| |_|___/\\__\\__,_|_|_|\\___|\\__,_|"
         success "Setup Completed Successfully"
       else
+        exit_code=1
         error "Unknown option: $1"
       fi
       printf '%s\n' \
@@ -877,11 +920,10 @@ if [[ $# -gt 0 ]]; then
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  --version               Check version" \
-        "  --dry-run               Check the effect of rules before globally applying" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
-        exit 1
+        exit "$exit_code"
       ;;
   esac
 fi
