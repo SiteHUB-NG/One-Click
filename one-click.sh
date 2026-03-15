@@ -469,7 +469,7 @@ conf_export() {
   crontab -l > "$crontab_file" 2>/dev/null
   [[ -f /etc/cron.d/one-click-scanner ]] && cp /etc/cron.d/one-click-scanner "$cron_file"
   info "Creating archive."
-  tar -czf "$tmp_archive" -C /etc "$base" "$cron_file" "$crontab_file" &> /dev/null
+  tar -czf "$tmp_archive" -C /etc --ignore-failed-read "$base" "$cron_file" "$crontab_file" &> /dev/null
   if [[ "${1:-}" == to ]]; then
     conf_migrate ${2:-}
   else
@@ -602,6 +602,7 @@ _one_click() {
     cmds["logs"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
+    cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
 
@@ -654,6 +655,8 @@ _one_click() {
     cmds["engine:'to"]=
     cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["engine:--dry-run"]=""
+
+    cmds["migrate:'export' 'export to' 'import'"]=""
     
     _complete_tree() {
       local path="$1"
@@ -710,6 +713,7 @@ _one_click() {
     cmds["logs"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
+    cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
     
@@ -765,6 +769,8 @@ _one_click() {
     cmds["engine:audit"]=
     cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
     cmds["engine:--dry-run"]=""
+
+    cmds["migrate:'export' 'export to' 'import'"]=""
     
     _complete_tree() {
       local path="$1"
@@ -1002,6 +1008,10 @@ if [[ $# -gt 0 ]]; then
  | || | | \\__ \\ || (_| | | |  __/ (_| |
 |___|_| |_|___/\\__\\__,_|_|_|\\___|\\__,_|"
         success "Setup Completed Successfully"
+      elif [[ "${1:-}" == "peer" ]]; then
+        success "Import of backup successful to $sys_ip"
+        sleep 3
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
       else
         exit_code=1
         error "Unknown option: $1"
@@ -1028,8 +1038,3 @@ if [[ $# -gt 0 ]]; then
         exit "$exit_code"
       ;;
   esac
-elif [[ "${1:-}" == "peer" ]]; then
-  success "Import of backup successful to $sys_ip"
-  sleep 3
-  ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
-fi
