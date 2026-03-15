@@ -1038,3 +1038,4 @@ if [[ $# -gt 0 ]]; then
         exit "$exit_code"
       ;;
   esac
+fi
