@@ -356,33 +356,13 @@ restore_backup() {
     success "${yellow}[${reset}Restore process complete${yellow}]${reset}"
   fi
 }
-repair() {
-  local int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
-  out=$(ip -s link show "$nic")
-  isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
-  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
-  if command -v netstat &> /dev/null; then
-    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
-  elif command -v nstat &> /dev/null; then
-    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
-  fi
-  gw=$(awk '/default/{print $3}' <(ip r))
-  dev=$(awk '/default/{print $5}' <(ip r))
-  gw6=$(awk '/default/{print $3}' <(ip -6 r))
-  dev6=$(awk '/default/{print $5}' <(ip -6 r))
-  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
-  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
-  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
-  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
-  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
-  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
-  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
-  # ==== Check & repair network ====
+health_check() {
   warn \
     "${yellow}╔════════════════════════════════════════════════════════════╗" \
     "${yellow}║                    NETWORK HEALTH CHECK                    ║" \
     "${yellow}╚════════════════════════════════════════════════════════════╝${reset}"
-  if have_net && have_dns; then
+  
+  if [[ "${skip_check:-}" -eq 0 ]]; then
     echo -e "\n● ${cyan}[INTERFACE: $int]${reset}"
     echo -e "  ├─ Error Check: "
     if [ "$rx_error" -gt 0 ]; then
@@ -474,8 +454,61 @@ repair() {
     fi
     return 0
   fi
+}
+repair() {
+  local int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
+  skip_check=0
+  out=$(ip -s link show "$nic")
+  isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
+  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
+  if command -v netstat &> /dev/null; then
+    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
+  elif command -v nstat &> /dev/null; then
+    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+  fi
+  gw=$(awk '/default/{print $3}' <(ip r))
+  dev=$(awk '/default/{print $5}' <(ip r))
+  gw6=$(awk '/default/{print $3}' <(ip -6 r))
+  dev6=$(awk '/default/{print $5}' <(ip -6 r))
+  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
+  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
+  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
+  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
+  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
+  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
+  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  # ==== Check & repair network ====
+  if ! have_dns; then
+    warn "Could not detect DNS"
+    info "DNS Failed.Trying alternate"
+    if getent hosts cloudflare.com &> /dev/null; then
+      success "DNS Detected"
+      skip_check=0
+    else
+      skip_check=1
+      skip_reason=( "DNS" )
+    fi
+  fi
+  if ! have_net; then
+    warn "Could not detect asymmetric connectivity"
+    info "Connectivity Failed. Trying alternate"
+    if ping -c1 -W2 8.8.8.8 &>/dev/null; then
+      success "Connectivity Detected"
+      skip_check=0
+    else
+      skip_check=1
+      skip_reason+=( "NETWORK" )
+    fi
+  fi
+  health_check
+  if [[ "$skip_check" -eq 0 ]]; then
+    return 0
+  fi
   error "Network problem detected - attempting network repair"
-  warn "Attempting to diagnose the issue"
+  if [[ -z "$skip_reason" ]]; then
+    printf "${yellow}[WARN] ${reset}Issue found with: %s\n" "${skip_reason[@]}"
+  fi
+  info "Attempting to diagnose the issue"
   iface="$(primary_iface || true)"
   if [[ -z "$iface" ]]; then
     error "No interface detected"
@@ -613,7 +646,6 @@ fix_network() {
           #return
         fi
         ;;
-     
       6)restore_backup                                             ;;
       7)install_cron "-x" "One-Click Network Repair Tool" "v"      ;;
       8)( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
