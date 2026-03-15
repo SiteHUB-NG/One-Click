@@ -454,6 +454,104 @@ if [[ "${1:-}" == "rule-engine" || "${1:-}" == "engine" || "${1:-}" == "firewall
   rule_engine "${2:-}" "${3:-}"
   exit 0
 fi
+# ==== Migrate - Skip TMUX ====
+conf_export() {
+  rules_dir="${base}/rule-engine"
+  tmp_archive="/tmp/one-click-migration-$(date +%Y%m%d%H%M%S).tar.gz"
+  crontab_file="${migration_dir}/one-click-crontab.bak"
+  cron_file="${migration_dir}/one-click-cron.bak"
+  [[ -d "$rules_dir" ]] || mkdir -p "$rules_dir"
+  info "Backing up cron tasks"
+  crontab -l > "$crontab_file" 2>/dev/null
+  [[ -f /etc/cron.d/one-click-scanner ]] && cp /etc/cron.d/one-click-scanner "$cron_file"
+  info "Creating archive."
+  tar -czf "$tmp_archive" -C /etc "$base" "$cron_file" "$crontab_file" &> /dev/null
+  if [[ "${1:-}" == to ]]; then
+    conf_migrate ${2:-}
+  else
+    success "Migration archive created at: $tmp_archive"
+  fi
+}
+conf_import() {
+  archive="${1:-}"
+  if [[ ! -f "$archive" ]]; then
+    error "Archive not found."
+    exit 1
+  fi
+  info "Extracting files and directories."
+  chattr -i /etc/one-click/backup/guard/system_baseline.json
+  rm -rf "$base"
+  tar -xzf "$archive" -C /etc &> /dev/null
+  info "Restoring cron tasks"
+  [[ -f "${migration_dir}/one-click-crontab.bak" ]] && {
+    (cat "${migration_dir}/one-click-crontab.bak"; crontab -l) | sort -u | crontab -
+    rm -f "${migration_dir}/one-click-crontab.bak"
+  }
+  [[ -f "${migration_dir}/one-click-cron.bak" ]] && {
+    cp "${migration_dir}/one-click-cron.bak" /etc/cron.d/one-click-scanner
+    rm -f "${migration_dir}/one-click-cron.bak"
+  }
+  chattr +i /etc/one-click/backup/guard/system_baseline.json
+  success "Migration import complete."
+}
+conf_migrate() {
+  target="${1:-}"
+  if [[ ! -f "$tmp_archive" ]]; then
+    error "Migration archive not found. Run 'one-click migrate export' first."
+    exit 1
+  fi
+  read -rsp "${target}'s password: " ssh_pass
+  echo
+  info "Sending backup to $target."
+  archive_name=$(basename "$tmp_archive")
+  pv -pterb "$tmp_archive" | sshpass -p "$ssh_pass" ssh \
+    -o StrictHostKeyChecking=no \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=10 \
+  "$target" "cat > /tmp/$archive_name"
+  # ==== Check if one-click is installed on target ====
+  info "You can complete importation of the backup now on ${target#*@} or this script can do that now."
+  read -rp "${cyan}[USER]${reset} Would you like to complete the import process now (y|n): " migrate
+  migrate="${migrate,,}"
+  if [[ "$migrate" == "y" || "$migrate" == "yes" ]]; then
+    if sshpass -p "$ssh_pass" ssh -t -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$target" \
+      "export PATH=\$PATH:/usr/local/bin
+      if ! command -v one-click >/dev/null 2>&1; then
+        echo [INFO] Installing one-click...
+        curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh
+        bash /tmp/one-click.sh peer
+        rm -f /tmp/one-click.sh
+      fi
+      one-click migrate import $tmp_archive
+    rm -f $tmp_archive"; then
+      success "Migration successful on ${target#*@}"
+      exit 0
+    else
+      error "Migration failed." 
+      info "Please complete the migration manually. The archive file is available at $tmp_archive on ${target#*@}"
+      exit 1
+    fi
+fi
+}
+if [[ "${1:-}" == "migrate" ]]; then
+  if [[  "${4:-}" =~ @([0-9.a-fA-F:]+)$ ]]; then
+    migration_ip="${BASH_REMATCH[1]}"
+    if [[ ! "$migration_ip" =~ ([0-9]{1,3}\.){2}[0-9]+|([0-9a-fA-F]:)+ ]]; then
+      die "Invalid IP"
+    fi
+  fi
+  migration_dir="$base/migrate"
+  mkdir -p "$migration_dir"
+  case "${2:-}" in
+    export) conf_export "${3:-}" "${4:-}" ;;
+    import) conf_import "${3:-}"          ;;
+    *)
+      echo "Usage: one-click migrate {export|import <archive>|to <user@host>}"
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
   export non_interactive=1                                                                  ##
@@ -926,4 +1024,8 @@ if [[ $# -gt 0 ]]; then
         exit "$exit_code"
       ;;
   esac
+elif [[ "${1:-}" == "peer" ]]; then
+  success "Import of backup success to $sys_ip"
+  sleep 3
+  ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
 fi
