@@ -38,6 +38,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  engine | rule-engine    Natural-language firewall interface for iptables." \
     "  help                    Display this help menu." \
     "  logs | log-browser      Browse and inspect system log files interactively." \
+    "  migrate                 Migrate system settings, configurations and cron tasks." \
     "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
     "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
     "  reinstall               Perform a full operating system reinstallation." \
@@ -130,7 +131,10 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      Chain multiple firewall rules in a single command." "" \
     "  one-click engine 'allow ssh from office and deny ssh from blacklist'" \
     "      Combine alias groups with rule chaining." "" \
-    "  one-click engine 'audit scan --init'" "" 
+    "  one-click engine 'audit scan --init'" 
+    "  one-click migrate export" \
+    "  one-click migrate export to 1.2.3.4" \
+    "  one-click migrate import <backup>" "" 
 exit 0
 fi
 # ==== Confirm Package Manager ====
@@ -524,7 +528,7 @@ conf_migrate() {
       fi
       one-click migrate import $tmp_archive
     rm -f $tmp_archive"; then
-      success "Migration successful on ${target#*@}"
+      success "Migration successful to ${target#*@}"
       exit 0
     else
       error "Migration failed." 
@@ -1025,7 +1029,7 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 elif [[ "${1:-}" == "peer" ]]; then
-  success "Import of backup success to $sys_ip"
+  success "Import of backup successful to $sys_ip"
   sleep 3
   ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
 fi
