@@ -112,12 +112,12 @@ Uninstall toolkit:
 
 The
 .B rule-engine
-module provides human-readable firewall management within the
+module provides natural-language firewall management within the
 .B one-click
 toolkit.
 
 .PP
-It allows administrators to construct firewall rules using natural language,
+It allows administrators to construct firewall rules using human-readable syntax,
 which are automatically translated into valid commands for the active firewall backend.
 
 Supported backends include:
@@ -128,19 +128,15 @@ Supported backends include:
 .IP \(bu 2
 .B nftables
 
-.IP \(bu 2
-.B ufw
-
-.IP \(bu 2
-.B firewalld
-
-
 .PP
 The rule-engine combines natural language parsing with a transactional
 execution model designed to prevent accidental lockouts.
 
 .PP
 Firewall changes are applied using a staged commit process with automatic rollback protection.
+A
+.B 10-second verification timer
+ensures that changes can be automatically reverted if confirmation is not received.
 
 .SH RULE-ENGINE FEATURES
 
@@ -148,16 +144,16 @@ Firewall changes are applied using a staged commit process with automatic rollba
 Human-readable firewall rule parsing
 
 .IP \(bu 2
-Support for TCP, UDP, ICMP and multiport rules
+Support for TCP, UDP, ICMP, and multiport rules
 
 .IP \(bu 2
-Source and destination filtering with IPv4, IPv6 and CIDR ranges
+Source and destination filtering using IPv4, IPv6, and CIDR ranges
 
 .IP \(bu 2
-Service-name to port mapping (e.g. ssh → 22)
+Service-name to port mapping (e.g., ssh → 22)
 
 .IP \(bu 2
-Automatic detection of firewall backend
+Automatic detection of the firewall backend
 
 .IP \(bu 2
 Natural language and raw command chaining
@@ -169,7 +165,7 @@ Firewall rule alias system for IP groups
 Sensitive port protection
 
 .IP \(bu 2
-Dry-run preview mode
+Dry-run preview mode (--dry-run)
 
 .IP \(bu 2
 Audit mode for rule inspection
@@ -180,187 +176,187 @@ Full firewall backup and restore management
 .IP \(bu 2
 Transactional commit system with rollback protection
 
+.SH RULE-ENGINE COMMANDS
 
-.SH TRANSACTION SAFETY
+Usage:
 
-Firewall rule modifications are executed using a multi-stage safety system.
+.RS
+.B one-click rule-engine <subcommand> [options]
+.RE
+
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+--dry-run | Preview rules without applying them.
+open [table|all] | Show current firewall rules in a readable format.
+flush <table> | Remove all rules from a specific table.
+flush all | Remove all rules from all tables.
+backup | save | Create a backup of the firewall configuration.
+restore | Restore firewall rules from a backup.
+raw <iptables cmd> | Execute native iptables commands directly.
+.TE
+
+.SH RULE-ENGINE SUBCOMMANDS
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+open [table|all] | Display firewall rules in a readable table format; optionally specify a table or use 'all'.
+flush <table> | Remove all rules from a specific table.
+flush all | Remove rules from all firewall tables.
+backup | save | Create a backup of current firewall configuration.
+restore | Restore firewall rules from a previous backup.
+raw <iptables cmd> | Execute raw iptables commands directly (advanced usage).
+allow <arg> | Accept incoming traffic (port number or service name).
+deny | drop <arg> | Silently drop matching packets.
+reject | decline <arg> | Reject packets with a response notification.
+delete | remove <arg> | Delete rules, backups, or aliases.
+mask | hide | Enable NAT masquerading for source or destination IPs.
+enable icmp | echo | Enable ICMP ping responses.
+disable icmp | echo | Disable ICMP ping responses.
+tcp | Apply rule to TCP traffic (default).
+udp | Apply rule to UDP traffic.
+multiport <ports...> | Apply rule to multiple ports simultaneously.
+range <start-end> | Apply rule to a range of ports.
+alias-create | Create named IP groups for easier rule management.
+alias-append | Add IPs to an existing alias.
+alias-prune | Remove IPs from an alias.
+sensitive <ports...> | Mark ports as sensitive to require confirmation before changes.
+sensitive-list | Display all ports marked sensitive.
+sensitive-remove | Remove ports from the sensitive list.
+from <IP|alias> | Specify source IP or alias.
+to <IP|alias> | Specify destination IP or alias.
+audit | Inspect active firewall rules, drops, and intrusion events.
+audit ssh | Display SSH brute-force attempts with IPs, usernames, and counts.
+audit block <ID> [dur=N] | Temporarily block attacker; optional duration in minutes.
+audit block <ID> perm | Permanently ban IP.
+audit unblock <ID> | Remove a previously applied block.
+audit history | View historical attacker actions.
+audit banlist | Show combined ban list from RuleEngine and Fail2Ban.
+audit key <APIKEY> | Configure AbuseIPDB API key.
+audit lookup <IP> | Check reputation of an IP via AbuseIPDB.
+audit scan | Lightweight file integrity and malware scan.
+audit scan --deep | Deep scan of filesystem and binaries.
+--dry-run | Preview rules without applying them.
+.TE
 
 .PP
-When rules are applied:
-
-.IP \(bu 2
-Rules are first staged and displayed to the user.
-
-.IP \(bu 2
-A confirmation prompt is required before committing changes.
-
-.IP \(bu 2
-After committing, a
-.B 10-second verification timer
-begins.
-
-.IP \(bu 2
-If confirmation is not received before the timer expires, the firewall
-automatically reverts to the previous configuration.
-
-.PP
-This prevents administrators from accidentally locking themselves out of
-remote systems.
-
-.PP
-Previous firewall state is automatically preserved and restored if a rollback occurs.
-
-.SH RULE CHAINING
-
-Multiple commands may be executed in a single invocation.
-
-.PP
-Commands may be chained using:
-
-.IP \(bu 2
+Subcommands may be chained using
 .B and
-
-.IP \(bu 2
-.B ,
-
-.PP
-Example:
+or
+.B , 
+for multiple rules in a single command.
 
 .RS
-.B one-click rule-engine "allow ssh and allow https"
+.B Example:
+one-click rule-engine "allow ssh and allow https"
+.RE
+
+.RS
+.B Example with comma chaining:
+one-click rule-engine "allow 80,allow 443"
 .RE
 
 .PP
-Example with comma chaining:
+Traffic Rules:
 
-.RS
-.B one-click rule-engine "allow 80,allow 443"
-.RE
-
-
-.SH RAW COMMAND MODE
-
-Advanced users may bypass natural language parsing and inject native firewall commands.
-
-.PP
-Raw mode is enabled using the
-.B raw:
-prefix.
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+allow <arg> | Accept incoming traffic (ports or service names).
+deny | drop <arg> | Silently discard matching packets.
+reject | decline <arg> | Reject packets with a response notification.
+delete | remove <arg> | Remove rules, backups, or aliases.
+mask | hide | Apply NAT masquerading.
+.TE
 
 .PP
-Example:
+Protocol Control:
 
-.RS
-.B one-click rule-engine "raw: iptables -A INPUT -p tcp --dport 443 -j ACCEPT"
-.RE
-
-.PP
-Raw commands can be chained with natural language rules.
-
-.PP
-Example:
-
-.RS
-.B one-click rule-engine "allow ssh and raw: iptables -L"
-.RE
-
-
-.SH ALIAS SYSTEM
-
-RuleEngine supports alias mapping for groups of IP addresses.
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+enable icmp | echo | Enable ICMP echo requests (ping).
+disable icmp | echo | Disable ICMP echo requests.
+tcp | udp | Specify protocol for rule application.
+.TE
 
 .PP
-Aliases allow administrators to reference multiple IPs using a single name.
+Port Handling:
+
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+multiport <ports...> | Apply rule to multiple ports.
+range <start-end> | Apply rule across a port range.
+.TE
 
 .PP
-Example:
+IP Aliases:
 
-.RS
-.B one-click rule-engine "include office 192.168.1.10 192.168.1.11"
-.RE
-
-.PP
-The alias may then be used in rules:
-
-.RS
-.B one-click rule-engine "allow ssh from office"
-.RE
-
-
-.SH FIREWALL BACKUP MANAGEMENT
-
-Firewall configurations may be backed up, restored, or deleted using
-human-readable commands.
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+alias-create | Create a named IP group.
+alias-append | Add IPs to an existing alias.
+alias-prune | Remove IPs from an alias.
+.TE
 
 .PP
-Backups are stored in:
+Sensitive Ports:
 
-.I /etc/one-click/rule-engine/
-
-.PP
-Backups are timestamped and saved with restricted permissions.
-
-.IP \(bu 2
-Backup firewall configuration
-
-.IP \(bu 2
-Restore previous configuration
-
-.IP \(bu 2
-Delete stored backups
-
-
-.SH SENSITIVE PORT PROTECTION
-
-Certain ports are considered sensitive and may trigger warnings before
-rules are applied.
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+sensitive <ports...> | Mark ports as sensitive to trigger confirmation.
+sensitive-list | List sensitive ports.
+sensitive-remove | Remove ports from the sensitive list.
+.TE
 
 .PP
-Examples include:
+Source/Destination Filtering:
 
-.IP \(bu 2
-22 (SSH)
-
-.IP \(bu 2
-80 (HTTP)
-
-.IP \(bu 2
-443 (HTTPS)
-
-.IP \(bu 2
-3389 (RDP)
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+from <IP/CIDR> | Specify source IP or subnet for the rule.
+to <IP/CIDR> | Specify destination IP or subnet for the rule.
+.TE
 
 .PP
-Administrators may extend this list using the
-.B sensitive
-command.
+Audit and Security:
 
-
-.SH MIGRATE
-
-The migrate command transfers the One-Click toolkit configuration
-between systems.
-
-This includes user configuration, rule-engine aliases,
-firewall backups, and scheduled automation tasks.
-
-Migration archives are created as compressed tar files
-which can be transferred to another system and imported.
-
-Examples:
-
-Export configuration:
-
-one-click migrate export
-
-Import configuration:
-
-one-click migrate import one-click-migration.tar.gz
-
-Direct remote migration:
-
-one-click migrate to root@server2
-
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+audit | Inspect firewall activity.
+audit ssh | Show SSH brute-force attempts.
+audit block <ID> [dur=N|perm] | Temporarily or permanently block detected IP.
+audit unblock <ID> | Remove a previously applied block.
+audit history | View historical actions.
+audit banlist | Show combined ban lists.
+audit key <APIKEY> | Configure AbuseIPDB key.
+audit lookup <IP> | Check IP reputation via AbuseIPDB.
+audit scan [--deep] | Run file integrity / malware scan.
+.TE
 
 .SH RULE-ENGINE EXAMPLES
 
@@ -394,6 +390,22 @@ Preview rules without applying them:
 .B one-click rule-engine --dry-run "allow 443"
 .RE
 
+Create alias and use it:
+
+.RS
+.B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
+.RE
+
+.RS
+.B one-click rule-engine "allow ssh from office"
+.RE
+
+Audit scan example:
+
+.RS
+.B one-click rule-engine "audit scan --deep"
+.RE
+
 Backup firewall configuration:
 
 .RS
@@ -404,6 +416,18 @@ Restore firewall configuration:
 
 .RS
 .B one-click rule-engine "restore firewall"
+.RE
+
+Create an alias:
+
+.RS
+.B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
+.RE
+
+Add to an alias:
+
+.RS
+.B one-click rule-engine "alias-append office 192.168.1.12"
 .RE
 
 .SH REINSTALL
@@ -1035,6 +1059,89 @@ commands for automated system management
 
 .IP \(bu 2
 Safe execution – tasks run with defined privileges to prevent accidental system damage
+
+.SH MIGRATE
+
+The
+.B migrate
+command transfers the One-Click toolkit configuration between systems.
+This includes:
+
+.IP \(bu 2
+User configuration
+
+.IP \(bu 2
+Rule-engine aliases
+
+.IP \(bu 2
+Firewall backups
+
+.IP \(bu 2
+Scheduled automation tasks (cron)
+
+.PP
+Migration archives are created as compressed tar files that can be transferred to another system and imported.
+
+.SH USAGE
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+one-click migrate export | Export current configuration to a migration archive
+one-click migrate import <archive> | Import configuration from a migration archive
+one-click migrate to <user@host> | Send migration archive to a remote host and optionally import
+.TE
+
+.PP
+The archive includes:
+
+.IP \(bu 2
+One-Click configuration directory (/etc/one-click)
+
+.IP \(bu 2
+Crontab entries for the current user
+
+.IP \(bu 2
+Scanner cron jobs in /etc/cron.d/one-click-scanner
+
+.SH EXAMPLES
+
+Export configuration locally:
+
+.RS
+.B one-click migrate export
+.RE
+
+Import configuration from a local archive:
+
+.RS
+.B one-click migrate import /etc/one-click/migrate/one-click-migration-20260315162903.tar.gz
+.RE
+
+Directly send and import migration archive on a remote host:
+
+.RS
+.B one-click migrate to root@server2
+.RE
+
+.PP
+During remote migration, the target system is automatically checked for One-Click.
+If it is missing, it will be installed automatically before importing the archive.
+The user may be prompted to confirm the import.
+
+.PP
+Notes:
+
+.IP \(bu 2
+Remote migration requires either SSH keys or password authentication.
+
+.IP \(bu 2
+Target host must allow SSH access and have basic tools installed (bash, tar, curl).
+
+.IP \(bu 2
+Migration is safe and does not overwrite unrelated system files.
 
 .SH UNINSTALL
 
