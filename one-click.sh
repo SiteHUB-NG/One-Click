@@ -147,7 +147,6 @@ elif command -v zypper >/dev/null 2>&1; then
 elif command -v apt-get >/dev/null 2>&1; then
   pkg_mgr="apt"
 fi
-# ==== Initialize these variables and functions immediately ====
 rsync_backup_dir="${base}/backup-tool"
 profiles="${rsync_backup_dir}/profiles/"
 log_dir="/var/log/one-click"
@@ -462,19 +461,16 @@ fi
 # ==== Migrate - Skip TMUX ====
 conf_export() {
   rules_dir="${base}/rule-engine"
-  tmp_archive="/tmp/one-click-migration-$(date +%Y%m%d%H%M%S).tar.gz"
   crontab_file="${migration_dir}/one-click-crontab.bak"
   cron_file="${migration_dir}/one-click-cron.bak"
   [[ -d "$rules_dir" ]] || mkdir -p "$rules_dir"
   info "Backing up cron tasks"
   crontab -l > "$crontab_file" 2>/dev/null
   [[ -f /etc/cron.d/one-click-scanner ]] && cp /etc/cron.d/one-click-scanner "$cron_file"
-  info "Creating archive."
-  tar -czf "$tmp_archive" -C /etc --ignore-failed-read "$base" "$cron_file" "$crontab_file" &> /dev/null
-  if [[ "${1:-}" == to ]]; then
-    conf_migrate ${2:-}
+  if [[ "${1:-}" == "to" ]]; then
+    conf_migrate "${2:-}"
   else
-    success "Migration archive created at: $tmp_archive"
+    success "Configuration prepared for migration."
   fi
 }
 conf_import() {
@@ -483,10 +479,10 @@ conf_import() {
     error "Archive not found."
     exit 1
   fi
+  info "Removing default configuration"
+  [[ -d "$base" ]] && rm -rf "$base"
   info "Extracting files and directories."
-  chattr -i /etc/one-click/backup/guard/system_baseline.json
-  rm -rf "$base"
-  tar -xzf "$archive" -C /etc &> /dev/null
+  tar -xzf "$archive" -C /etc #&> /dev/null
   info "Restoring cron tasks"
   [[ -f "${migration_dir}/one-click-crontab.bak" ]] && {
     (cat "${migration_dir}/one-click-crontab.bak"; crontab -l) | sort -u | crontab -
@@ -501,42 +497,61 @@ conf_import() {
 }
 conf_migrate() {
   target="${1:-}"
-  if [[ ! -f "$tmp_archive" ]]; then
-    error "Migration archive not found. Run 'one-click migrate export' first."
+  [[ -z "$target" ]] && {
+    error "No migration target specified."
     exit 1
-  fi
+  }
   read -rsp "${target}'s password: " ssh_pass
   echo
-  info "Sending backup to $target."
-  archive_name=$(basename "$tmp_archive")
-  pv -pterb "$tmp_archive" | sshpass -p "$ssh_pass" ssh \
-    -o StrictHostKeyChecking=no \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=10 \
-  "$target" "cat > /tmp/$archive_name"
-  # ==== Check if one-click is installed on target ====
-  info "You can complete importation of the backup now on ${target#*@} or this script can do that now."
-  read -rp "${cyan}[USER]${reset} Would you like to complete the import process now (y|n): " migrate
+  info "Sending configuration to $target"
+  sshpass -p "$ssh_pass" rsync -az --delete --info=progress2 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10" \
+    /etc/one-click/ "$target:/etc/one-click/"
+  sshpass -p "$ssh_pass" rsync -az --info=progress2 -e "ssh -o StrictHostKeyChecking=no" "$migration_dir/" "$target:$migration_dir/"
+  success "Configuration synced."
+  echo
+  success "Import to ${target#*@} complete."
+  info "You can complete the migration manually at a later time or allow this script to finish it."
+  read -rp "${cyan}[USER]${reset} Complete migration now (y|n): " migrate
   migrate="${migrate,,}"
   if [[ "$migrate" == "y" || "$migrate" == "yes" ]]; then
-    if sshpass -p "$ssh_pass" ssh -t -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$target" \
-      "export PATH=\$PATH:/usr/local/bin
+    sshpass -p "$ssh_pass" ssh -t -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$target" "
+    
+      export PATH=\$PATH:/usr/local/bin
+      active_ser=1
+      echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Checking if one-click is available on ${target#*@}
       if ! command -v one-click >/dev/null 2>&1; then
-        echo [INFO] Installing one-click...
+        active=0
+        echo \$(tput setaf 11)[WARN]:\$(tput sgr 0) Installing one-click...
         curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh
-        bash /tmp/one-click.sh peer
+        bash /tmp/one-click.sh peer from $sys_ip
         rm -f /tmp/one-click.sh
+      else
+        echo \$(tput setaf 2)[SUCCESS]\$(tput sgr 0) one-click is already installed.
       fi
-      one-click migrate import $tmp_archive
-    rm -f $tmp_archive"; then
-      success "Migration successful to ${target#*@}"
-      exit 0
-    else
-      error "Migration failed." 
-      info "Please complete the migration manually. The archive file is available at $tmp_archive on ${target#*@}"
-      exit 1
-    fi
-fi
+      echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Restoring cron tasks
+      if [[ -f ${migration_dir}/one-click-crontab.bak ]]; then
+        if (cat ${migration_dir}/one-click-crontab.bak; crontab -l) | sort -u | crontab -; then
+          tab=1
+        fi
+        rm -f ${migration_dir}/one-click-crontab.bak
+      fi
+      if [[ -f ${migration_dir}/one-click-cron.bak ]]; then
+        cp ${migration_dir}/one-click-cron.bak /etc/cron.d/one-click-scanner
+        rm -f ${migration_dir}/one-click-cron.bak
+      fi
+      if [[ -f /etc/cron.d/one-click-scanner && \$tab -eq 1 ]]; then
+        echo \$(tput setaf 2)[SUCCESS]\$(tput sgr 0) Cron tasks successfully restored
+      fi
+      if [[ -f /etc/one-click/backup/guard/system_baseline.json ]]; then
+        chattr +i /etc/one-click/backup/guard/system_baseline.json
+        echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Immutable flag applied.
+      fi
+      if [[ \$active_ser -eq 1 ]]; then
+        one-click peer from $sys_ip
+      fi
+    "
+    success "Migration successful to ${target#*@}"
+  fi
 }
 if [[ "${1:-}" == "migrate" ]]; then
   if [[  "${4:-}" =~ @([0-9.a-fA-F:]+)$ ]]; then
@@ -1011,7 +1026,7 @@ if [[ $# -gt 0 ]]; then
         success "Setup Completed Successfully"
       elif [[ "${1:-}" == "peer" ]]; then
         success "Import of backup successful to $sys_ip"
-        sleep 3
+        sleep 5
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
       else
         exit_code=1
