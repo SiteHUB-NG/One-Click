@@ -27,8 +27,8 @@ draw_table_row() {
   local command="$3"
   n_run="$4"
   local display_cmd="${command:0:67}"
-  [[ ${#command} -gt 67 ]] && display_cmd+="..."
-  printf "${blue}│ ${reset}%-3s ${blue}│ ${reset}%-18s ${blue}│ ${reset}%-70s ${blue}│${reset}%-20s ${blue}│${reset}\n" "$index" "$schedule" "$display_cmd" "$n_run"
+  [[ ${#command} -gt 66 ]] && display_cmd+="..."
+  printf "${blue}│ ${reset}%-3s ${blue}│ ${reset}%-18s ${blue}│ ${reset}%-70s ${blue}│${reset}%-20s ${blue}│${reset}\n" "$index" "$schedule" "$display_cmd" "$n_run" 
 }
 get_next_run() {
   local sched="$1"
@@ -49,76 +49,63 @@ get_next_run() {
   local target_h="${h#0}"; [[ "$target_h" == "*" ]] && target_h=$(date +%-H)
   local current_year=$(date +%Y)
   if [[ "$mon" =~ ^[0-9]+$ && "$dom" =~ ^[0-9]+$ ]]; then
-    # Construct the date for THIS year
     local target_date="$current_year-$mon-$dom $target_h:$target_m"
     local target_ts=$(date -d "$target_date" +%s 2>/dev/null)
     local now_ts=$(date +%s)
     if [[ -z "$target_ts" || $target_ts -lt $now_ts ]]; then
-      # If it passed or date is invalid (Feb 29), move to NEXT year
-      date -d "$((current_year + 1))-$mon-$dom $target_h:$target_m" +"%b %d, %H:%M"
+      date -d "$((current_year + 1))-$mon-$dom $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
     else
-      date -d "$target_date" +"%b %d, %H:%M"
+      date -d "$target_date" +"%b %d, %H:%M" 2>/dev/null
     fi
     return
   fi
   if [[ "$dow" =~ ^[0-9]+$ ]]; then
     local day_diff=$(( (dow - $(date +%w) + 7) % 7 ))
-    # If today is Monday but the time has passed, move to next week
     local today_target_ts=$(date -d "$target_h:$target_m" +%s 2>/dev/null)
     [[ $day_diff -eq 0 && $today_target_ts -lt $(date +%s) ]] && day_diff=7
-    date -d "$day_diff days $target_h:$target_m" +"%b %d, %H:%M"
+    date -d "$day_diff days $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
     return
   fi
   local today_ts=$(date -d "$target_h:$target_m" +%s 2>/dev/null)
   if [[ $today_ts -lt $(date +%s) ]]; then
-    date -d "tomorrow $target_h:$target_m" +"%b %d, %H:%M"
+    date -d "tomorrow $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
   else
-    date -d "today $target_h:$target_m" +"%b %d, %H:%M"
+    date -d "today $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
   fi
 }
 list_cron_jobs() {
-  local filter="${1:-}" # New filter argument
-  local i=1
-  local cron=$(crontab -l 2>/dev/null)
-  
+  local filter cron i
+  filter="${1:-}"
+  i=1
+  cron=$(crontab -l 2>/dev/null;sed -n '/*/p' /etc/cron.d/*)
   if [[ -z "$cron" ]]; then
     warn "No cron jobs found."
     return 1
   fi
-
-  # Clear the map to prevent old indexes from lingering
   unset cron_map
   declare -g -A cron_map
-
   printf "${blue}%s\n${reset}" \
     "┌─────┬────────────────────┬────────────────────────────────────────────────────────────────────────┬─────────────────────┐" \
     "│ ID  │ SCHEDULE           │ COMMAND / PATH                                                         │ NEXT ESTIMATED RUN  │" \
     "├─────┼────────────────────┼────────────────────────────────────────────────────────────────────────┼─────────────────────┤"
-
   while IFS= read -r line; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
-    
-    # Apply Filter Logic
     if [[ -n "$filter" ]]; then
       [[ "$line" != *"$filter"* ]] && continue
     fi
-
     local sched=$(echo "$line" | awk '{print $1,$2,$3,$4,$5}')
     local cmd=$(sed -E 's/^[0-9/ *]+[ \t]+(TZ="[^"]*"[ \t]+)?(.*)/\2/' <<< "$line")
     local next_est
     [[ "$sched" == "@reboot" ]] && next_est="On Next Boot" || next_est=$(get_next_run "$sched")
-
+    [[ -z "$next_est" ]] && next_est="Unsupported"
     draw_table_row "$i" "$sched" "$cmd" "$next_est"
-    
     cron_map[$i]="$line"
     ((i++))
   done <<< "$cron"
-  
   if [[ $i -eq 1 ]]; then
     warn "No jobs matching '$filter' found."
     return 1
   fi
-
   echo -e "${blue}└─────┴────────────────────┴────────────────────────────────────────────────────────────────────────┴─────────────────────┘${reset}"
 }
 validate_cron_field() {
