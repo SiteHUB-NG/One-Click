@@ -47,6 +47,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  uninstall               Remove one-click and all associated files." \
     "  --wp-create             Install Wordpress with either nginx or apache." \
     "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
+    "  --wp-backup             Backup wordpress vhosts." \
+    "  --wp-restore            Restore wordpress backups." \
     "  --version               Display installed version information." "" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -115,6 +117,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  audit unblock <ID>      Remove a previously applied block." \
     "  audit history           View historical actions taken against attackers." \
     "  audit banlist           Show combined ban list from RuleEngine and Fail2Ban." "" \
+    "  audit jail <args>       Used to create additional custom jails in faileban with custom." \
+    "                          ports and timers." \
+    "                          Example: one-click engine 'audit jail [name] port [port] retry [count]'" "" \
     "$(tput smul)$(tput bold)AbuseIPDB Integration$(tput sgr0)$(tput rmul)" \
     "  audit key <APIKEY>      Configure AbuseIPDB API key for IP reputation checks." \
     "  audit lookup <IP>       Query AbuseIPDB to check reputation of an IP." "" \
@@ -133,7 +138,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "      Chain multiple firewall rules in a single command." "" \
     "  one-click engine 'allow ssh from office and deny ssh from blacklist'" \
     "      Combine alias groups with rule chaining." "" \
-    "  one-click engine 'audit scan --init'" 
+    "  one-click engine 'audit scan --init'" \
     "  one-click migrate export" \
     "  one-click migrate export to 1.2.3.4" \
     "  one-click migrate import <backup>" "" 
@@ -634,6 +639,8 @@ _one_click() {
     cmds["--version"]=""
     cmds["--wp-create"]=""
     cmds["--wp-ssl"]=""
+    cmds["--wp-backup"]=""
+    cmds["--wp-restore"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -747,6 +754,8 @@ _one_click() {
     cmds["--version"]=""
     cmds["--wp-create"]=""
     cmds["--wp-ssl"]=""
+    cmds["--wp-backup"]=""
+    cmds["--wp-restore"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
@@ -852,6 +861,8 @@ map_one_click() {
       update)       echo "--update"    ;;
       --wp-create)  echo "-wp"         ;;
       --wp-ssl)     echo "-ssl"        ;;
+      --wp-backup)  echo "-backup"     ;;
+      --wp-restore) echo "-restore"    ;;
       *)            echo "$i"          ;;
     esac
   done
@@ -1020,6 +1031,16 @@ if [[ $# -gt 0 ]]; then
         fi
       fi
       ;;
+    -backup)
+      load_wordpress
+      wp_backup_interactive
+      exit 0
+      ;;
+    -restore)
+      load_wordpress
+      wp_restore_interactive
+      exit 0
+      ;;
     -wp)
       load_wordpress
       run_script
@@ -1077,6 +1098,8 @@ if [[ $# -gt 0 ]]; then
         "  --version               Check version" \
         "  --wp-create             Install Wordpress with either nginx or apache." \
         "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
+        "  --wp-backup             Backup wordpress vhosts." \
+        "  --wp-restore            Restore wordpress backups." \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
