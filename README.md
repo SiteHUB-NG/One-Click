@@ -139,6 +139,35 @@ one-click engine 'open ssh and drop http,https and mask in nat table'
 One-Click simplifies tedious and complex server tasks.
 It is designed to operate safely in production environments with caching, fallback mirrors, and validation safeguards.
 
+## WordPress Automation Module
+
+One-Click includes a dedicated **WordPress automation installer**.  
+It allows rapid WordPress deployment and SSL setup on a server using simple commands.
+
+### Commands
+
+| Command                          | Description |
+|----------------------------------|-------------|
+| `one-click --wp-create`          | Deploy a new WordPress instance. Prompts for domain, admin credentials, database, and optional Redis configuration. Handles file setup, database creation, webserver configuration, and baseline hardening. |
+| `one-click --wp-ssl`             | Install and configure SSL via Let's Encrypt for an existing WordPress site. Automatically updates WordPress home and site URLs to use `https`. |
+
+### Usage Examples
+
+**Create a new WordPress site:**
+```
+one-click --wp-create
+```
+**Install SSL for an existing WordPress site:**
+```
+one-click --wp-ssl
+```
+
+### Notes
+
+- The WordPress module is designed to run with **non-root users where possible** to avoid permission conflicts.  
+- Make sure your DNS A records for both `www` and non-`www` point to the server before creating a WordPress instance.  
+- Admin credentials and database passwords must meet minimum complexity requirements.  
+
 ## OS Reinstall
 
 - Network-based OS deployment
