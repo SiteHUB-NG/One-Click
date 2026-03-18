@@ -13,7 +13,17 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
-php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
+. /etc/os-release
+if [[ "$ID" == "debian" ]]; then
+  php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
+fi
+if id www-data &>/dev/null; then
+  web_user="www-data"
+elif id apache &>/dev/null; then
+  web_user="apache"
+elif id nginx &>/dev/null; then
+  web_user="nginx"
+fi
 dns_check() {
   dns=$(dig +short "$domain" | tail -n1)
   dns_www=$(dig +short "www.$domain" | tail -n1)
@@ -23,19 +33,26 @@ dns_check() {
   fi
 }
 # ==== Wordpress Backup ====
+
 wp_backup() {
+  info() {
+    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s\n"
+  }
+  success() {
+    printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
+  }
   local domain base site backup timestamp
-  domain="$1"
+  domain="${1:-}"
   base="/etc/one-click/wordpress"
   site="$base/www/$domain"
   backup="$base/backups/$domain"
   timestamp=$(date +%Y%m%d-%H%M%S)
   [[ ! -d "$site" ]] && {
-    echo "[ERROR]: Site directory not found"
+    error "Site directory not found"
     return 1
   }
   [[ ! -f "$site/wp-config.php" ]] && {
-    echo "[ERROR]: wp-config.php missing"
+    error "wp-config.php missing"
     return 1
   }
   info "Creating WordPress backup for $domain"
@@ -54,7 +71,7 @@ DB_NAME=$db_name
 DB_USER=$db_user
 TIMESTAMP=$timestamp
 EOF
-  info "Backup stored at $backup/$timestamp"
+  success "Backup stored at $backup/$timestamp"
 }
 wp_restore() {
   read -rp "This will overwrite $domain. Continue? (y/N): " confirm
@@ -62,7 +79,7 @@ wp_restore() {
     return 1
   fi
   local domain base site_dir backup_dir
-  domain="$1"
+  domain="${domain:-${1}}"
   backup_dir="$2"
   base="/etc/one-click/wordpress"
   site_dir="$base/www/$domain"
@@ -83,20 +100,77 @@ wp_restore() {
   tar -xzf "$backup_dir/files.tar.gz" -C "$site_dir"
   info "Restoring database..."
   gunzip < "$backup_dir/db.sql.gz" | pv | mysql -u"$db_user" -p"$db_pass" "$db_name"
-  chown -R www-data:www-data "$site_dir"
+  chown -R "$web_user":"$web_user" "$site_dir"
   success "Restore complete for $domain"
 }
 wp_backup_scheduler() {
-  local domain="$1"
+  local domain="${domain:-${1}}"
   cat <<EOF >/etc/cron.d/one-click-wp-backups
-0 2 * * * root /usr/local/bin/one-click --wp-backup $domain #One-Click WP Backup
-30 2 * * * root /usr/local/bin/one-click --wp-rotate $domain #One-Click WP Rotate
+0 2 * * * root bash /var/cache/one-click/wordpress.sh -wpback $domain    #One-Click WP Backup
+30 2 * * * root bash /var/cache/one-click/wordpress.sh -wprotate $domain #One-Click WP Rotate
 EOF
 }
 wp_backup_rotate() {
-  local domain="$1"
+  local domain="${domain:-${1}}"
   local backup="/etc/one-click/wordpress/backups/$domain"
   find "$backup" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} \;
+}
+select_wp_domain() {
+  mode="${1}"
+  local base="/etc/one-click/wordpress/www"
+  local sites i choice
+  mapfile -t sites < <(find "$base" -mindepth 1 -maxdepth 1 -type d)
+  if [[ ${#sites[@]} -eq 0 ]]; then
+    error "No WordPress sites found in $base"
+    return 1
+  fi
+  printf '%s\n' "${blue}Available WordPress sites:${reset}" " "
+  printf "${magenta}%-3s${blue} | ${yellow}%s${reset}\n" "No" "Domain"
+  echo "${blue}------------------------${reset}"
+  for i in "${!sites[@]}"; do
+    printf "${magenta}%-3s ${blue}| ${yellow}%s${reset}\n" "$((i+1))" "$(basename "${sites[$i]}")"
+  done
+  read -rp "${cyan}[USER] ${blue}Select a site to $mode by number: ${reset}" choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#sites[@]})); then
+    error "Invalid selection"
+    return 1
+  fi
+  domain=$(basename "${sites[$((choice-1))]}")
+  export domain
+  if [[ "$mode" == "backup" ]]; then
+    read -rp "${cyan}[USER]${blue} Would you like to configure a cronjob to backup daily at 2am (y|n): ${reset}" confirm_backup
+    confirm_backup="${confirm_backup,,}"
+    if [[ "$confirm_backup" == "y" || "$confirm_backup" == "yes" ]]; then
+      wp_backup_scheduler "$domain"
+    fi
+  fi
+}
+wp_backup_interactive() {
+  select_wp_domain "backup" || return 1
+  wp_backup "$domain"
+}
+wp_restore_interactive() {
+  select_wp_domain "restore" || return 1
+  local backup_base="/etc/one-click/wordpress/backups/$domain"
+  local backups i choice
+  mapfile -t backups < <(find "$backup_base" -mindepth 1 -maxdepth 1 -type d | sort)
+  if [[ ${#backups[@]} -eq 0 ]]; then
+    error "No backups found for $domain"
+    return 1
+  fi
+  printf '%s\n'  " " " " "${blue}Available backups for $domain:${reset}" " "
+  printf "${magenta}%-3s ${blue}|${yellow} %s${reset}\n" "No" "Timestamp"
+  echo "${blue}------------------------${reset}"
+  for i in "${!backups[@]}"; do
+    printf "${magenta}%-3s${blue} | ${yellow}%s${reset}\n" "$((i+1))" "$(basename "${backups[$i]}")"
+  done
+  read -rp "${cyan}[USER]${blue} Select a backup number to restore: ${reset}" choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#backups[@]})); then
+    error "Invalid selection"
+    return 1
+  fi
+  backup_dir="${backups[$((choice-1))]}"
+  wp_restore "$domain" "$backup_dir"
 }
 # ==== Install WP-CLI ====
 install_wp_cli() {
@@ -136,7 +210,7 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
-  chown www-data:www-data "$site"
+  chown "$web_user":"$web_user" "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
     $wp_cmd core download  || {
@@ -168,7 +242,7 @@ install_wp() {
 harden_wp() {
   $wp_cmd config set DISALLOW_FILE_EDIT true --raw 
   $wp_cmd config shuffle-salts 
-  chown -R www-data:www-data /etc/one-click/wordpress/www/$domain
+  chown -R "$web_user":"$web_user" /etc/one-click/wordpress/www/$domain
   find /etc/one-click/wordpress/www/$domain -type d -exec chmod 755 {} \;
   find /etc/one-click/wordpress/www/$domain -type f -exec chmod 644 {} \;
 }
@@ -184,14 +258,6 @@ wp_plugins() {
     $wp_cmd plugin activate redis-cache 
     $wp_cmd redis enable 
   fi
-}
-# ==== WP Rollback ====
-wp_restore() {
-  backup="$1"
-  info "Restoring WordPress backup: $backup"
-  tar -xzf "$backup/files.tar.gz" -C "$site"
-  $wp_cmd db import "$backup/db.sql" 
-  info "Rollback completed"
 }
 # ==== WP Staging ====
 wp_staging() {
@@ -287,6 +353,11 @@ apache_conf() {
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     apache_confi=/etc/httpd/conf.d/$domain.conf
   fi
+  if [[ -d /etc/apache2 ]]; then
+    apache_log_dir="/var/log/apache2"
+  else
+    apache_log_dir="/var/log/httpd"
+  fi
   cat << EOF > "$apache_confi"
 <VirtualHost *:80>
     ServerName $domain
@@ -300,8 +371,8 @@ apache_conf() {
         Require all granted
     </Directory>
 
-    ErrorLog \${APACHE_LOG_DIR}/$domain-error.log
-    CustomLog \${APACHE_LOG_DIR}/$domain-access.log combined
+    ErrorLog ${apache_log_dir}/$domain-error.log
+    CustomLog ${apache_log_dir}/$domain-access.log combined
 </VirtualHost>
 EOF
   if [[ "$pkg_mgr" == "apt" ]]; then
@@ -331,7 +402,6 @@ EOF
       php-mbstring \
       php-xml \
       php-json
-      systemctl enable httpd --now
   fi
 }
 apache_ssl_conf() {
@@ -384,9 +454,9 @@ start_screen() {
     "│    - ${yellow}yourdomain.com${blue}                                                               │" \
     "│    - ${yellow}www.yourdomain.com${blue}                                                           │" \
     "│  Without this, SSL installation and WordPress https URL setup may fail.           │" \
-    "│                                                                                   │" \
-    "│${yellow}Press ENTER to continue when ready...${blue}                                              │" \
-    "└───────────────────────────────────────────────────────────────────────────────────┘${reset}"
+    "│                                                                                   │"
+  read -rp  "│${yellow}Press ENTER to continue when ready...${blue}                                              │
+└───────────────────────────────────────────────────────────────────────────────────┘${reset}"
   return 0
 }
 # ==== LetsEncrypt ====
@@ -401,7 +471,7 @@ install_letsencrypt() {
       fi
     done
     site="/etc/one-click/wordpress/www/$domain"
-    wp_cmd="sudo -u www-data /usr/local/bin/wp --path=$site"
+    wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
     if command -v nginx &> /dev/null; then
       webserver="nginx"
     fi
@@ -483,16 +553,22 @@ EOF
 # === Run Script ====
 run_script() {
   start_screen
+  echo
   while true; do
+    local br=0
     read -rp "${cyan}[USER]${reset} Please provide the domain name you would like to use for this installation: " domain
     if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
       echo "Invalid domain name"
+      br=1
     fi
-    [[ -n "$domain" ]] && break
+    if [[ -n "$domain" && "$br" -ne 1 ]]; then
+      export domain
+      break
+    fi
     echo "Domain cannot be empty!"
   done
   site="/etc/one-click/wordpress/www/$domain"
-  wp_cmd="sudo -u www-data wp --path=$site"
+  wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   mkdir -p "$site"
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide the Site Title: " title
@@ -615,12 +691,6 @@ run_script() {
     "$pkg_mgr" install -y \
     mariadb-server \
     php-fpm \
-    php-mysql \
-    php-curl \
-    php-gd \
-    php-mbstring \
-    php-xml \
-    php-zip \
     unzip \
     curl
   fi
@@ -638,7 +708,13 @@ run_script() {
   $wp_cmd option get home 
   install_letsencrypt
   wp_backup_scheduler
-  success "One-Click WOrdpress has now been installed!"
-  info "Access the site from $domain"
-  info "Access WP Admin page via $domain/wp-admin"
+  success "One-Click Wordpress has now been installed!"
+  info "Access the site from ${magenta}https://${domain}${reset}"
+  info "Access WP Admin page via ${magenta}https://${domain}/wp-admin${reset}"
 }
+if [[ "${1:-}" == "-wpback" ]]; then
+  wp_backup "${2:-}"
+fi
+if [[ "${1:-}" == "-wprotate" ]]; then
+  wp_backup_rotate "${2:-}"
+fi
