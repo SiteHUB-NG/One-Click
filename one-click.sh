@@ -45,6 +45,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  repair                  Diagnose and repair network configuration issues." \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
+    "  --wp-create             Install Wordpress with either nginx or apache." \
+    "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
     "  --version               Display installed version information." "" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -158,7 +160,7 @@ secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
 updated="March 2026"
-version="1.1.8"
+version="1.1.9"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
@@ -365,6 +367,15 @@ load_system() {
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/sys-info.sh"
   local cache_file="${cache_dir}/sys-info.sh"
+  collect_sysinfo
+  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
+}
+load_wordpress() {
+  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/wordpress.sh"
+  local backup_url=""
+  # ==== Alt Mirror ====
+  #local bacup_url="https://as214354.network/wordpress.sh"
+  local cache_file="${cache_dir}/wordpress.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
@@ -621,6 +632,8 @@ _one_click() {
     cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
+    cmds["--wp-create"]=""
+    cmds["--wp-ssl"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -732,6 +745,8 @@ _one_click() {
     cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
+    cmds["--wp-create"]=""
+    cmds["--wp-ssl"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
@@ -822,20 +837,22 @@ fi
 map_one_click() {
   for i in "$@"; do
     case "$i" in
-      backup)      echo "--backup"    ;;
-      bench)       echo "--bench"     ;;
-      engine)      echo "$i"          ;;
-      migrator)    echo "--migrator"  ;;
-      net-repair)  echo "--repair"    ;;
-      reinstall)   echo "--reinstall" ;;
-      recovery)    echo "--recovery"  ;;
-      rule-engine) echo "$i"          ;;
-      cron)        echo "--cron"      ;;
-      logs)        echo "--log"       ;;
-      log-browser) echo "--log"       ;;
-      uninstall)   echo "--uninstall" ;;
+      backup)       echo "--backup"    ;;
+      bench)        echo "--bench"     ;;
+      engine)       echo "$i"          ;;
+      migrator)     echo "--migrator"  ;;
+      net-repair)   echo "--repair"    ;;
+      reinstall)    echo "--reinstall" ;;
+      recovery)     echo "--recovery"  ;;
+      rule-engine)  echo "$i"          ;;
+      cron)         echo "--cron"      ;;
+      logs)         echo "--log"       ;;
+      log-browser)  echo "--log"       ;;
+      uninstall)    echo "--uninstall" ;;
       update)       echo "--update"    ;;
-      *)           echo "$i"          ;;
+      --wp-create)  echo "-wp"         ;;
+      --wp-ssl)     echo "-ssl"        ;;
+      *)            echo "$i"          ;;
     esac
   done
 }
@@ -1003,6 +1020,16 @@ if [[ $# -gt 0 ]]; then
         fi
       fi
       ;;
+    -wp)
+      load_wordpress
+      run_script
+      exit 0
+      ;;
+    -ssl)
+      load_wordpress
+      install_letsencrypt
+      exit 0
+      ;;
     # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ##
     -x) backup_all_configs ;; ### ### ###  ### #   # ### # #          ##
     -y) recovery_backup    ;; # # # # ###  #   #   # #   ##           ##
@@ -1048,6 +1075,8 @@ if [[ $# -gt 0 ]]; then
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  --version               Check version" \
+        "  --wp-create             Install Wordpress with either nginx or apache." \
+        "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
