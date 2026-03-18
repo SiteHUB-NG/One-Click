@@ -1758,16 +1758,31 @@ start_journal_dispatcher() {
   local pid_file="/var/run/one_click_journal.pid"
   if [[ -f "$pid_file" ]]; then
     local old_pid=$(cat "$pid_file")
+	local service_name=$(awk 'NR==2{print $NF}' <(ps -p "$old_pid"))
     if ps -p "$old_pid" > /dev/null 2>&1; then
-      return
+	  if [[ "$service_name" != "journalctl" ]]; then
+	    awk '{print $1}' <(pgrep -af journalctl) | while read line; do
+		  kill "$line"
+		  rm "$pid_file"
+		done
+	  else
+        return
+	  fi
     else
       rm "$pid_file"
     fi
   fi
-  journalctl -fn0 -u ssh.service 2>/dev/null | while read -r line; do
-    [[ "$line" =~ "Failed password" ]] && guard_ssh "$line"
+  if [[ -f /etc/redhat-release ]]; then
+    ssh_service=sshd.service
+  else
+    ssh_service=ssh.service
+  fi
+  journalctl -fn0 -u $ssh_service 2>/dev/null | while read -r line; do
+    if [[ "$line" =~ "Failed password" ]]; then
+	  guard_ssh "$line"
   done &
-  echo $! > "$pid_file"
+  #echo $! > "$pid_file"
+  awk '{print $1}' <(pgrep -af journalctl) > "$pid_file"
 }
 toggle_mitigation() {
   echo -e "${cyan}--- Mitigation Settings ---${reset}"
@@ -1837,14 +1852,14 @@ start_monitors() {
 view_ssh_stats() {
   local last_view_ts=$(cat "$last_audit" 2>/dev/null || echo 0)
   local current_ts=$(date +%s)
-  printf '%s\n' " " "Take action against brute force attemps towards with useful insight into the actor and hintable patterns" \
+  printf '%s\n' " " "Take action against brute force attempts with useful insight into the actor and hintable patterns" \
     "You can drop malicious actors at the firewall with ${cyan}one-click engine 'audit drop <ID number>'${reset}" " "
   printf "${blue}%s${reset}\n" \
     "╔════╦═════════════════╦═════════╦══════════════════════════════════════════════════════════╦═════════════╗" \
     "║ ${magenta}ID${blue} ║ ${magenta}IP${blue}              ║ ${magenta}COUNT${blue}   ║ ${magenta}USERS${blue}                                                    ║ ${magenta}LAST SEEN${blue}   ║" \
     "╠════╬═════════════════╬═════════╬══════════════════════════════════════════════════════════╬═════════════╣"
   local id_counter=1
-  jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length, ([.[] | .user | select(. != null and . != "")] | unique | join(",")), ([.[] | .ts] | max)] | @tsv' "$monitor_ssh_file" | sort -rnk2 | while IFS=$'\t' read -r ip count users last; do
+  jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length, ([.[] | .user | select(. != null and . != "")] | unique | join(",")), ([.[] | .ts] | max)] | @tsv' "$monitor_ssh_file" 2> /dev/null | sort -rnk2 | while IFS=$'\t' read -r ip count users last; do
     local d_last=$(date -d @"$last" "+%m-%d %H:%M")
     local display_users="${users:0:53}"; [[ ${#users} -gt 53 ]] && display_users="${display_users}.."
 	if (( count <= 5 )); then
@@ -2000,22 +2015,30 @@ view_guard_history() {
 }
 add_fail2ban_jail() {
   local name="$1" port="$2" maxretry="$3" bantime="$4"
-   cat <<EOF >> "$f2b_conf"
+  local log_path
+  if [[ -f /var/log/auth.log ]]; then
+    log_path="/var/log/auth.log"
+  elif [[ -f /var/log/secure ]]; then
+    log_path="/var/log/secure"
+  else
+    log_path="/var/log/auth.log"  # fallback
+  fi
+  [[ ! -f /etc/fail2ban/action.d/one-click_abuseipdb-report.conf ]] && setup_abuse_reporting
+  cat <<EOF >> "$f2b_conf"
 [$name]
 enabled = true
 port    = $port
 filter  = sshd
-logpath = /var/log/auth.log
+logpath = ${log_path:-/var/log/secure}
 maxretry = $maxretry
 bantime  = $bantime
 action   = iptables-multiport[name=$name, port="$port", protocol=tcp]
            abuseipdb-report[name=$name]
 EOF
-  systemctl restart fail2ban
-  success "Jail '$name' added and Fail2Ban restarted."
+  success "Jail '$name' added."
 }
 setup_abuse_reporting() {
-  cat <<'EOF' > /etc/fail2ban/action.d/abuseipdb-report.conf
+  cat << EOF > /etc/fail2ban/action.d/one-click_abuseipdb-report.conf
 [Definition]
 actionban = curl https://api.abuseipdb.com/api/v2/report \
   --data-urlencode "ip=<ip>" \
@@ -2032,7 +2055,7 @@ view_global_banlist() {
       "╠══════════════════╦═════════════════╦══════════════╦═══════════╣" \
       "║ ${yellow}SOURCE${blue}           ║ ${yellow}IP${blue}              ║ ${yellow}JAIL/REASON${blue}  ║ ${yellow}STATUS${blue}    ║" \
       "╠══════════════════╬═════════════════╬══════════════╬═══════════╣"
-    fail2ban-client status sshd | grep "Banned IP list:" | sed 's/.*list://' | tr ' ' '\n' | grep -v '^$' | while read -r f2b_ip; do
+    fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/.*list://' | tr ' ' '\n' | grep -v '^$' | while read -r f2b_ip; do
       printf "${blue}║ ${yellow}%-16s${blue} ║${reset} %-15s${blue} ║${reset} %-12s${blue} ║ ${red}%-9s${blue} ║${reset}\n" "Fail2Ban" "$f2b_ip" "sshd" "BANNED"
     done
 	if [[ -s "$monitor_history_file" ]]; then
@@ -2431,6 +2454,7 @@ parse_firewall_command() {
     local j_port="${BASH_REMATCH[2]}"
     local j_retry="${BASH_REMATCH[3]}"
     add_fail2ban_jail "$j_name" "$j_port" "$j_retry" "3600"
+	systemctl restart fail2ban
     exit 0
   fi
   # ==== Detect Banlist ====
@@ -2651,10 +2675,11 @@ parse_firewall_command() {
   # ==== Detect Audit ====
   if [[ "$rule_lower" =~ ^audit$ ]]; then
     guard_dir="/etc/one-click/rule-engine/guard/"
-    monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
-    monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
+    #monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
+    #monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
     auto_mitigate=0  # Flag: 0 = passive, 1 = auto mitigation
     mkdir -p "$guard_dir"
+	touch "$monitor_ssh_file" "$monitor_ddos_file"
     info "Starting Deep Traffic Intelligence Audit..."
     local total_conns=$(ss -tun | grep -c "ESTAB")
     echo -e "${cyan}Active Connections:${reset} $total_conns"
