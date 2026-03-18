@@ -24,23 +24,79 @@ dns_check() {
 }
 # ==== Wordpress Backup ====
 wp_backup() {
-backup="/etc/one-click/wordpress/backups/$domain"
-timestamp=$(date +%Y%m%d-%H%M%S)
-info "Creating WordPress backup"
-mkdir -p "$backup/$timestamp"
-wp db export "$backup/$timestamp/db.sql" 
-tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" .
-info "Backup stored at $backup/$timestamp"
+  local domain base site backup timestamp
+  domain="$1"
+  base="/etc/one-click/wordpress"
+  site="$base/www/$domain"
+  backup="$base/backups/$domain"
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  [[ ! -d "$site" ]] && {
+    echo "[ERROR]: Site directory not found"
+    return 1
+  }
+  [[ ! -f "$site/wp-config.php" ]] && {
+    echo "[ERROR]: wp-config.php missing"
+    return 1
+  }
+  info "Creating WordPress backup for $domain"
+  mkdir -p "$backup/$timestamp"
+  local db_name db_user db_pass
+  db_name=$(grep DB_NAME "$site/wp-config.php" | cut -d"'" -f4)
+  db_user=$(grep DB_USER "$site/wp-config.php" | cut -d"'" -f4)
+  db_pass=$(grep DB_PASSWORD "$site/wp-config.php" | cut -d"'" -f4)
+  info "Backing up database..."
+  mysqldump -u"$db_user" -p"$db_pass" "$db_name" | gzip | pv > "$backup/$timestamp/db.sql.gz"
+  info "Archiving files..."
+  tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" .
+  cat > "$backup/$timestamp/meta.conf" <<EOF
+DOMAIN=$domain
+DB_NAME=$db_name
+DB_USER=$db_user
+TIMESTAMP=$timestamp
+EOF
+  info "Backup stored at $backup/$timestamp"
+}
+wp_restore() {
+  read -rp "This will overwrite $domain. Continue? (y/N): " confirm
+  if [[ "$confirm" != "y" ]]; then 
+    return 1
+  fi
+  local domain base site_dir backup_dir
+  domain="$1"
+  backup_dir="$2"
+  base="/etc/one-click/wordpress"
+  site_dir="$base/www/$domain"
+  [[ ! -d "$backup_dir" ]] && {
+    die "Backup directory not found"
+  }
+  [[ -d "$site_dir" && "$site_dir" == *"/www/"* ]] || {
+    die "Invalid site_dir"
+  }
+  info "Loading metadata..."
+  source "$backup_dir/meta.conf"
+  local db_name db_user db_pass
+  db_name=$(grep DB_NAME "$site_dir/wp-config.php" | cut -d"'" -f4)
+  db_user=$(grep DB_USER "$site_dir/wp-config.php" | cut -d"'" -f4)
+  db_pass=$(grep DB_PASSWORD "$site_dir/wp-config.php" | cut -d"'" -f4)
+  info "Restoring files..."
+  find "$site_dir" -mindepth 1 -delete
+  tar -xzf "$backup_dir/files.tar.gz" -C "$site_dir"
+  info "Restoring database..."
+  gunzip < "$backup_dir/db.sql.gz" | pv | mysql -u"$db_user" -p"$db_pass" "$db_name"
+  chown -R www-data:www-data "$site_dir"
+  success "Restore complete for $domain"
 }
 wp_backup_scheduler() {
+  local domain="$1"
   cat <<EOF >/etc/cron.d/one-click-wp-backups
-0 2 * * * root /usr/local/bin/one-click wp backup $domain # One-Click WP Backup
-30 2 * * * root /usr/local/bin/one-click wp rotate $domain # One-Click WP Rotate
+0 2 * * * root /usr/local/bin/one-click --wp-backup $domain #One-Click WP Backup
+30 2 * * * root /usr/local/bin/one-click --wp-rotate $domain #One-Click WP Rotate
 EOF
 }
 wp_backup_rotate() {
-  backup="/etc/one-click/wordpress/backups/$domain"
-  find "$backup" -maxdepth 1 -type d -mtime +14 -exec rm -rf {} \;
+  local domain="$1"
+  local backup="/etc/one-click/wordpress/backups/$domain"
+  find "$backup" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} \;
 }
 # ==== Install WP-CLI ====
 install_wp_cli() {
