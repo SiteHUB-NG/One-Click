@@ -13,13 +13,14 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== Cron logic ====
-for id in "${ids[@]}"; do
-  case "$id" in
-  debian) install_dep "cron" "command -v crontab" "cron" "$pkg_mgr" true                 ;;
-  rhel|centos|fedora) install_dep "cronie" "command -v crontab" "cronie" "$pkg_mgr" true ;;
-   *) printf '%s\n' "Unknown OS: $id"                                                    ;;
-  esac
-done
+if command -v cron &> /dev/null; then
+  cron_cmd=cron
+  cron_rep=cron
+elif command -v crond &> /dev/null; then
+  cron_cmd=crond
+  cron_rep=cronie
+fi
+install_dep "$cron_rep" "command -v $cron_cmd" "$cron_rep" "$pkg_mgr" true
 trap 'cron_menu' SIGUSR1
 draw_table_row() {
   local index="$1"
@@ -45,8 +46,8 @@ get_next_run() {
       date -d "@$t_ts" +"%b %d, %H:%M" && return
     done
   fi
-  local target_m="${m#0}"; [[ "$target_m" == "*" ]] && target_m=$(date +%-M)
-  local target_h="${h#0}"; [[ "$target_h" == "*" ]] && target_h=$(date +%-H)
+  local target_m="$m"; [[ "$target_m" == "*" ]] && target_m=$(date +%-M)
+  local target_h="$h"; [[ "$target_h" == "*" ]] && target_h=$(date +%-H)
   local current_year=$(date +%Y)
   if [[ "$mon" =~ ^[0-9]+$ && "$dom" =~ ^[0-9]+$ ]]; then
     local target_date="$current_year-$mon-$dom $target_h:$target_m"
@@ -66,7 +67,8 @@ get_next_run() {
     date -d "$day_diff days $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
     return
   fi
-  local today_ts=$(date -d "$target_h:$target_m" +%s 2>/dev/null)
+  local today_ts=$(date -d "$target_h:$target_m" +%s 2>/dev/null || echo 0)
+  [[ $today_ts -eq 0 ]] && echo "Unsupported" && return
   if [[ $today_ts -lt $(date +%s) ]]; then
     date -d "tomorrow $target_h:$target_m" +"%b %d, %H:%M" 2>/dev/null
   else
@@ -77,7 +79,7 @@ list_cron_jobs() {
   local filter cron i
   filter="${1:-}"
   i=1
-  cron=$(crontab -l 2>/dev/null;sed -n '/*/p' /etc/cron.d/*)
+  cron=$((crontab -l 2>/dev/null;sed -n '/*/p' /etc/cron.d/*) || true)
   if [[ -z "$cron" ]]; then
     warn "No cron jobs found."
     return 1
@@ -404,7 +406,6 @@ delete_cron_job() {
 }
 cron_menu() {
   header_notice "$cron_title" #"$cron_banner" "18" "4"
-  install_dep "cron" "command -v cron" "cron" "$pkg_mgr" true
   while true; do
     clear
     echo
