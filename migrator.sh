@@ -741,7 +741,7 @@ run_migrate_rsync() {
       rsync_cmd_run=(
         sshpass -p "$pass" rsync --relative "${rsync_opts[@]}" "/${migrate}" "${user}@${destination_server}:/"
       )
-      rsycn_cmd_run1=(
+      rsync_cmd_run1=(
         rsync --relative "${rsync_opts[@]}" -e "ssh -i ${key:-}" "/${migrate}" "${user}@${destination_server}:/"
       )
       if [[ ! -s "${key:-}" ]]; then
