@@ -108,6 +108,143 @@ Uninstall toolkit:
 .B one-click uninstall
 .RE
 
+.SH WORDPRESS
+
+The
+.B one-click
+tool includes a built‑in WordPress automation module.
+
+This module enables unattended or guided installation of a WordPress site
+including webserver configuration, database setup, optional caching,
+and SSL certificate provisioning.
+
+Before using these commands, ensure that DNS A records for both the
+root domain and the www subdomain are pointed to this server’s IP.
+
+.PP
+WordPress sites installed via
+.B one-click
+are created under
+.I /etc/one-click/wordpress/www/<domain>
+and use a dynamic database name based on the provided site and user.
+
+.SH WORDPRESS COMMANDS
+
+Usage:
+
+.RS
+.B one-click --wp-create
+.RE
+
+Installs a new WordPress site. Prompts interactively for:
+
+.IP \(bu 2
+Domain name (validated with a basic regex)
+
+.IP \(bu 2
+Site title
+
+.IP \(bu 2
+Admin user and password (with minimum complexity guard)
+
+.IP \(bu 2
+Admin email
+
+.IP \(bu 2
+Database username and password
+
+.IP \(bu 2
+Webserver choice (nginx or apache)
+
+.IP \(bu 2
+Optional Redis plugin activation
+
+.PP
+The installer will:
+
+.IP \(bu 2
+Install required packages (webserver, PHP, MariaDB, certbot, etc.)
+
+.IP \(bu 2
+Configure the selected webserver with a document root and virtual host
+
+.IP \(bu 2
+Create a database and database user (or reuse existing)
+
+.IP \(bu 2
+Download and configure WordPress via WP‑CLI
+
+.IP \(bu 2
+Optionally install plugins including caching and security
+
+.IP \(bu 2
+Attempt to provision Let's Encrypt SSL and update WordPress URLs
+
+.PP
+If SSL provisioning fails, the user is given a retry/skip menu.
+
+.RS
+.B one-click --wp-ssl <domain>
+.RE
+
+Ensures SSL is provisioned for an existing WordPress site.
+
+This command:
+
+.IP \(bu 2
+Validates DNS records for the domain and www subdomain
+
+.IP \(bu 2
+Invokes Certbot to issue or renew a certificate
+
+.IP \(bu 2
+Reloads the configured webserver
+
+.IP \(bu 2
+Updates WordPress home and site URL to use HTTPS when successful
+
+.PP
+If DNS does not point correctly or certbot fails, the command presents
+options to retry, change the contact email, view logs, or skip.
+
+.SH EXAMPLES
+
+Install a new WordPress site:
+
+.RS
+.B one-click --wp-create
+.RE
+
+Provision SSL for an existing WordPress site:
+
+.RS
+.B one-click --wp-ssl example.com
+.RE
+
+.SH NOTES
+
+WordPress installations are stored in:
+
+.RS
+/etc/one-click/wordpress/www/<domain>
+.RE
+
+Backups are created under:
+
+.RS
+/etc/one-click/wordpress/backups/<domain>
+.RE
+
+SSL certificates are managed by Certbot and stored under the
+standard Let's Encrypt directory:
+
+.RS
+/etc/letsencrypt/live/<domain>
+.RE
+
+.PP
+Domains must resolve to the server before SSL can be issued.
+
 .SH RULE-ENGINE
 
 The
