@@ -609,11 +609,11 @@ run_migrate_rsync() {
       letters=( B C D E F G H I J K L M N O P Q R S T U V W X Y Z )
       printf '%s\n' "${ul}${yellow}Migration Options:${reset}${ul_reset}" \
       "          ${red}[A]${reset}. Migrate All Databases"
-      if [[ "${#active_dbs}" -eq 1 ]]; then
+      if [[ "${#active_dbs[@]}" -eq 1 ]]; then
         echo "          ${red}[B]${reset}. Migrate $db"
       else
         for db in "${active_dbs[@]}"; do
-          echo "          ${red}[${letters[$i]]}]${reset}. Migrate $db"
+          echo "          ${red}[${letters[$i]}]${reset}. Migrate $db"
           ((i++))
         done
       fi
@@ -692,7 +692,7 @@ run_migrate_rsync() {
     echo
     # ==== Prompt user for dry run or actual migration ====
     while true; do
-      info '%s\n' "The rsync migration is just about ready to begin." \
+      info "The rsync migration is just about ready to begin." \
         "To protect the migration process from unexpected disconnections, this session is run inside of it's own ${cyan}tmux${reset} window." \
         "You can detach from the session at any time with ${cyan}Ctrl+b${reset} then ${cyan}d${reset} and the process will continue in the background" \
         "Should you need to reattach, please ensure you are the root user (or use sudo) and use the following command ${cyan}tmux reattach${reset} if the single session is running or ${cyan}tmux reattach -t 'one-click'${reset}" \
@@ -720,10 +720,16 @@ run_migrate_rsync() {
       --exclude-from=/root/rsync-etc-exclude.txt
       -e "ssh -o StrictHostKeyChecking=no"
     )
-    # ====  ====
-    [[ "$dry_run" -eq 3 ]] && ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 
+    # ==== EXIT ====
+    if [[ "$dry_run" -eq 3 ]]; then
+      sleep 0.5
+      tmux kill-session -t "one-click"
+      exit 0
+    fi
     # ==== Add --dry-run flag if user opted for dry run ====
-    [[ "$dry_run" -eq 1 ]] && rsync_opts+=(--dry-run)
+    if [[ "$dry_run" -eq 1 ]]; then
+      rsync_opts+=(--dry-run)
+    fi
     # ==== Migrate directories ====
     for migrate in "${dirs_to_migrate[@]}"; do
       if [[ -d "/$migrate" ]]; then
@@ -736,7 +742,7 @@ run_migrate_rsync() {
         sshpass -p "$pass" rsync --relative "${rsync_opts[@]}" "/${migrate}" "${user}@${destination_server}:/"
       )
       rsycn_cmd_run1=(
-        rsync --relative "${rsync_opts[@]} -e ssh -i "${key:-}"" "/${migrate}" "${user}@${destination_server}:/"
+        rsync --relative "${rsync_opts[@]}" -e "ssh -i ${key:-}" "/${migrate}" "${user}@${destination_server}:/"
       )
       if [[ ! -s "${key:-}" ]]; then
         wait_for_network
