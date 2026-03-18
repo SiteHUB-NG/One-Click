@@ -80,6 +80,7 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
+  chown www-data:www-data "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
     $wp_cmd core download  || {
@@ -174,9 +175,9 @@ install_webserver() {
     else
       "$pkg_mgr" install -y apache2 libapache2-mod-php
       apache_conf
+      apache_ssl_conf
       a2ensite "${domain}.conf"
       a2ensite "$domain-le-ssl.conf"
-      systemctl reload apache2
     fi
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     if [[ "$webserver" == "nginx" ]]; then
@@ -263,8 +264,6 @@ EOF
     a2enmod ssl
     a2enmod headers
     a2ensite "$domain"
-    systemctl reload apache2
-    systemctl enable apache2 --now
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     "$pkg_mgr" install -y \
       httpd \
@@ -278,6 +277,34 @@ EOF
       php-json
       systemctl enable httpd --now
   fi
+}
+apache_ssl_conf() {
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    ssl_apache_conf=/etc/apache2/sites-available/$domain-le-ssl.conf
+    apache_confi=/etc/apache2/sites-available/$domain.conf
+  elif [[ "$pkg_mgr" == "dnf" ]]; then
+    ssl_apache_conf=/etc/httpd/conf.d/$domain-le-ssl.conf
+    apache_confi=/etc/httpd/conf.d/$domain.conf
+  fi
+  cat << EOF > "$ssl_apache_conf"
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName $domain
+    ServerAlias www.$domain
+
+    DocumentRoot /etc/one-click/wordpress/www/$domain
+
+    <Directory /etc/one-click/wordpress/www/$domain>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog \${APACHE_LOG_DIR}/$domain-ssl-error.log
+    CustomLog \${APACHE_LOG_DIR}/$domain-ssl-access.log combined
+</VirtualHost>
+</IfModule>
+EOF
+  sed -Ei 's/#(Redirect permanent)/\1/' "$apache_confi"
 }
 # ==== Intro Message ====
 start_screen() {
@@ -410,6 +437,7 @@ run_script() {
   done
   site="/etc/one-click/wordpress/www/$domain"
   wp_cmd="sudo -u www-data wp --path=$site"
+  mkdir -p "$site"
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide the Site Title: " title
     [[ -n "$title" ]] && break
