@@ -31,6 +31,7 @@ rule_engine() {
     fi
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
+    systemctl enable fail2ban --now
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
       dnf -y install rsyslog &> /dev/null
@@ -38,6 +39,7 @@ rule_engine() {
     fi
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
+    systemctl enable fail2ban --now
   fi
   declare -gA alerted_ports=()
   engine_dir="/etc/one-click/rule-engine/"
@@ -60,6 +62,7 @@ rule_engine() {
   mkdir -p "$engine_dir"
   mkdir -p "${engine_dir}guard/"
   touch "$alias_file"
+  #touch "${engine_dir}guard/"{ssh,ddos}
   # ==== Default Sensitive Ports (Remove from here) ====
   declare -A default_sensitive_ports=(
     ["${real_ssh:-22}"]="SSH (Remote Access)"
