@@ -511,14 +511,16 @@ configure_backup() {
       tree -d -L 2 -I "$tree_ignore" / | less -RFX
       echo
       read -rp "${cyan}[USER]${reset} Enter backup source directory (or 'q' to quit): " source
-      [[ "$source" == "q" ]] && return 1
-      if [[ -d "$source" ]]; then
-        tree -I "$tree_ignore" "$source" | less -RFX
-        break
-      else
-        echo -e "${red}Error: Invalid Directory${reset}"
-        sleep 1.5
+      if [[ "$source" == "q" ]]; then
+        return 1
       fi
+      #if [[ -d "$source" ]]; then
+      #  tree -I "$tree_ignore" "$source" | less -RFX
+        break
+      #else
+      #  echo -e "${red}Error: Invalid Directory${reset}"
+      #  sleep 1.5
+      #fi
     done
   }
   source_dir
