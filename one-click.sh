@@ -49,6 +49,10 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
     "  --wp-backup             Backup wordpress vhosts." \
     "  --wp-restore            Restore wordpress backups." \
+    "  --static-create         Install a blank static html or php website." \
+    "  --static-backup         Create a backup of selected static site." \
+    "  --static-restore        Restore a static website from backup." \
+    "  --php                   Manage system-wide or per site php settings." \
     "  --version               Display installed version information." "" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -641,6 +645,10 @@ _one_click() {
     cmds["--wp-ssl"]=""
     cmds["--wp-backup"]=""
     cmds["--wp-restore"]=""
+    cmds["--static-create"]=""
+    cmds["--static-backup"]=""
+    cmds["--static-restore"]=""
+    cmds["--php"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -756,6 +764,10 @@ _one_click() {
     cmds["--wp-ssl"]=""
     cmds["--wp-backup"]=""
     cmds["--wp-restore"]=""
+    cmds["--static-create"]=""
+    cmds["--static-backup"]=""
+    cmds["--static-restore"]=""
+    cmds["--php"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
@@ -846,24 +858,28 @@ fi
 map_one_click() {
   for i in "$@"; do
     case "$i" in
-      backup)       echo "--backup"    ;;
-      bench)        echo "--bench"     ;;
-      engine)       echo "$i"          ;;
-      migrator)     echo "--migrator"  ;;
-      net-repair)   echo "--repair"    ;;
-      reinstall)    echo "--reinstall" ;;
-      recovery)     echo "--recovery"  ;;
-      rule-engine)  echo "$i"          ;;
-      cron)         echo "--cron"      ;;
-      logs)         echo "--log"       ;;
-      log-browser)  echo "--log"       ;;
-      uninstall)    echo "--uninstall" ;;
-      update)       echo "--update"    ;;
-      --wp-create)  echo "-wp"         ;;
-      --wp-ssl)     echo "-ssl"        ;;
-      --wp-backup)  echo "-backup"     ;;
-      --wp-restore) echo "-restore"    ;;
-      *)            echo "$i"          ;;
+      backup)           echo "--backup"      ;;
+      bench)            echo "--bench"       ;;
+      engine)           echo "$i"            ;;
+      migrator)         echo "--migrator"    ;;
+      net-repair)       echo "--repair"      ;;
+      reinstall)        echo "--reinstall"   ;;
+      recovery)         echo "--recovery"    ;;
+      rule-engine)      echo "$i"            ;;
+      cron)             echo "--cron"        ;;
+      logs)             echo "--log"         ;;
+      log-browser)      echo "--log"         ;;
+      uninstall)        echo "--uninstall"   ;;
+      update)           echo "--update"      ;;
+      --wp-create)      echo "-wp"           ;;
+      --wp-ssl)         echo "-ssl"          ;;
+      --wp-backup)      echo "-backup"       ;;
+      --wp-restore)     echo "-restore"      ;;
+      --static-create)  echo "-st"           ;;
+      --static-backup)  echo "-st-backup"    ;;
+      --static-restore) echo "-st-restore"   ;;
+      --php)            echo "-php"          ;;
+      *)                echo "$i"            ;;
     esac
   done
 }
@@ -1046,9 +1062,29 @@ if [[ $# -gt 0 ]]; then
       run_script
       exit 0
       ;;
+    -st)
+      load_wordpress
+      create_static_site
+      exit 0
+      ;;
+    -st-backup)
+      load_wordpress
+      static_backup_interactive
+      exit 0
+      ;;
+    -st-restore)
+      load_wordpress
+      static_restore_interactive
+      exit 0
+      ;;
     -ssl)
       load_wordpress
       install_letsencrypt
+      exit 0
+      ;;
+    -php)
+      load_wordpress
+      php_menu
       exit 0
       ;;
     # ==== [INFORMATIONAL]: AUTOMATION CALLS. DOES NOT FIRE FROM HERE ##
@@ -1100,6 +1136,10 @@ if [[ $# -gt 0 ]]; then
         "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
         "  --wp-backup             Backup wordpress vhosts." \
         "  --wp-restore            Restore wordpress backups." \
+        "  --static-create         Install a blank static html or php website." \
+        "  --static-backup         Create a backup of selected static site." \
+        "  --static-restore        Restore a static website from backup." \
+        "  --php                   Manage system-wide or per site php settings." \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
