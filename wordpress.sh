@@ -702,7 +702,9 @@ run_script() {
   case "$webserver" in
     1) webserver="nginx"                ;;
     2) webserver="apache"               ;;
-    *) echo "Invalid selection"; exit 1 ;;
+    *) 
+      echo "Invalid selection" 
+      ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
   esac
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
@@ -1043,7 +1045,8 @@ detect_env() {
     os_family="rhel"; pkg_manager="dnf"; web_user="apache"
     command -v dnf >/dev/null 2>&1 || pkg_manager="yum"
   else
-    error "Unsupported OS."; exit 1
+    error "Unsupported OS."
+    ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
   if systemctl is-active --quiet nginx; then
     webserver="nginx"
@@ -1053,7 +1056,8 @@ detect_env() {
     [[ "$os_family" == "debian" ]] && conf_path="/etc/apache2/sites-enabled" || conf_path="/etc/httpd/conf.d"
     [[ "$os_family" == "rhel" ]] && webserver="httpd"
   else
-    error "No supported webserver detected!"; exit 1
+    error "No supported webserver detected!" 
+    ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
 }
 switch_cli_php() {
@@ -1267,7 +1271,7 @@ php_menu() {
         3) switch_cli_php         ;;
         4) tune_php_settings      ;;
         5) site_tune_php          ;;
-        6) exit 0                 ;;
+        6) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
         *) error "Invalid option" ;;
       esac
     done
