@@ -1780,6 +1780,7 @@ start_journal_dispatcher() {
   journalctl -fn0 -u $ssh_service 2>/dev/null | while read -r line; do
     if [[ "$line" =~ "Failed password" ]]; then
 	  guard_ssh "$line"
+	fi
   done &
   #echo $! > "$pid_file"
   awk '{print $1}' <(pgrep -af journalctl) > "$pid_file"
