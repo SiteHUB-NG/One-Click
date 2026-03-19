@@ -471,6 +471,12 @@ start_screen() {
   else
     default_site="ONE-CLICK STATIC INSTALLATION"
     site="html site"
+    wp_title="  ___                ____ _ _      _      ____  _ _            
+ / _ \ _ __   ___   / ___| (_) ___| | __ / ___|(_) |_ ___  ___ 
+| | | | '_ \ / _ \ | |   | | |/ __| |/ / \___ \| | __/ _ \/ __|
+| |_| | | | |  __/ | |___| | | (__|   <   ___) | | ||  __/\__ \
+ \___/|_| |_|\___|  \____|_|_|\___|_|\_\ |____/|_|\__\___||___/
+"
   fi
   header_notice "$wp_title" "${wp_banner:-}" "188" "40"
   printf "${blue}%s${reset}\n" " " \
