@@ -330,7 +330,7 @@ install_webserver() {
   return 0
 }
 # ==== Webservers Configs ====
-install_php() {
+install_php_mods() {
   if [[ "$pkg_mgr" == "apt" ]]; then
     apt install -y \
     apache2 \
@@ -430,7 +430,7 @@ apache_conf() {
     CustomLog ${apache_log_dir}/$domain-access.log combined
 </VirtualHost>
 EOF
-  install_php
+  install_php_mods
 }
 apache_ssl_conf() {
   if [[ "$pkg_mgr" == "apt" ]]; then
@@ -508,6 +508,7 @@ EOF
 }
 # ==== LetsEncrypt ====
 install_letsencrypt() {
+  mode="${1:-}"
   if [[ -z "${domain:-}" ]]; then
     start_screen wordpress
     while true; do
@@ -761,7 +762,7 @@ run_script() {
   one-click engine "allow $webserver"
   wp_plugins
   $wp_cmd option get home 
-  install_letsencrypt
+  install_letsencrypt wordpress
   wp_backup_scheduler
   success "One-Click Wordpress has now been installed!"
   info "Access the site from ${magenta}https://${domain}${reset}"
@@ -813,7 +814,7 @@ EOF
   install_webserver static "$domain" "$site_dir"
   dns_check
   one-click engine "allow $webserver"
-  install_letsencrypt 
+  install_letsencrypt static
   wp_backup_scheduler
   success "One-Click static site has now been installed for $domain"
   info "Access the site from ${magenta}https://${domain}${reset}"
@@ -885,11 +886,12 @@ apache_static_conf() {
     CustomLog ${apache_log_dir}/$domain-access.log combined
 </VirtualHost>
 EOF
-  install_php
+  install_php_mods
   if [[ "$pkg_mgr" == "apt" ]]; then
     a2ensite "$domain"
     systemctl reload apache2
   else
+    systemctl enable httpd --now
     systemctl reload httpd
   fi
 }
@@ -1094,29 +1096,29 @@ switch_cli_php() {
   success "CLI is now $(php -v | head -n1)"
 }
 setup_repos() {
-  if [[ "$os_family" == "debian" ]]; then
+  if [[ "${os_family:-}" == "debian" ]]; then
     info "Ensuring Debian PHP repositories (sury.org)..."
-    $pkg_manager update -y && $pkg_manager install -y lsb-release ca-certificates curl gnupg2
+    $pkg_mgr update -y && $pkg_mgr install -y lsb-release ca-certificates curl gnupg2
     [[ ! -f /etc/apt/trusted.gpg.d/php.gpg ]] && curl -sSLo /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
-    $pkg_manager update -y
+    $pkg_mgr update -y
   else
     info "Ensuring RHEL PHP repositories (Remi)..."
-    $pkg_manager install -y https://rpms.remirepo.net/enterprise/remi-release-$(rpm -E %rhel).rpm
-    $pkg_manager install -y dnf-utils
+    $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-$(rpm -E %rhel).rpm
+    $pkg_mgr install -y dnf-utils
   fi
 }
 install_php() {
-  local ver=$1
+  local ver="${1:-}"
   setup_repos
   info "Installing PHP $ver and common extensions..."
-  if [[ "$os_family" == "debian" ]]; then
-    $pkg_manager install -y "php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" || return 1
+  if [[ "${os_family:-}" == "debian" ]]; then
+    $pkg_mgr install -y "php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" || return 1
     fpm_service="php$ver-fpm"
   else
-    $pkg_manager module reset php -y
-    $pkg_manager module enable "php:remi-$ver" -y
-    $pkg_manager install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl || return 1
+    $pkg_mgr module reset php -y
+    $pkg_mgr module enable "php:remi-$ver" -y
+    $pkg_mgr install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl || return 1
     fpm_service="php-fpm"
   fi
   systemctl restart "$fpm_service" && systemctl enable "$fpm_service"
@@ -1138,7 +1140,7 @@ site_tune_php() {
   local detected_ver=$(grep -oP 'php[0-9]+\.[0-9]+' "$target_cfg" | head -n1 | sed 's/php//')
   [[ -z "$detected_ver" ]] && detected_ver=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
   success "Detected PHP $detected_ver"
-  if [[ "$os_family" == "debian" ]]; then
+  if [[ "${os_family:-}" == "debian" ]]; then
     ini_path="/etc/php/$detected_ver/fpm/php.ini"
     fpm_serv="php$detected_ver-fpm"
   else
