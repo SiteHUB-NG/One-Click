@@ -14,6 +14,8 @@
 # ====== One-Click ====== #
 # ==== WordPress ====
 . /etc/os-release
+secret_key="/etc/one-click.backup_secret.key"
+current_profile_file="$config_dir/current_profile"
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
@@ -64,11 +66,20 @@ wp_backup() {
   mysqldump -u"$db_user" -p"$db_pass" "$db_name" | gzip | pv > "$backup/$timestamp/db.sql.gz"
   info "Archiving files..."
   tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" .
+  # ==== Metadata ====
   cat > "$backup/$timestamp/meta.conf" <<EOF
 DOMAIN=$domain
 DB_NAME=$db_name
 DB_USER=$db_user
 TIMESTAMP=$timestamp
+EOF
+  # ==== Manifest ====
+  cat > "$backup/$timestamp/manifest.txt" <<EOF
+TYPE=$( [[ -f "$backup/$timestamp/db.sql.gz" ]] && echo wordpress || echo static )
+DOMAIN=$domain
+TIMESTAMP=$timestamp
+HOSTNAME=$(hostname)
+BACKUP_VERSION=1.0
 EOF
   success "Backup stored at $backup/$timestamp"
 }
@@ -118,6 +129,11 @@ wp_backup_rotate() {
 select_wp_domain() {
   local base sites i choice
   mode="${1}"
+  if [[ "${2:-}" == "profile" ]]; then
+    type=profile
+  else
+    type=site
+  fi
   base="/etc/one-click/wordpress/www"
   mapfile -t sites < <(find "$base" -mindepth 1 -maxdepth 1 -type d)
   if [[ ${#sites[@]} -eq 0 ]]; then
@@ -130,7 +146,7 @@ select_wp_domain() {
   for i in "${!sites[@]}"; do
     printf "${magenta}%-3s ${blue}| ${yellow}%s${reset}\n" "$((i+1))" "$(basename "${sites[$i]}")"
   done
-  read -rp "${cyan}[USER] ${blue}Select a site to $mode by number: ${reset}" choice
+  read -rp "${cyan}[USER] ${blue}Select a $type to $mode by number: ${reset}" choice
   if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#sites[@]})); then
     error "Invalid selection"
     return 1
@@ -146,14 +162,121 @@ select_wp_domain() {
   fi
 }
 wp_backup_interactive() {
-  select_wp_domain "backup" || return 1
-  wp_backup "$domain"
+  central_menu wordpress
+}
+central_menu() {
+  local choice
+  wpstatic="${1:-}"
+  while true; do
+    #clear
+    paste <(printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                  ${yellow}ONE-CLICK BACKUP MANAGER${blue}                  ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ 1  ║ Local Backup                                          ║" \
+      "║ 2  ║ Local Restore                                         ║" \
+      "║ 3  ║ Remote Backup                                         ║" \
+      "║ 4  ║ Remote Restore                                        ║" \
+      "║ 5  ║ List Remote Backups                                   ║" \
+      "║ 6  ║ Switch Profiles                                       ║" \
+      "║ 7  ║ Manage Remote Profiles                                ║" \
+      "║ 0  ║ Exit                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
+
+    read -rp "Select an option: " choice
+    case "$choice" in
+      1)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+          resolve_profile "$domain"
+          wp_backup "$domain"
+        else
+          select_static_domain "backup" || return 1
+          resolve_profile "$domain"
+          static_backup "$domain"
+        fi
+        ;;
+      2)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "restore" || return 1
+          resolve_profile "$domain"
+          wp_restore_int
+        else
+          static_restore_int
+        fi
+        ;;
+      3)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+        else
+          select_static_domain "backup" || return 1
+        fi
+        remote_backup "$domain" "$wpstatic"
+        ;;
+      4)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+        else
+          select_static_domain "backup" || return 1
+        fi
+        remote_restore "$domain" "$wpstatic"
+        ;;
+      5)
+        
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+        else
+          select_static_domain "backup" || return 1
+        fi
+        resolve_profile "$domain"
+        profile_pass_enc=$(awk -v p="[$profile]" '
+          $0==p {f=1; next}
+          /^\[/ {f=0}
+          f && /^E-PASSWD=/ {
+            print substr($0,10)
+            exit
+          }
+        ' "$profiles_file")
+        if [[ -n "$profile_pass_enc" ]]; then
+          d_pass=$(decrypt_password "$profile_pass_enc")
+        else
+          d_pass=""
+        fi
+        remote_list "$domain" "$d_pass"
+        read -rp "Press Enter to continue"
+        ;;
+      6)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "switch" "profile" || return 1
+        else
+          select_static_domain "switch to" "profile" || return 1
+        fi
+        profile_switch
+        read -rp "Press Enter to continue"
+        ;;
+      7)
+        remote_profile_menu
+        ;;
+      0)
+        echo "Exiting..."
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
+        ;;
+
+      *)
+        echo "Invalid option"
+        ;;
+    esac
+
+    echo
+  done
 }
 wp_restore_interactive() {
+  central_menu wordpress
+}
+wp_restore_int() {
   local backup_base backups i choice
-  select_wp_domain "restore" || return 1
+  #select_wp_domain "restore" || return 1
   backup_base="/etc/one-click/wordpress/backups/$domain"
-  backups i choice
   mapfile -t backups < <(find "$backup_base" -mindepth 1 -maxdepth 1 -type d | sort)
   if [[ ${#backups[@]} -eq 0 ]]; then
     error "No backups found for $domain"
@@ -484,7 +607,7 @@ EOF
   header_notice "$wp_title" "${wp_banner:-}" "188" "40"
   printf "${blue}%s${reset}\n" " " \
     "┌───────────────────────────────────────────────────────────────────────────────────┐" \
-    "│${yellow}              $default_site                                        ${blue}│" \
+    "│${yellow}                     $default_site                                 ${blue}│" \
     "├───────────────────────────────────────────────────────────────────────────────────┤" \
     "│                                                                                   │" \
     "│${yellow}${ul}Overview:${ul_reset}${blue}                                                                          │" \
@@ -807,8 +930,8 @@ EOF
     "[2] Apache"
   read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver_choice
     case "$webserver_choice" in
-      1) webserver="nginx" ;;
-      2) webserver="apache" ;;
+      1) webserver="nginx"                  ;;
+      2) webserver="apache"                 ;;
       *) echo "Invalid selection"; return 1 ;;
   esac
   install_webserver static "$domain" "$site_dir"
@@ -912,7 +1035,6 @@ static_backup() {
     error "Site directory not found"
     return 1
   }
-  # 🔒 Strong validation (like wp-config.php)
   [[ ! -f "$site/index.html" && ! -f "$site/index.php" ]] && {
     error "No index file found (not a valid static site)"
     return 1
@@ -948,10 +1070,18 @@ SITE_DIR=$site
 PHP_ENABLED=$(grep -q '\.php' <<< "$(ls $site 2>/dev/null)" && echo yes || echo no)
 TIMESTAMP=$timestamp
 EOF
+  # ==== Manifest ====
+  cat > "$backup/$timestamp/manifest.txt" <<EOF
+TYPE=$( [[ -f "$backup/$timestamp/db.sql.gz" ]] && echo wordpress || echo static )
+DOMAIN=$domain
+TIMESTAMP=$timestamp
+HOSTNAME=$(hostname)
+BACKUP_VERSION=1.0
+EOF
   success "Backup stored at $backup/$timestamp"
 }
 static_restore() {
-  read -rp "${cyan}[USER]${blue} This will overwrite $domain. Continue? (y|n): " confirm
+  read -rp "${yellow}[USER]${blue} This will overwrite $domain. Continue? (y|n): " confirm
   [[ "$confirm" != "y" && "$confirm" != "yes" ]] && return 1
   local domain base site_dir backup_dir webserver
   domain="${domain:-${1}}"
@@ -975,22 +1105,40 @@ static_restore() {
   case "$WEBSERVER" in
     nginx)
       if [[ -f "$backup_dir/nginx.conf" ]]; then
-        cp "$backup_dir/nginx.conf" /etc/nginx/sites-available/$domain.conf 2>/dev/null || \
-        cp "$backup_dir/nginx.conf" /etc/nginx/conf.d/$domain.conf
-        [[ -d /etc/nginx/sites-enabled ]] && \
-        ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/
-        systemctl reload nginx
+        if systemctl is-active nginx.service &> /dev/null; then
+          cp "$backup_dir/nginx.conf" /etc/nginx/sites-available/$domain.conf 2>/dev/null || \
+          cp "$backup_dir/nginx.conf" /etc/nginx/conf.d/$domain.conf
+          [[ -d /etc/nginx/sites-enabled ]] && \
+          ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/  
+          systemctl reload nginx
+        else
+          error "$WEBSERVER is inactive"
+          warn "Please check status and errors then try again"
+          return
+        fi
       fi
       ;;
     apache)
       if [[ -f "$backup_dir/apache.conf" ]]; then
         if [[ -d /etc/apache2 ]]; then
-          cp "$backup_dir/apache.conf" /etc/apache2/sites-available/$domain.conf
-          a2ensite "$domain"
-          systemctl reload apache2
+          if systemctl is-active apache2.service &> /dev/null; then
+            cp "$backup_dir/apache.conf" /etc/apache2/sites-available/$domain.conf
+            a2ensite "$domain"       
+            systemctl reload apache2
+          else
+            error "$WEBSERVER is inactive"
+            warn "Please check status and errors then try again"
+            return
+          fi
         else
-          cp "$backup_dir/apache.conf" /etc/httpd/conf.d/$domain.conf
-          systemctl reload httpd
+          if systemctl is-active httpd.service &> /dev/null; then
+            cp "$backup_dir/apache.conf" /etc/httpd/conf.d/$domain.conf
+            systemctl reload httpd
+          else
+            error "$WEBSERVER is inactive"
+            warn "Please check status and errors then try again"
+            return
+          fi
         fi
       fi
       ;;
@@ -1000,6 +1148,11 @@ static_restore() {
 }
 select_static_domain() {
   mode="${1}"
+  if [[ "${2:-}" == "profile" ]]; then
+    type=profile
+  else
+    type=site
+  fi
   local base="/etc/one-click/sites/www"
   local sites i choice
   mapfile -t sites < <(find "$base" -mindepth 1 -maxdepth 1 -type d)
@@ -1013,7 +1166,7 @@ select_static_domain() {
   for i in "${!sites[@]}"; do
     printf "${magenta}%-3s ${blue}| ${yellow}%s${reset}\n" "$((i+1))" "$(basename "${sites[$i]}")"
   done
-  read -rp "${cyan}[USER] ${blue}Select a site to $mode by number: ${reset}" choice
+  read -rp "${cyan}[USER] ${blue}Select a $type to $mode by number: ${reset}" choice
   if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#sites[@]})); then
     error "Invalid selection"
     return 1
@@ -1022,11 +1175,18 @@ select_static_domain() {
   export domain
 }
 static_backup_interactive() {
+  central_menu static
+}
+static_backup_int() {
   select_static_domain "backup" || return 1
   static_backup "$domain"
 }
 static_restore_interactive() {
+  central_menu static
+}
+static_restore_int() {
   select_static_domain "restore" || return 1
+  resolve_profile "$domain"
   local backup_base="/etc/one-click/sites/backups/$domain"
   local backups i choice
   mapfile -t backups < <(find "$backup_base" -mindepth 1 -maxdepth 1 -type d | sort)
@@ -1289,6 +1449,7 @@ php_menu() {
 }
 ##################################### SECURITY ##################################
 declare -gA offense_count
+# ==== Do Not Monitor IPs In Whitelist ====
 WHITELIST=("127.0.0.1")
 monitor_history_file="/etc/one-click/rule-engine/guard/history"
 apply_block() {
@@ -1392,7 +1553,415 @@ if [[ "$1" == "--monitor" ]]; then
   detect_env
   monitor_web_logs
 fi
-if ! systemctl is-active one-click-guard.service 2> /dev/null; then
+if ! systemctl is-active one-click-guard.service &> /dev/null; then
   systemctl daemon-reload
   systemctl enable one-click-guard.service --now
 fi
+######################################## REMOTE BACKUP & RESTORE ##################################
+config_dir="$base/sites/config"
+profiles_file="$config_dir/remotes.conf"
+map_file="$config_dir/domain_map.conf"
+current_profile_file="$config_dir/current_profile"
+mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
+profile_add() {
+  export d_pass
+  read -rp "${cyan}[USER]${blue} Please provide the remote hosts IP address:${reset} " host
+  read -rp "${cyan}[USER]${blue} Please provide the remote username:${reset} " user
+  user="${user:-root}"
+  read -rp "${cyan}[USER]${blue} Remote base path [/backups]: ${reset}" base_path
+  base_path="${base_path:-/backups}"
+  check_auth
+  cat >> "$profiles_file" <<EOF
+[$profile]
+HOST=${host}
+USER=${user:-root}
+BASE_PATH=$base_path
+E-PASSWD=$e_pass
+EOF
+  if [[ -z "$profiles_file" ]]; then
+    error "profiles file was not populated"
+    return 1
+  fi
+  if grep -q "^\[$profile" "$profiles_file"; then
+    success "Profile '$profile' created"
+    return 0
+  else
+    error "Profile "$profile" not added"
+    return 1
+  fi
+}
+profile_list() {
+  echo -e "\e[34m╔══════════════════════╦══════════════════════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ Name                 ║ Host                 ║ Base Path            ║\e[0m"
+  echo -e "\e[34m╠══════════════════════╬══════════════════════╬══════════════════════╣\e[0m"
+  awk '
+    /^\[/ {name=substr($0,2,length($0)-2)}
+    /^HOST=/ {host=substr($0,6)}
+    /^BASE_PATH=/ {
+      base=substr($0,11)
+      printf "%-22s %-22s %-22s\n", name, host, base
+    }
+  ' "$profiles_file" | while read -r profile_name profile_host2 profile_base_path; do
+    printf "\e[34m║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" "$profile_name" "$profile_host2" "$profile_base_path"
+  done
+  echo -e "\e[34m╚══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
+}
+profile_assign() {
+  local domain
+  domain="${1:-}"
+  if [[ -z "$domain" ]]; then
+    read -rp "${cyan}[USER]${blue} Please enter domain: " domain
+  fi
+  read -rp "${cyan}[USER]${blue} Please create a profile name: " profile
+  echo "$domain=$profile" > /tmp/map.tmp
+  echo "$profile" > "$current_profile_file"
+  grep -v "^$domain=" "$map_file" 2>/dev/null >> /tmp/map.tmp || true
+  mv -f /tmp/map.tmp "$map_file"
+  profile_add
+  success "$profile has been created" "$domain → $profile"
+  return 0
+}
+load_profile() {
+  local profile
+  profile="$1"
+  profile_pass_enc=$(awk -v p="[$profile]" '
+    $0==p {f=1; next}
+    /^\[/ {f=0}
+    f && /^E-PASSWD=/ {
+      print substr($0,10)
+      exit
+    }
+  ' "$profiles_file")
+  if [[ -n "$profile_pass_enc" ]]; then
+    profile_pass=$(decrypt_password "$profile_pass_enc")
+  else
+    profile_pass=""
+  fi
+  profile_host=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^HOST=/{print substr($0,6)}' "$profiles_file")
+  profile_user=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^USER=/{print substr($0,6)}' "$profiles_file")
+  profile_base=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^BASE_PATH=/{print substr($0,11)}' "$profiles_file")
+  if [[ -z "$profile_host" ]]; then
+    error "Profile not found"
+    return 1
+  fi
+  export profile_pass
+  return
+}
+resolve_profile() {
+  local domain
+  domain="$1"
+  profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
+  if [[ -z "$profile" ]]; then
+    info "No profile assigned to $domain"
+    profile_assign "$domain"
+    profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
+  fi
+  load_profile "$profile"
+  remote_host="$profile_host"
+  remote_user="$profile_user"
+  remote_base="$profile_base"
+}
+check_auth() {
+  if [[ -n "${profile_pass:-}" ]]; then
+    sshpass="$profile_pass"
+    use_sshpass=1
+    return 0
+  fi
+  if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$user@$host" "exit" >/dev/null 2>&1; then
+    read -rsp "${cyan}[USER]${blue} ${host}'s password: " sshpass
+    if [[ -n "$sshpass" ]]; then
+      e_pass=$(encrypt_password "$sshpass")
+    fi
+    echo
+    use_sshpass=1
+  else
+    use_sshpass=0
+  fi
+  export e_pass
+  export d_pass
+}
+run_ssh() {
+  if [[ "$use_sshpass" == 1 ]]; then
+    sshpass -p "$d_pass" ssh -o StrictHostKeyChecking=no "$remote_user@$remote_host" "$1"
+  else
+    ssh "$remote_user@$remote_host" "$1"
+  fi
+}
+run_rsync() {
+  if [[ "$use_sshpass" == 1 ]]; then
+    sshpass -p "$d_pass" rsync -az --progress -e "ssh -o StrictHostKeyChecking=no" "$@"
+  else
+    rsync -az --progress "$@"
+  fi
+}
+remote_backup() {
+  local domain type
+  domain="$1"
+  type="$2"
+  profile_assign "$domain"
+  resolve_profile "$domain"
+  if [[ "$type" == "wordpress" ]]; then
+    wp_backup "$domain"
+    base="/etc/one-click/wordpress"
+  else
+    static_backup "$domain"
+    base="/etc/one-click/sites"
+  fi
+  latest=$(ls -dt "$base/backups/$domain/"* | head -n1)
+  timestamp=$(basename "$latest")
+  d_pass="$profile_pass"
+  info "A remote backup will be processed by creating a local backup first" \
+    "Once complete, it will be sent to your remote storage based on profile"
+  remote_path="$remote_base/$(hostname)/$domain/$timestamp"
+  run_ssh "mkdir -p $remote_path"
+  run_rsync "$latest/" "$remote_user@$remote_host:$remote_path/"
+  success "Remote backup completed"
+}
+remote_restore() {
+  local domain="$1"
+  type="$2"
+  resolve_profile "$domain"
+  profile_pass_enc=$(awk -v p="[$profile]" '
+    $0==p {f=1; next}
+    /^\[/ {f=0}
+    f && /^E-PASSWD=/ {
+      print substr($0,10)
+      exit
+    }
+  ' "$profiles_file")
+  if [[ -n "$profile_pass_enc" ]]; then
+    d_pass=$(decrypt_password "$profile_pass_enc")
+  else
+    d_pass=""
+  fi
+  remote_list "$domain" "" restore
+  tmp="/tmp/oneclick-$domain-$ts"
+  mkdir -p "$tmp"
+  run_rsync "$remote_user@$remote_host:$remote_base/*/$domain/$ts/" "$tmp/"
+  if [[ "$type" == "wordpress" ]]; then
+    wp_restore "$domain" "$tmp"
+  else
+    static_restore "$domain" "$tmp"
+  fi
+  rm -rf "$tmp"
+}
+remote_list() {
+  local domain type
+  domain="$1"
+  d_pass="${2:-$d_pass}"
+  local -a timestamps servers
+  resolve_profile "$domain"
+  check_auth
+  echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ ID ║ Timestamp            ║ Server               ║\e[0m"
+  echo -e "\e[34m╠════╬══════════════════════╬══════════════════════╣\e[0m"
+  mapfile -t backups < <(
+    run_ssh "
+      for d in $remote_base/*/$domain/*; do
+        server=\$(echo \$d | cut -d'/' -f3)
+        ts=\$(basename \$d)
+        echo \"\$ts \$server\"
+      done
+    "
+  )
+  local i=1
+  for b in "${backups[@]}"; do
+    ts=$(awk '{print $1}' <<< "$b")
+    server=$(awk '{print $2}' <<< "$b")
+    timestamps+=("$ts")
+    servers+=("$server")
+    printf "\e[34m║ %-2s ║ %-20s ║ %-20s ║\e[0m\n" "$i" "$ts" "$server"
+    ((i++))
+  done
+  echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╝\e[0m"
+  if [[ "${3:-}" == "restore" ]]; then
+    local choice
+    while true; do
+      read -rp "${cyan}[USER]${blue} Select backup ID to restore: ${reset}" choice
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#timestamps[@]} )); then
+        ts="${timestamps[$((choice-1))]}"
+        return 0
+      else
+        error "Invalid choice, try again."
+      fi
+    done
+  fi
+}
+profile_switch() {
+  local profiles choice selected
+  mapfile -t profiles < <(awk '/^\[.*\]/{gsub(/\[|\]/,""); print $0}' "$profiles_file")
+  if [[ ${#profiles[@]} -eq 0 ]]; then
+    error "No profiles available. Create one first."
+    return 1
+  fi
+  echo -e "\e[34m╔════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ ID ║ Profile Name         ║\e[0m"
+  echo -e "\e[34m╠════╬══════════════════════╣\e[0m"
+  local i=1
+  for p in "${profiles[@]}"; do
+    printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "$i" "$p"
+    ((i++))
+  done
+  echo -e "\e[34m╚════╩══════════════════════╝\e[0m"
+  while true; do
+    read -rp "${cyan}[USER]${blue} Select profile ID for $domain: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#profiles[@]} )); then
+      selected="${profiles[$((choice-1))]}"
+      echo "$selected" > "$current_profile_file"
+      break
+    else
+      error "Invalid selection, try again."
+    fi
+  done
+  grep -v "^$domain=" "$map_file" > /tmp/map.tmp || true
+  echo "$domain=$selected" >> /tmp/map.tmp
+  mv /tmp/map.tmp "$map_file"
+  success "$domain now uses profile '$selected'"
+}
+get_current_profile() {
+  [[ -f "$current_profile_file" ]] && printf "${yellow}[${red}[${magenta}Current Profile: ${blue}$(cat $current_profile_file)${red}]${yellow}]${reset}"
+}
+####################### REMOTE PROFILES MANAGEMENT ################################
+# ==== Add New Profile ====
+remote_profile_add() {
+  local profile host user base_path sshpass e_pass
+  read -rp "${cyan}[USER]${blue} Enter new profile name: " profile
+  [[ -z "$profile" ]] && { error "Invalid name"; return 1; }
+  if grep -q "^\[$profile\]" "$profiles_file"; then
+    echo "Profile already exists"
+    return 1
+  fi
+  read -rp "${cyan}[USER]${blue} Enter the remote host IP: " host
+  read -rp "${cyan}[USER]${blue} Enter ${hosts}'s username [root]: " user
+  user="${user:-root}"
+  read -rp "${cyan}[USER]${blue} Enter remote base path [/backups]: " base_path
+  base_path="${base_path:-/backups}"
+  read -rsp "${cyan}[USER]${blue} Password (leave empty for SSH key): " sshpass
+  echo
+  [[ -n "$sshpass" ]] && e_pass=$(encrypt_password "$sshpass") || e_pass=""
+  cat >> "$profiles_file" <<EOF
+[$profile]
+HOST=$host
+USER=$user
+BASE_PATH=$base_path
+E-PASSWD=$e_pass
+EOF
+    success "Profile '$profile' added"
+}
+# ==== List Remote Profiles ====
+remote_profile_list() {
+  local -a names hosts bases
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^\[(.*)\]$ ]]; then
+      name="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^HOST=(.*)$ ]]; then
+      host="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^BASE_PATH=(.*)$ ]]; then
+      base="${BASH_REMATCH[1]}"
+      names+=("$name")
+      hosts+=("$host")
+      bases+=("$base")
+    fi
+  done < "$profiles_file"
+  if [[ ${#names[@]} -eq 0 ]]; then
+    error "No profiles found."
+    return 1
+  fi
+  echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ ID ║ Profile Name         ║ Host                 ║ Base Path            ║\e[0m"
+  echo -e "\e[34m╠════╬══════════════════════╬══════════════════════╬══════════════════════╣\e[0m"
+  local i=1
+  for idx in "${!names[@]}"; do
+    printf "\e[34m║ %-2s ║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" \
+      "$i" "${names[$idx]}" "${hosts[$idx]}" "${bases[$idx]}"
+    ((i++))
+  done
+  echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
+}
+# ==== Switch Active Profile ====
+remote_profile_switch() {
+  local profiles choice selected
+  mapfile -t profiles < <(awk '/^\[/{gsub(/\[|\]/,""); print}' "$profiles_file")
+  [[ ${#profiles[@]} -eq 0 ]] && { error "No profiles found"; return 1; }
+  echo -e "\e[34m╔════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ ID ║ Profile Name         ║\e[0m"
+  echo -e "\e[34m╠════╬══════════════════════╣\e[0m"
+  local i=1
+  for p in "${profiles[@]}"; do
+    printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "$i" "$p"
+    ((i++))
+  done
+  echo -e "\e[34m╚════╩══════════════════════╝\e[0m"
+  while true; do
+    read -rp "${cyan}[USER]${blue} Select profile ID to activate: ${reset}" choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#profiles[@]} )); then
+      selected="${profiles[$((choice-1))]}"
+      echo "$selected" > "$current_profile_file"
+      success "Active profile: $selected"
+      break
+    else
+      error "Invalid selection"
+    fi
+  done
+}
+# ==== Delete Remote Profile ====
+remote_profile_delete() {
+  read -rp "${cyan}[USER]${blue} Profile to delete: " profile
+  grep -q "=$profile" "$map_file" && { error "Profile is assigned to a domain"; return 1; }
+  awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}!f' "$profiles_file" > /tmp/remotes.tmp
+  mv /tmp/remotes.tmp "$profiles_file"
+  success "Profile '$profile' deleted"
+}
+# ==== Test Profile Connection ====
+remote_profile_test() {
+  local profile profile_host profile_user profile_pass_enc d_pass ret
+  [[ -f "$current_profile_file" ]] || { error "No active profile"; return 1; }
+  profile=$(<"$current_profile_file")
+  profile_pass_enc=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^E-PASSWD=/{print substr($0,10)}' "$profiles_file")
+  [[ -z "$profile" ]] && { error "Active profile is empty"; return 1; }
+  profile_host=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^HOST=/{print substr($0,6)}' "$profiles_file")
+  profile_user=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^USER=/{print substr($0,6)}' "$profiles_file")
+  profile_pass_enc=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^E-PASSWD=/{print substr($0,10)}' "$profiles_file")
+  [[ -n "$profile_pass_enc" ]] && d_pass=$(decrypt_password "$profile_pass_enc") || d_pass=""
+  if [[ -n "$d_pass" ]]; then
+    sshpass -p "$d_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+      "$profile_user@$profile_host" "echo OK" >/dev/null 2>&1 || ret=$?
+  else
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+      "$profile_user@$profile_host" "echo OK" >/dev/null 2>&1 || ret=$?
+  fi
+  ret=${ret:-0}
+  if [[ $ret -eq 0 ]]; then
+  success "${green}Connection OK to $profile_host as $profile_user${reset}"
+    else
+        error "${red}Connection failed to $profile_host as $profile_user${reset}"
+    fi
+}
+remote_profile_menu() {
+  local choice
+  while true; do
+    echo -e "\e[34m╔══════════════════════════════════════╗\e[0m"     $(get_current_profile)
+    echo -e "\e[34m║       ${yellow}Remote Profile Management${blue}      ║\e[0m"
+    echo -e "\e[34m╠══════════════════════════════════════╣\e[0m"
+    echo -e "\e[34m║ 1) List Profiles                     ║\e[0m"
+    echo -e "\e[34m║ 2) Add New Profile                   ║\e[0m"
+    echo -e "\e[34m║ 3) Switch Active Profile             ║\e[0m"
+    echo -e "\e[34m║ 4) Delete Profile                    ║\e[0m"
+    echo -e "\e[34m║ 5) Test Profile Connection           ║\e[0m"
+    echo -e "\e[34m║ 0) Exit                              ║\e[0m"
+    echo -e "\e[34m╚══════════════════════════════════════╝\e[0m"
+    read -rp "Select an option: " choice
+    case "$choice" in
+        1) 
+          profile_list
+          read -rp "Press Enter to continue" ;;
+        2) remote_profile_add                ;;
+        3) remote_profile_switch             ;;
+        4) remote_profile_delete             ;;
+        5) remote_profile_test               ;;
+        0) break                             ;;
+        *) echo "Invalid choice, try again." ;;
+    esac
+    echo
+  done
+}
