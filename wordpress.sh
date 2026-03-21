@@ -31,7 +31,6 @@ dns_check() {
   dns_www=$(dig +short "www.$domain" | tail -n1)
   if [[ "$dns" != "$sys_ip" ]]; then
     warn "Domain does not resolve to this server ($sys_ip)"
-    return 1
   fi
 }
 # ==== Wordpress Backup ====
@@ -173,6 +172,19 @@ wp_backup_interactive() {
 central_menu() {
   local choice
   wpstatic="${1:-}"
+  if [[ "${wpstatic:-}" == "wordpress" ]]; then
+    config_dir="$base/wordpress/config"
+    profiles_file="$config_dir/remotes.conf"
+    map_file="$config_dir/domain_map.conf"
+    current_profile_file="$config_dir/current_profile"
+    mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
+  else
+    config_dir="$base/sites/config"
+    profiles_file="$config_dir/remotes.conf"
+    map_file="$config_dir/domain_map.conf"
+    current_profile_file="$config_dir/current_profile"
+    mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
+  fi
   while true; do
     #clear
     paste <(printf "${blue}%s${reset}\n" \
@@ -235,7 +247,7 @@ central_menu() {
         else
           select_static_domain "backup" || return 1
         fi
-        local_list "$domain"
+        local_list "$domain" "$wpstatic"
         read -rp "Press Enter to continue"
         ;;
       6)
@@ -402,6 +414,20 @@ wp_plugins() {
     --activate 
   # ==== Installing Selected Services ====
   if [[ "$enable_redis" == "y" ]]; then
+    if [[ "$pkg_mgr" =~ (debian|ubuntu) ]]; then
+      "$pkg_mgr" install redis-server -y
+      systemctl enable redis-server --now
+    else
+      redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
+      if dnf -y module enable redis:$redis_ver; then
+        "$pkg_mgr" install redis -y
+        systemctl enable redis --now
+      fi
+    fi
+    if ! redis-cli ping 2> /dev/null; then
+      error "Redis failed to install"
+      return 1
+    fi
     $wp_cmd plugin activate redis-cache 
     $wp_cmd redis enable 
   fi
@@ -454,7 +480,7 @@ install_webserver() {
         apache_static_conf "$domain" "$site_dir"
       fi
       a2ensite "${domain}.conf"
-      a2ensite "$domain-le-ssl.conf"
+      #a2ensite "$domain-le-ssl.conf"
     fi
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     if [[ "$webserver" == "nginx" ]]; then
@@ -601,8 +627,8 @@ apache_ssl_conf() {
         Require all granted
     </Directory>
 
-    ErrorLog \${APACHE_LOG_DIR}/$domain-ssl-error.log
-    CustomLog \${APACHE_LOG_DIR}/$domain-ssl-access.log combined
+    ErrorLog ${apache_log_dir}/$domain-ssl-error.log
+    CustomLog ${apache_log_dir}/$domain-ssl-access.log combined
 </VirtualHost>
 </IfModule>
 EOF
@@ -899,7 +925,7 @@ run_script() {
     curl
   fi
   install_wp_cli
-  install_webserver wordpress
+  install_webserver wordpress "$domain" "site_dir"
   systemctl enable php${php_ver:-}-fpm --now
   configure_db
   dns_check
@@ -1592,11 +1618,11 @@ if ! systemctl is-active one-click-guard.service &> /dev/null; then
   systemctl enable one-click-guard.service --now
 fi
 ######################################## REMOTE BACKUP & RESTORE ##################################
-config_dir="$base/sites/config"
-profiles_file="$config_dir/remotes.conf"
-map_file="$config_dir/domain_map.conf"
-current_profile_file="$config_dir/current_profile"
-mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
+#config_dir="$base/sites/config"
+#profiles_file="$config_dir/remotes.conf"
+#map_file="$config_dir/domain_map.conf"
+#current_profile_file="$config_dir/current_profile"
+#mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
 profile_add() {
   export d_pass
   read -rp "${cyan}[USER]${blue} Please provide the remote hosts IP address:${reset} " host
@@ -1684,7 +1710,11 @@ load_profile() {
 resolve_profile() {
   local domain
   domain="$1"
-  profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
+  if grep "^$domain=" "$map_file" 2>/dev/null; then
+    profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
+  else
+    profile=
+  fi
   if [[ -z "$profile" ]]; then
     info "No profile assigned to $domain"
     profile_assign "$domain"
@@ -1732,7 +1762,7 @@ remote_backup() {
   local domain type
   domain="$1"
   type="$2"
-  profile_assign "$domain"
+  #profile_assign "$domain"
   resolve_profile "$domain"
   if [[ "$type" == "wordpress" ]]; then
     wp_backup "$domain"
@@ -1831,10 +1861,14 @@ remote_list() {
   fi
 }
 local_list() {
-  local domain type
+  local domain type base timestamp
   domain="$1"
-  local base timestamps
-  base="/etc/one-click/sites/backups/$domain"  # or /wordpress/backups for WP
+  mode="${2:-}"
+  if [[ "${mode:-}" == "wordpress" ]]; then
+    base="/etc/one-click/wordpress/backups/$domain"
+  else
+    base="/etc/one-click/sites/backups/$domain"
+  fi  
   [[ ! -d "$base" ]] && { 
     error "No local backups found for $domain"; 
     return 1; 
