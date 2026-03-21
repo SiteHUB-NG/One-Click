@@ -197,7 +197,7 @@ select_timezone() {
       find "$search_dir" -type f | sed "s|$search_dir/||g" | grep -vE 'Etc/|posix/|right/' | column
       continue
     fi
-    local matches=($(find "$search_dir" -type f | grep -i "$tz_input" | sed "s|$search_dir/||g"))
+    local matches=($(find "$search_dir" -type f | grep -i "$tz_input" | sed -E "s,$search_dir/,,g;/posix|right/d"))
     if [[ ${#matches[@]} -eq 1 ]]; then
       user_tz="${matches[0]}"
       break
@@ -356,6 +356,24 @@ install_cron() {
   else
     local cmd="$0 $set_flag --non-interactive"
   fi
+  local comment="${profile}:${base_comment}"
+  local logfile="/var/log/oneclick-cron.log"
+  detect_cron_clashes "$final_cron_schedule"
+  add_cron_job "$final_cron_schedule" "$user_tz" "$cmd" "$comment" "$logfile"
+  exec < /dev/tty
+  return
+}
+install_wp_cron() {
+  local set_flag set_menu profile
+  set_flag="$1"
+  base_comment="$2"
+  domain="$3"
+  profile="${4:-}"
+  backup_dest="${5:-l}"
+  int=1
+  select_timezone 0
+  input_cron_schedule
+  local cmd="bash /var/cache/one-click/wordpress.sh $set_flag ${domain}"
   local comment="${profile}:${base_comment}"
   local logfile="/var/log/oneclick-cron.log"
   detect_cron_clashes "$final_cron_schedule"
