@@ -11,6 +11,7 @@ It provides structured, repeatable workflows for:
 - Log inspection
 - Firewall Wrapper
 - One-Click Benchmark
+- Static and Wordpress setups
 
 Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
 
@@ -149,7 +150,8 @@ It allows rapid WordPress deployment and SSL setup on a server using simple comm
 | Command                          | Description |
 |----------------------------------|-------------|
 | `one-click --wp-create`          | Deploy a new WordPress instance. Prompts for domain, admin credentials, database, and optional Redis configuration. Handles file setup, database creation, webserver configuration, and baseline hardening. |
-| `one-click --wp-ssl`             | Install and configure SSL via Let's Encrypt for an existing WordPress site. Automatically updates WordPress home and site URLs to use `https`. |
+| `one-click --wp-ssl`             | Install and configure SSL via Let's Encrypt for an existing WordPress and static sites. Automatically updates WordPress home and site URLs to use `https`. |
+| `one-click --wp-backup`          | Local and remote backup and restore for Wordpress sites. Profiles allow for multi-target remote backups |`. |
 
 ### Usage Examples
 
@@ -160,6 +162,10 @@ one-click --wp-create
 **Install SSL for an existing WordPress site:**
 ```
 one-click --wp-ssl
+```
+**Configure profiles, backups and restores:**
+```
+one-click --wp-backup
 ```
 
 ### Notes
