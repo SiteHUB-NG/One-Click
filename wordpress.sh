@@ -42,6 +42,12 @@ wp_backup() {
   success() {
     printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
   }
+  warn() {
+    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n" 
+  }
+  error() {
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n" 
+  }
   local domain base site backup timestamp
   domain="${1:-}"
   base="/etc/one-click/wordpress"
@@ -171,15 +177,17 @@ central_menu() {
     #clear
     paste <(printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
-      "║                  ${yellow}ONE-CLICK BACKUP MANAGER${blue}                  ║" \
+      "║                ${yellow}ONE-CLICK WEB BACKUP MANAGER${blue}                ║" \
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ 1  ║ Local Backup                                          ║" \
       "║ 2  ║ Local Restore                                         ║" \
       "║ 3  ║ Remote Backup                                         ║" \
       "║ 4  ║ Remote Restore                                        ║" \
-      "║ 5  ║ List Remote Backups                                   ║" \
-      "║ 6  ║ Switch Profiles                                       ║" \
-      "║ 7  ║ Manage Remote Profiles                                ║" \
+      "║ 5  ║ List Local Backups                                    ║" \
+      "║ 6  ║ List Remote Backups                                   ║" \
+      "║ 7  ║ Switch Profiles                                       ║" \
+      "║ 8  ║ Manage Remote Profiles                                ║" \
+      "║ 9  ║ Configure Cron                                        ║" \
       "║ 0  ║ Exit                                                  ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
 
@@ -222,7 +230,15 @@ central_menu() {
         remote_restore "$domain" "$wpstatic"
         ;;
       5)
-        
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+        else
+          select_static_domain "backup" || return 1
+        fi
+        local_list "$domain"
+        read -rp "Press Enter to continue"
+        ;;
+      6)
         if [[ "$wpstatic" == "wordpress" ]]; then
           select_wp_domain "backup" || return 1
         else
@@ -245,7 +261,7 @@ central_menu() {
         remote_list "$domain" "$d_pass"
         read -rp "Press Enter to continue"
         ;;
-      6)
+      7)
         if [[ "$wpstatic" == "wordpress" ]]; then
           select_wp_domain "switch" "profile" || return 1
         else
@@ -254,8 +270,17 @@ central_menu() {
         profile_switch
         read -rp "Press Enter to continue"
         ;;
-      7)
+      8)
         remote_profile_menu
+        ;;
+      9) 
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          select_wp_domain "backup" || return 1
+          install_wp_cron "-wpback" "One-Click WordPress Backup" "$domain"
+        else
+          select_static_domain "backup" || return 1
+          install_wp_cron "-staticback" "One-Click Static Backup" "$domain"
+        fi
         ;;
       0)
         echo "Exiting..."
@@ -891,12 +916,6 @@ run_script() {
   info "Access the site from ${magenta}https://${domain}${reset}"
   info "Access WP Admin page via ${magenta}https://${domain}/wp-admin${reset}"
 }
-if [[ "${1:-}" == "-wpback" ]]; then
-  wp_backup "${2:-}"
-fi
-if [[ "${1:-}" == "-wprotate" ]]; then
-  wp_backup_rotate "${2:-}"
-fi
 ############################## STATIC SITES ##############################################
 create_static_site() {
   local domain site_dir webserver_choice
@@ -1024,6 +1043,12 @@ static_backup() {
   }
   success() {
     printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
+  }
+  warn() {
+    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n" 
+  }
+  error() {
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n" 
   }
   local domain base site backup timestamp webserver
   domain="${1:-}"
@@ -1173,6 +1198,15 @@ select_static_domain() {
   fi
   domain=$(basename "${sites[$((choice-1))]}")
   export domain
+}
+static_backup_scheduler() {
+  local domain="${1:-}"
+  [[ -z "$domain" ]] && { echo "[ERROR] No domain specified"; return 1; }
+  cat <<EOF >/etc/cron.d/one-click-static-backups
+0 3 * * * root bash /var/cache/one-click/sites.sh -staticback $domain       # One-Click Static Backup
+30 3 * * * root bash /var/cache/one-click/sites.sh -staticrotate $domain    # One-Click Static Rotate
+EOF
+    success "Cron jobs created for static site $domain"
 }
 static_backup_interactive() {
   central_menu static
@@ -1717,6 +1751,15 @@ remote_backup() {
   run_rsync "$latest/" "$remote_user@$remote_host:$remote_path/"
   success "Remote backup completed"
 }
+remote_backup_scheduler() {
+  local domain="${1:-}"
+  [[ -z "$domain" ]] && { echo "[ERROR] No domain specified"; return 1; }
+  cat <<EOF >/etc/cron.d/one-click-remote-backups
+0 4 * * * root bash /var/cache/one-click/remote.sh -remoteback $domain    # One-Click Remote Backup
+30 4 * * * root bash /var/cache/one-click/remote.sh -remoterotate $domain # One-Click Remote Rotate
+EOF
+  success "Cron jobs created for remote backups of $domain"
+}
 remote_restore() {
   local domain="$1"
   type="$2"
@@ -1775,6 +1818,46 @@ remote_list() {
   done
   echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╝\e[0m"
   if [[ "${3:-}" == "restore" ]]; then
+    local choice
+    while true; do
+      read -rp "${cyan}[USER]${blue} Select backup ID to restore: ${reset}" choice
+      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#timestamps[@]} )); then
+        ts="${timestamps[$((choice-1))]}"
+        return 0
+      else
+        error "Invalid choice, try again."
+      fi
+    done
+  fi
+}
+local_list() {
+  local domain type
+  domain="$1"
+  local base timestamps
+  base="/etc/one-click/sites/backups/$domain"  # or /wordpress/backups for WP
+  [[ ! -d "$base" ]] && { 
+    error "No local backups found for $domain"; 
+    return 1; 
+  }
+  echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ ID ║ Timestamp            ║ Type                 ║\e[0m"
+  echo -e "\e[34m╠════╬══════════════════════╬══════════════════════╣\e[0m"
+  mapfile -t backups < <(ls -dt "$base"/*/ 2>/dev/null)
+  timestamps=()
+  local i=1
+  for b in "${backups[@]}"; do
+    ts=$(basename "$b")
+    timestamps+=("$ts")
+    if [[ -f "$b/db.sql.gz" ]]; then
+      type="wordpress"
+    else
+      type="static"
+    fi
+    printf "\e[34m║ %-2s ║ %-20s ║ %-20s ║\e[0m\n" "$i" "$ts" "$type"
+    ((i++))
+  done
+  echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╝\e[0m"
+  if [[ "${2:-}" == "restore" ]]; then
     local choice
     while true; do
       read -rp "${cyan}[USER]${blue} Select backup ID to restore: ${reset}" choice
@@ -1965,3 +2048,15 @@ remote_profile_menu() {
     echo
   done
 }
+if [[ "${1:-}" == "-wpback" ]]; then
+  wp_backup "${2:-}"
+fi
+if [[ "${1:-}" == "-wprotate" ]]; then
+  wp_backup_rotate "${2:-}"
+fi
+if [[ "${1:-}" == "-staticback" ]]; then
+  static_backup "${2:-}"
+fi
+if [[ "${1:-}" == "-staticrotate" ]]; then
+  static_backup_rotate "${2:-}"
+fi
