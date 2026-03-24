@@ -45,15 +45,14 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  repair                  Diagnose and repair network configuration issues." \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
+    "  --web-admin             Create a backup of selected static site." \
+    "  --web-create            Install a blank static html or php website." \
+    "  --wp                    Basic wordpress and cron management." \
+    "  --wp-admin              Manage all aspects of wordpress such as staging, backups and SSL" \
     "  --wp-create             Install Wordpress with either nginx or apache." \
-    "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
-    "  --wp-backup             Backup wordpress vhosts." \
-    "  --wp-restore            Restore wordpress backups." \
-    "  --static-create         Install a blank static html or php website." \
-    "  --static-backup         Create a backup of selected static site." \
-    "  --static-restore        Restore a static website from backup." \
+    "  --ssl                   Install SSL for wordpress or any other virtual host." \
     "  --php                   Manage system-wide or per site php settings." \
-    "  --version               Display installed version information." "" \
+    "  --version               Check version" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
     "────────────────────────────────────────────────────────────────────────────" \
@@ -642,12 +641,11 @@ _one_click() {
     cmds["uninstall"]=""
     cmds["--version"]=""
     cmds["--wp-create"]=""
-    cmds["--wp-ssl"]=""
-    cmds["--wp-backup"]=""
-    cmds["--wp-restore"]=""
-    cmds["--static-create"]=""
-    cmds["--static-backup"]=""
-    cmds["--static-restore"]=""
+    cmds["--ssl"]=""
+    cmds["--wp-admin"]=""
+    cmds["--wp"]=""
+    cmds["--web-create"]=""
+    cmds["--web-admin"]=""
     cmds["--php"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -761,12 +759,11 @@ _one_click() {
     cmds["uninstall"]=""
     cmds["--version"]=""
     cmds["--wp-create"]=""
-    cmds["--wp-ssl"]=""
-    cmds["--wp-backup"]=""
-    cmds["--wp-restore"]=""
-    cmds["--static-create"]=""
-    cmds["--static-backup"]=""
-    cmds["--static-restore"]=""
+    cmds["--ssl"]=""
+    cmds["--wp-admin"]=""
+    cmds["--wp"]=""
+    cmds["--web-create"]=""
+    cmds["--web-backup"]=""
     cmds["--php"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -871,13 +868,12 @@ map_one_click() {
       log-browser)      echo "--log"         ;;
       uninstall)        echo "--uninstall"   ;;
       update)           echo "--update"      ;;
+      --wp-admin)       echo "-wm"           ;;
       --wp-create)      echo "-wp"           ;;
       --wp-ssl)         echo "-ssl"          ;;
-      --wp-backup)      echo "-backup"       ;;
-      --wp-restore)     echo "-restore"      ;;
-      --static-create)  echo "-st"           ;;
-      --static-backup)  echo "-st-backup"    ;;
-      --static-restore) echo "-st-restore"   ;;
+      --wp)             echo "-backup"       ;;
+      --web-create)     echo "-st"           ;;
+      --web-admin)      echo "-st-backup"    ;;
       --php)            echo "-php"          ;;
       *)                echo "$i"            ;;
     esac
@@ -1067,6 +1063,11 @@ if [[ $# -gt 0 ]]; then
       create_static_site
       exit 0
       ;;
+    -wm)
+      load_wordpress
+      wp_menu
+      exit 0
+      ;;
     -st-backup)
       load_wordpress
       static_backup_interactive
@@ -1131,15 +1132,14 @@ if [[ $# -gt 0 ]]; then
         "  cron                    Configure a cron job" \
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
-        "  --version               Check version" \
+        "  --web-admin             Create a backup of selected static site." \
+        "  --web-create            Install a blank static html or php website." \
+        "  --wp                    Basic wordpress and cron management." \
+        "  --wp-admin              Manage all aspects of wordpress such as staging, backups and SSL" \
         "  --wp-create             Install Wordpress with either nginx or apache." \
-        "  --wp-ssl                Install SSL for wordpress or any other virtual host." \
-        "  --wp-backup             Backup wordpress vhosts." \
-        "  --wp-restore            Restore wordpress backups." \
-        "  --static-create         Install a blank static html or php website." \
-        "  --static-backup         Create a backup of selected static site." \
-        "  --static-restore        Restore a static website from backup." \
+        "  --ssl                   Install SSL for wordpress or any other virtual host." \
         "  --php                   Manage system-wide or per site php settings." \
+        "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
