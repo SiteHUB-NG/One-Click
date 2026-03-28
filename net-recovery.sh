@@ -444,6 +444,10 @@ health_check() {
     success "${green}THE NETWORK IS HEALTHY${reset}"
     echo
     sleep 3
+    if [[ "${1:-}" == "menu" ]]; then
+      read -rp "${cyan}[USER]${reset} Press Enter to continue: "
+      return
+    fi
     read -p "Would you like to backup the current network configurations? [y|n]: " config_net
     if [[ "$config_net" == "y" || "$config_net" == "yes"  ]]; then
       info "Preparing snapshots of the current configuration"
