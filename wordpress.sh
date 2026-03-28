@@ -9,17 +9,26 @@
 # available fo DD where * ONE-CLICK CRONS  MODULE * reinstall by ~bin456789 to #
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
-# ========================== #================================================ #
+# ======================= # ======================== # ======================= #
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
-#!/usr/bin/env bash
+if command -v install_dep 2> /dev/null; then
+  install_dep "php" "command -v php" "php-fpm" "$pkg_mgr" true
+  install_dep "git" "command -v git" "git" "$pkg_mgr" true
+fi
 . /etc/os-release
 secret_key="/etc/one-click.backup_secret.key"
 current_profile_file="$config_dir/current_profile"
 webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
+fi
+if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
+  mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.init_one-click-bak
+  ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
+                        '\"\$request\" \$status \$body_bytes_sent '
+                        '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba}' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
 fi
 dns_check() {
   dns=$(dig +short "$domain" | tail -n1)
@@ -51,14 +60,19 @@ wp_backup() {
   config_path="$base/$domain/wp-config.php"
   backup="$base/backups/$domain"
   timestamp=$(date +%Y%m%d-%H%M%S)
+  web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) 2> /dev/null | head -1)
   [[ ! -d "$site" ]] && {
     error "Site directory not found"
     return 1
   }
-  [[ ! -f "$config_path" ]] && {
-    error "wp-config.php missing"
-    return 1
-  }
+  if [[ -n "${2:-}" ]];then
+    if [[ ! "${2:-}" == "ran" ]]; then
+      [[ ! -f "$config_path" ]] && {
+        error "wp-config.php missing"
+        return 1
+      }
+    fi
+  fi
   info "Creating WordPress backup for $domain"
   mkdir -p "$backup/$timestamp"
   local db_name db_user db_pass
@@ -79,6 +93,7 @@ TIMESTAMP=$timestamp
 POOL=enabled
 SLICE=enabled
 EOF
+  chown "$web_user":"$web_user" "$backup/$timestamp/meta.conf"
   info "Building manifest"
   # ==== Manifest ====
   cat > "$backup/$timestamp/manifest.txt" <<EOF
@@ -89,8 +104,10 @@ HOSTNAME=$(hostname)
 BACKUP_VERSION=1.0
 EOF
   success "Backup stored at $backup/$timestamp"
+  sleep 2
 }
 wp_restore() {
+  warn "Beginning restore"
   create_rollback_snapshot "$domain" "wordpress"
   local domain base site_dir backup_dir db_name db_user db_pass
   domain="${domain:-${1}}"
@@ -131,7 +148,7 @@ wp_restore() {
 }
 wp_backup_scheduler() {
   local domain
-  domain="${domain:-${1}}"
+  domain="${domain:-}"
   cat <<EOF >/etc/cron.d/one-click-wp-backups
 0 2 * * * root bash /var/cache/one-click/wordpress.sh -wpback $domain    #One-Click WP Backup
 30 2 * * * root bash /var/cache/one-click/wordpress.sh -wprotate $domain #One-Click WP Rotate
@@ -178,13 +195,6 @@ select_wp_domain() {
   fi
   domain=$(basename "${sites[$((choice-1))]}")
   export domain
-  #if [[ "$mode" == "backup" ]]; then
-  #  read -rp "${cyan}[USER]${blue} Would you like to configure a cronjob to backup daily at 2am (y|n): ${reset}" confirm_backup
-  #  confirm_backup="${confirm_backup,,}"
-  #  if [[ "$confirm_backup" == "y" || "$confirm_backup" == "yes" ]]; then
-  #    wp_backup_scheduler "$domain"
-  #  fi
-  #fi
 }
 wp_backup_interactive() {
   central_menu wordpress 
@@ -205,13 +215,7 @@ profiles_board() {
       "╚════╩═══════════════════════════════════════════════════════╝${reset}") <(get_current_profile)
     read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
-      1)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "switch" "profile" || return 1
-        else
-          select_static_domain "switch to" "profile" || return 1
-        fi
-        profile_switch
+      1) profile_switch
         read -rp "${cyan}[USER]${blue} Press Enter to continue" ;;
       2) profile_list                      ;;
       3) remote_profile_add                ;;
@@ -243,7 +247,6 @@ backup_board() {
     case "$choice" in
       1)
         if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
           if [[ -z "${domain:-}" ]]; then
             warn "Please create a vhost before proceeding"
             read -rp "Press Enter to continue"
@@ -252,7 +255,6 @@ backup_board() {
           resolve_profile "$domain"
           wp_backup "$domain"
         else
-          select_static_domain "backup" || return 1
           if [[ -z "${domain:-}" ]]; then
             warn "Please create a vhost before proceeding"
             read -rp "Press Enter to continue"
@@ -264,52 +266,20 @@ backup_board() {
         ;;
       2)
         if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "restore" || return 1
           resolve_profile "$domain"
           wp_restore_int
         else
           static_restore_int
         fi
         ;;
-      3)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
-        else
-          select_static_domain "backup" || return 1
-        fi
-        remote_backup "$domain" "$wpstatic"
-        ;;
-      4)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
-        else
-          select_static_domain "backup" || return 1
-        fi
-        remote_restore "$domain" "$wpstatic"
-        ;;
-      5)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "rollback" || return 1
-        else
-          select_static_domain "rollback" || return 1
-        fi
-        rollback_restore "$domain" "$wpstatic"
-        ;;
+      3) remote_backup "$domain" "$wpstatic"    ;;
+      4) remote_restore "$domain" "$wpstatic"   ;;
+      5) rollback_restore "$domain" "$wpstatic" ;;
       6)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
-        else
-          select_static_domain "backup" || return 1
-        fi
         local_list "$domain" "$wpstatic"
         read -rp "${cyan}[USER]${blue} Press Enter to continue"
         ;;
       7)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
-        else
-          select_static_domain "backup" || return 1
-        fi
         resolve_profile "$domain"
         profile_pass_enc=$(awk -v p="[$profile]" '
           $0==p {f=1; next}
@@ -327,19 +297,16 @@ backup_board() {
         remote_list "$domain" "$d_pass"
         read -rp "${cyan}[USER]${blue} Press Enter to continue"
         ;;
-      8)
-        if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "rollback" || return 1
-        else
-          select_static_domain "rollback" || return 1
-        fi
-        rollback_list "$domain" ;;
-      0) clear; return 0        ;;
-      *) echo "Invalid option"  ;;
+      8) rollback_list "$domain" ;;
+      0) clear; return 0         ;;
+      *) echo "Invalid option"   ;;
     esac
   done
 }
 main_board() {
+  if [[ -z "${domain:-}" ]]; then
+    select_domain || return 1
+  fi
   while true; do
     paste <(printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
@@ -348,6 +315,8 @@ main_board() {
       "║ ${magenta}1${blue}  ║ ${green}Backup Restores & Rollback  ${blue}                          ║" \
       "║ ${magenta}2${blue}  ║ ${green}Manage Profiles  ${blue}                                     ║" \
       "║ ${magenta}3${blue}  ║ ${green}Cron   ${blue}                                               ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
+      "║ ${magenta}5${blue}  ║ ${green}Guard   ${blue}                                              ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
@@ -356,13 +325,13 @@ main_board() {
       2) profiles_board ;;
       3)
         if [[ "$wpstatic" == "wordpress" ]]; then
-          select_wp_domain "backup" || return 1
           install_wp_cron "-wpback" "One-Click WordPress Backup" "$domain"
         else
-          select_static_domain "backup" || return 1
           install_wp_cron "-staticback" "One-Click Static Backup" "$domain"
         fi
         ;;
+      4) select_domain  ;;
+      5) view_security "$domain" ;;
       0)
         echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
@@ -394,7 +363,6 @@ wp_restore_interactive() {
 }
 wp_restore_int() {
   local backup_base backups i choice
-  #select_wp_domain "restore" || return 1
   backup_base="/etc/one-click/wordpress/backups/$domain"
   mapfile -t backups < <(find "$backup_base" -mindepth 1 -maxdepth 1 -type d | sort)
   if [[ ${#backups[@]} -eq 0 ]]; then
@@ -439,11 +407,6 @@ configure_db() {
 }
 # ==== Download WP ====
 download_wp() {
-  #if [[ -d /etc/one-click/wordpress/$domain/www ]]; then
-  #  warn "Directory exists"
-  #  read -rp "${cyan}[USER]${reset} Reuse existing installation? (y|n): " reuse
-  #  [[ "$reuse" != "y" && "$reuse" != "yes" ]] && return 1
-  #fi
   if [[ -f "${site}/wp-config.php" ]]; then
     warn "WordPress already exists at $site"
     read -rp "${cyan}[USER]${reset} Skip WP installation and continue (y|n)? " choice
@@ -586,11 +549,6 @@ wp_staging() {
     $wp_cmd --path="$stage" option update siteurl "https://staging.$domain"
     info "Staging created at staging.$domain"
   fi
-  #read -rsp "Enter MySQL root password: " root_pass
-  #echo
-  #mysql -u root -p"$db_pass" -e "CREATE DATABASE $stage_db"
-  #mysql -u root -p"$db_pass" -e "GRANT ALL PRIVILEGES ON $stage_db.* TO '$db_user'@'localhost'"
-  #mysql -u root -p"$root_pass" -e "FLUSH PRIVILEGES"
 }
 wp_staging_push() {
   create_rollback_snapshot "$domain" "wordpress"
@@ -607,10 +565,14 @@ staging_vhost_nginx() {
   local domain stage_root
   domain="$1"
   stage_root="/etc/one-click/wordpress/staging/$domain"
+  mkdir -p /var/log/nginx/${domain}_staging
   cat > "/etc/nginx/conf.d/staging.$domain.conf" <<EOF
 server {
     listen 80;
     server_name staging.$domain;
+
+    access_log /var/log/nginx/${domain}_staging/access.log oneclick;
+    error_log /var/log/nginx/${domain}_staging/error.log warn;
 
     root $stage_root;
     index index.php index.html;
@@ -632,7 +594,6 @@ server {
     }
 }
 EOF
-
   systemctl reload nginx
 }
 staging_vhost_apache() {
@@ -860,6 +821,7 @@ nginx_conf() {
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
     nginx_log_dir="/var/log/nginx"
   fi
+  mkdir -p /var/log/nginx/${domain}
   cat << EOF > "$nginx_conf_file"
 server {
     listen 80;
@@ -867,6 +829,9 @@ server {
 
     root /etc/one-click/wordpress/$domain/www;
     index index.php index.html;
+
+    access_log /var/log/nginx/${domain}/access.log oneclick;
+    error_log /var/log/nginx/${domain}/error.log warn;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$args;
@@ -1146,7 +1111,7 @@ run_script() {
       echo "Invalid domain name"
       br=1
     fi
-    /etc/one-click/wordpress/$domain/meta.conf
+    
     if [[ -n "$domain" && "$br" -ne 1 ]]; then
       export domain
       break
@@ -1230,11 +1195,12 @@ run_script() {
   export web_user
   site="/etc/one-click/wordpress/$domain/www"
   mkdir -p "$site"
-  touch /etc/one-click/sites/$domain/meta.conf
+  touch "${site}/meta.conf"
   echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
+  chown "$web_user":"$web_user" /etc/one-click/wordpress/$domain/meta.conf
   echo
   while true; do
     read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
@@ -1297,11 +1263,9 @@ run_script() {
   install_webserver wordpress "$domain" "site_dir"
   info "Creating resource slice for $domain"
   info "Configuring PHP-FPM"
-  create_site_slice "$domain"
-  create_php_pool "$domain"
-  create_service_file "$domain"
+  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver"
   info "Enabling PHP"
-  systemctl enable php-fpm-${domain} --now 
+  systemctl enable php-fpm@${domain}.service --now 
   info "Confguring MariaDB"
   configure_db
   dns_check
@@ -1337,12 +1301,12 @@ run_script() {
   $wp_cmd option get home 
   info "Configuring SSL"
   install_letsencrypt wordpress
-  if [[ "$manual_install" -eq 1 ]]; then
+  if [[ "${manual_install:-}" -eq 1 ]]; then
     webroot_nginx_template
   fi
   wp_backup_scheduler
   "$pkg_mgr" restart "$webserver"
-  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_wp-web-monitor_$domain
+  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_wp-web-monitor_$domain
   success "One-Click Wordpress has now been installed!"
   info "Access the site from ${magenta}https://${domain}${reset}"
   info "You can access the admin from: ${magenta}https://${domain}/wp-admin${reset}"
@@ -1416,7 +1380,6 @@ wp_plugin_manager() {
         ;;
       4)
         info "Fetching installed plugins..."
-        # Get currently installed plugins
         mapfile -t installed < <($wp_cmd plugin list --field=name)
         echo -e "\n\e[34m╔════╦══════════════════════════════════════════════════╗\e[0m"
         echo -e "\e[34m║ ${magenta}ID${blue} ║ ${yellow}Installed Plugin Name (Slug) ${blue}                    ║\e[0m"
@@ -1490,20 +1453,11 @@ get_site_user() {
   [[ -f "$meta" ]] || meta="/etc/one-click/sites/$domain/meta.conf"
   sed -En 's/^SITE_USER=(.*)/\1/p' "$meta"
 }
-_get_site_user() {
-  local domain path
-  domain="$1"
-  for path in \
-    "/etc/one-click/wordpress/$domain" \
-    "/etc/one-click/sites/$domain"
-  do
-    [[ -d "$path" ]] && stat -c '%U' "$path" && return
-  done
-}
 ############################## STATIC SITES ##############################################
 create_static_site() {
   local domain site_dir webserver_choice
   start_screen static
+  php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
   while true; do
     local br=0
     read -rp "${cyan}[USER]${reset} Enter a domain name to use for your new site site: " domain
@@ -1543,14 +1497,12 @@ EOF
       *) echo "Invalid selection"; return 1 ;;
   esac
   install_webserver static "$domain" "$site_dir"
-  create_site_slice "$domain"
-  create_php_pool "$domain"
-  create_service_file "$domain"
+  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver"
   dns_check
   one-click engine "allow $webserver"
   install_letsencrypt static
   wp_backup_scheduler
-  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_static-web-monitor_$domain
+  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_static-web-monitor_$domain
   success "One-Click static site has now been installed for $domain"
   info "Access the site from ${magenta}https://${domain}${reset}"
 }
@@ -1707,6 +1659,7 @@ HOSTNAME=$(hostname)
 BACKUP_VERSION=1.0
 EOF
   success "Backup stored at $backup/$timestamp"
+  sleep 2
 }
 static_restore() {
   read -rp "${yellow}[USER]${yellow} This will overwrite $domain. Continue? (y|n): " confirm
@@ -1809,41 +1762,6 @@ select_static_domain() {
   domain=$(basename "${sites[$((choice-1))]}")
   export domain
 }
-select_domain() {
-  mode="${1:-}"
-  if [[ "${2:-}" == "profile" ]]; then
-    type=profile
-  elif [[ "${2:-}" == "rollback" ]]; then
-    type=restore
-  else
-    type=site
-  fi
-  local base_static="/etc/one-click/sites"
-  local base_wordpress="/etc/one-click/wordpress"
-  local sites i choice
-  mapfile -t sites < <(sed -n '/\./p' <(find "$base_static" "$base_wordpress" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;))
-  if [[ ${#sites[@]} -eq 0 ]]; then
-    error "No static sites found in $base"
-    return
-  fi
-  printf '%s\n' "${blue}Available Sites:${reset}" " "
-  printf "${magenta}%-3s${blue} | ${yellow}%s${reset}\n" "No" "Domain"
-  echo "${blue}------------------------${reset}"
-  for i in "${!sites[@]}"; do
-    printf "${magenta}%-3s ${blue}| ${yellow}%s${reset}\n" "$((i+1))" "$(basename "${sites[$i]}")"
-  done
-  printf "${magenta}%-3s ${blue}| ${yellow}%s${reset}\n" "0" "${red}"
-  read -rp "${cyan}[USER] ${blue}Select a $type to $mode by number: ${reset}" choice
-  if [[ "$choice" -eq 0 ]]; then
-    central_menu
-  fi
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#sites[@]})); then
-    error "Invalid selection"
-    return 1
-  fi
-  domain=$(basename "${sites[$((choice-1))]}")
-  export domain
-}
 static_backup_scheduler() {
   local domain="${1:-}"
   [[ -z "$domain" ]] && { echo "[ERROR] No domain specified"; return 1; }
@@ -1859,9 +1777,6 @@ static_backup_interactive() {
 static_backup_int() {
   select_static_domain "backup" || return 1
   static_backup "$domain"
-}
-static_restore_interactive() {
-  central_menu static
 }
 static_restore_int() {
   select_static_domain "restore" || return 1
@@ -1911,6 +1826,35 @@ detect_env() {
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
 }
+view_service_status() {
+  systemctl status "$1" --no-pager -l || true
+}
+restart_service() {
+  info "${yellow}Restarting $1...${reset}"
+  systemctl restart "$1"
+}
+toggle_service() {
+  local svc="$1"
+  state=$(get_service_state "$svc")
+  if [[ "$state" == "active" ]]; then
+    info "${yellow}Stopping $svc...${reset}"
+    systemctl stop "$svc"
+  else
+    success "Starting $svc..."
+    systemctl start "$svc"
+  fi
+}
+fmt_state() {
+  case "$1" in
+    active) printf "${green}%s${blue}\n" "ACTIVE"   ;;
+    inactive) printf "${red}%s${blue}\n" "INACTV"   ;;
+    failed) printf "${red}%s${blue}\n" "FAILED"     ;;
+    *) printf "${yellow}%s${blue}\n" "$1"           ;;
+  esac
+}
+get_service_state() {
+  systemctl is-active "$1" 2>/dev/null || true
+}
 switch_cli_php() {
   info "Detecting installed PHP CLI versions..."
   local php_bins=($(ls /usr/bin/php[0-9].* 2>/dev/null | sort -V))    
@@ -1937,17 +1881,21 @@ switch_cli_php() {
 }
 switch_site_php() {
   local domain="$1"
-  local new_ver="$2"
-  info "Switching $domain to PHP $new_ver..."
-  sed -i "s|php[0-9.]*-fpm-${domain}.sock|php${new_ver}-fpm-${domain}.sock|g" /etc/nginx/sites-available/"$domain"
-  local service_file="/etc/systemd/system/php-fpm-${domain}.service"
-  sed -i "s|/usr/sbin/php-fpm[0-9.]*|/usr/sbin/php-fpm${new_ver}|g" "$service_file"
-  sed -i "s|/etc/php/[0-9.]*/fpm/pool.d/|/etc/php/${new_ver}/fpm/pool.d/|g" "$service_file"
-  mv /etc/php/${old_ver}/fpm/pool.d/${domain}.conf /etc/php/${new_ver}/fpm/pool.d/${domain}.conf
+  set_domain_context || return 1
+  local base_conf="/etc/one-click/php/$domain"
+  local ini_file="$base_conf/php.ini"
+  local fpm_conf="$base_conf/php-fpm.conf"
+  read -rp "Enter PHP version (e.g., 8.2): " new_ver
+  local ver_nodot="${new_ver//.}"
+  local binary_path="/opt/remi/php${ver_nodot}/root/usr/sbin/php-fpm"
+  if [[ ! -f "$binary_path" ]]; then
+    echo "Installing PHP $new_ver..."
+    dnf install -y "php${ver_nodot}-php-fpm" "php${ver_nodot}-php-cli" "php${ver_nodot}-php-mbstring"
+  fi
+  sed -Ei "s,(ExecStart=)[^ \t]*,\1$binary_path," /etc/systemd/system/php-fpm@${domain}.service
   systemctl daemon-reload
-  systemctl restart "php-fpm-${domain}.service"
-  systemctl reload "$webserver"
-  success "$domain is now running on PHP $new_ver"
+  systemctl restart "php-fpm@$domain"
+  success " $domain is now using PHP $new_ver"
 }
 setup_repos() {
   if [[ "${os_family:-}" == "debian" ]]; then
@@ -1975,100 +1923,31 @@ install_php() {
     $pkg_mgr install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl || return 1
     fpm_service="php-fpm"
   fi
-  systemctl stop "$fpm_service" && systemctl disable "$fpm_service"
+  $pkg_mgr stop "php$ver-fpm" 2>/dev/null || true
+  $pkg_mgr disable "php$ver-fpm" 2>/dev/null || true
   success "PHP $ver is installed and running."
 }
 site_tune_php() {
-  local configs=($(ls "$conf_path" 2>/dev/null | grep -E ".conf$|^[0-9a-zA-Z_-]+$"))
-  [[ ${#configs[@]} -eq 0 ]] && { error "No site configs found."; return 1; }
-  echo "Select a site to manage its PHP settings:"
-  for i in "${!configs[@]}"; do 
-    printf "${magenta}[${yellow}%d${magenta}]${reset} %s\n" "$((i+1))" "${configs[$i]}"
-  done 
-  while true; do
-    read -rp "${cyan}[USER]${blue} Choice: " cfg_idx
-    [[ "$cfg_idx" =~ ^[0-9]+$ ]] && (( cfg_idx >= 1 && cfg_idx <= ${#configs[@]} )) && break || error "Invalid selection."
-  done
-  local target_cfg="$conf_path/${configs[$((cfg_idx-1))]}"
-  info "Analyzing $target_cfg..."    
-  local detected_ver=$(grep -oP 'php[0-9]+\.[0-9]+' "$target_cfg" | head -n1 | sed 's/php//')
-  [[ -z "$detected_ver" ]] && detected_ver=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
-  success "Detected PHP $detected_ver"
-  if [[ "${os_family:-}" == "debian" ]]; then
-    ini_path="/etc/php/$detected_ver/fpm/php.ini"
-    fpm_serv="php-fpm-${domain}"
-  else
-    ini_path="/etc/opt/remi/php${detected_ver//./}/php.ini"
-    [[ ! -f "$ini_path" ]] && ini_path="/etc/php.ini"
-    fpm_serv="php-fpm-${domain}"
-  fi
-  [[ ! -f "$ini_path" ]] && { error "php.ini not found at $ini_path"; return 1; }
-  echo -e "\n--- Tuning PHP $detected_ver Settings ---"
-  info "File: $ini_path"
-  read -rp "${cyan}[USER]${reset} New Memory Limit (e.g. 512M) [Enter to skip]: " mem
-  read -rp "${cyan}[USER]${reset} New Max Upload (e.g. 100M) [Enter to skip]: " upload
-  read -rp "${cyan}[USER]${blue} Max Execution Time [Enter to skip]: " exec_t
-  read -rp "${cyan}[USER]${blue} Display Errors (on|off) [Enter to skip]: " display_error
-  update_ini() {
-    local key=$1; local val=$2
-    sed -i "s|^;*$key *=.*|$key = $val|" "$ini_path"
-  }
-  [[ -n "$mem" ]] && update_ini "memory_limit" "$mem"
-  [[ -n "$upload" ]] && { update_ini "upload_max_filesize" "$upload"; update_ini "post_max_size" "$upload"; }
-  [[ -n "$exec_t" ]] && update_ini "max_execution_time" "$exec_t"
-  [[ -n "$display_error" ]] && update_ini "display_errors" "$display_error"
-  systemctl restart "$fpm_serv"
-  success "Settings applied and $fpm_serv restarted."
-}
-switch_webserver_php() {
-  local configs=($(ls "$conf_path" 2>/dev/null | grep -E ".conf$|^[0-9a-zA-Z_-]+$"))
-  [[ ${#configs[@]} -eq 0 ]] && { error "No configs found in $conf_path"; return 1; }
-  echo "${green}${ul}Available Site Configs:${ul_reset}${reset}"
-  for i in "${!configs[@]}"; do 
-    printf "${magenta}[${yellow}%d${magenta}]${reset} %s\n" "$((i+1))" "${configs[$i]}"
-  done
-  while true; do
-    read -rp "${cyan}[USER]${reset} Select config (1-${#configs[@]}): " cfg_idx
-    if [[ "$cfg_idx" =~ ^[0-9]+$ ]] && (( cfg_idx >= 1 && cfg_idx <= ${#configs[@]} )); then
-      break 
-    else
-      error "Invalid selection. Please enter a number between 1 and ${#configs[@]}."
-    fi
-  done
-  local target_cfg="$conf_path/${configs[$((cfg_idx-1))]}"
-  info "Selected: $(basename "$target_cfg")"
-  local target_cfg="$conf_path/${configs[$((cfg_idx-1))]}"
-  read -rp "${cyan}[USER]${reset} Enter the PHP version to apply (e.g. 8.1): " target_ver
-  if ! command -v "php$target_ver" >/dev/null 2>&1 && [[ ! -f "/usr/bin/php$target_ver" ]]; then
-    read -rp "${cyan}[USER]${reset} PHP $target_ver not found. Install it? (y|n): " confirm
-    [[ "$confirm" == "y" ]] && install_php "$target_ver" || return 1
-  fi
-  if [[ "$os_family" == "debian" ]]; then
-    new_sock="unix:/var/run/php${php_ver:-}-fpm.sock"
-  else
-    new_sock="unix:/var/run/php-fpm/www.sock" 
-  fi
-  if [[ ! -S "${new_sock#unix:}" ]]; then
-    error "Target PHP socket does not exist: ${new_sock#unix:}"
+  set_domain_context
+  [[ ! -f "$php_ini" ]] && {
+    error "php.ini not found at $php_ini"
     return 1
-  fi
-  info "Updating $target_cfg..."
-  sed -Ei "
-    s,unix:/var/run/php[0-9.]+-fpm.sock,$new_sock,g
-    s,unix:/run/php[0-9.]+-fpm.sock,$new_sock,g
-  " "$target_cfg"
-  if [[ "$webserver" == "nginx" ]]; then
-    nginx -t && systemctl reload nginx && success "Nginx reloaded."
-  else
-    if [[ "$os_family" == "debian" ]]; then
-      apache2ctl configtest
-      systemctl reload apache2
-    else
-      httpd -t
-      systemctl reload httpd
-    fi
-    success "Apache reloaded."
-  fi
+  }
+  info "Tuning PHP for ${domain} (PHP ${php_version})"
+  read -rp "${cyan}[USER]${reset} Memory Limit (e.g. 512M): " mem
+  read -rp "${cyan}[USER]${reset} Upload Limit (e.g. 100M): " upload
+  read -rp "${cyan}[USER]${reset} Execution Time: " exec_t
+  update_ini() {
+    sed -i "s|^;*$1 *=.*|$1 = $2|" "$php_ini"
+  }
+  [[ -n "$mem" ]] && update_ini memory_limit "$mem"
+  [[ -n "$upload" ]] && {
+    update_ini upload_max_filesize "$upload"
+    update_ini post_max_size "$upload"
+  }
+  [[ -n "$exec_t" ]] && update_ini max_execution_time "$exec_t"
+  systemctl restart "$php_service"
+  success "Updated and restarted $php_service"
 }
 tune_php_settings() {
   local php_vers=($(ls /etc/php/ 2>/dev/null || ls /etc/opt/remi/ 2>/dev/null | grep -E '[0-9]\.[0-9]'))
@@ -2110,9 +1989,12 @@ tune_php_settings() {
   success "Settings updated and $fpm_serv restarted."
 }
 php_menu() {
+  select_domain || return 1
   detect_env
+  set_domain_context
+  php_version=$(sed -En '/^ExecStart=[^0-9]*([0-9]+).*/{s//\1/;s/./&./p}' /etc/systemd/system/php-fpm@${domain}.service)
   while true; do
-    printf '%s\n' \
+    paste <(printf '%s\n' \
       "${yellow}--- PHP MANAGER ---${reset}" \
       "${magenta}OS:${green} $os_family ${blue}| ${magenta}Webserver: ${green}${webserver}" \
       "${blue}----------------------------${reset}" \
@@ -2121,7 +2003,9 @@ php_menu() {
       "${magenta}[${yellow}3${magenta}]${reset} Switch System PHP (CLI)" \
       "${magenta}[${yellow}4${magenta}]${reset} Global PHP.ini Tuning" \
       "${magenta}[${yellow}5${magenta}]${reset} Site-Specific Tuning" \
-      "${magenta}[${yellow}6${magenta}]${reset} Exit"
+      "${magenta}[${yellow}6${magenta}]${reset} PHP Process Control" \
+      "${magenta}[${yellow}7${magenta}]${reset} Change Domain" \
+      "${magenta}[${yellow}0${magenta}]${reset} Exit") <(printf "${blue}[${green}${domain}${blue}] PHP ${php_version} | ${webserver}${reset}")
       read -rp "${cyan}[USER]${reset} Option: " opt
       case "$opt" in
         1) 
@@ -2132,14 +2016,225 @@ php_menu() {
           fi
           read -rp "${cyan}[USER]${reset} Version (e.g. 8.2): " v
           install_php "$v"        ;;
-        2) switch_webserver_php   ;;
+        2) switch_site_php "$domain"  ;;
         3) switch_cli_php         ;;
         4) tune_php_settings      ;;
         5) site_tune_php          ;;
-        6) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+        6) php_process_control    ;;
+        7) select_domain          ;;
+        0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
         *) error "Invalid option" ;;
       esac
+      echo
+      read -rp "Press Enter to continue..."
     done
+}
+set_domain_context() {
+  php_service="php-fpm@${domain}.service"
+  php_slice="one-click_${domain}.slice"
+  if [[ -f "/etc/nginx/sites-enabled/${domain}.conf" ]]; then
+    site_conf="/etc/nginx/sites-enabled/${domain}.conf"
+  elif [[ -f "/etc/nginx/conf.d/${domain}.conf" ]]; then
+    site_conf="/etc/nginx/conf.d/${domain}.conf"
+  elif [[ -f "/etc/apache2/sites-enabled/${domain}.conf" ]]; then
+    site_conf="/etc/apache2/sites-enabled/${domain}.conf"
+  elif [[ -f "/etc/httpd/conf.d/${domain}.conf" ]]; then
+    site_conf="/etc/httpd/conf.d/${domain}.conf"
+  fi
+  php_version=$(sed -En '/^ExecStart=[^0-9]*([0-9]+).*/{s//\1/;s/./&./p}' /etc/systemd/system/php-fpm@${domain}.service)
+  [[ -z "$php_version" ]] && php_version=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+  php_ini="/etc/one-click/php/${domain}/php.ini"
+}
+php_process_control() {
+  local svc="$php_service"
+  local slice="$php_slice"
+  while true; do
+    svc_state=$(get_service_state "$svc")
+    slice_state=$(get_service_state "$slice")
+    clear
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════╗" \
+      "║                ${yellow}PHP PROCESS CONTROL${blue}                 ║" \
+      "╠════╦═══════════════════════════════════════════════╣"
+    printf "${blue}║ ${magenta}1${blue}  ║ View PHP-FPM Status        [%s]           ║${reset}\n" "$(fmt_state "$svc_state")"
+    printf "${blue}║ ${magenta}2${blue}  ║ Toggle PHP-FPM             [%s]           ║${reset}\n" "$(fmt_state "$svc_state")"
+    echo -e "${blue}║ ${magenta}3${blue}  ║ Restart PHP-FPM                               ║${reset}"
+    printf "${blue}║ ${magenta}4${blue}  ║ View Slice Status          [%s]           ║${reset}\n" "$(fmt_state "$slice_state")"
+    printf "${blue}║ ${magenta}5${blue}  ║ Toggle Slice               [%s]           ║${reset}\n" "$(fmt_state "$slice_state")"
+    echo -e "${blue}║ ${magenta}0${blue}  ║ Back                                          ║${reset}"
+    echo -e "${blue}╚════╩═══════════════════════════════════════════════╝${reset}"
+    read -rsn1 -p "${cyan}[USER]${blue} Select option: " choice
+    echo
+    case "$choice" in
+      1) view_service_status "$svc"   ;;
+      2) toggle_service "$svc"        ;;
+      3) restart_service "$svc"       ;;
+      4) view_service_status "$slice" ;;
+      5) toggle_service "$slice"      ;;
+      0) return                       ;;
+      *) echo "Invalid option"        ;;
+    esac
+    echo
+    read -rp "Press Enter to continue..."
+  done
+}
+select_domain() {
+  if [[ -n "${wpstatic:-}" ]]; then
+    if [[ "$wpstatic" == "wordpress" ]]; then
+      list_domains() {
+        ls /etc/one-click/wordpress | sed -n '/\./p'
+      }
+    elif [[ "$wpstatic" == "static" ]]; then
+      list_domains() {
+        ls /etc/one-click/sites | sed -n '/\./p'
+      }
+    fi
+  else
+    list_domains() {
+      ls /etc/one-click/wordpress /etc/one-click/sites | sed -n '/\./p'
+    }
+  fi
+  mapfile -t domains < <(list_domains)
+  if [[ ${#domains[@]} -eq 0 ]]; then
+    error "${red}No domains found${reset}"
+    return 1
+  fi
+  if [[ ${#domains[@]} -eq 1 ]]; then
+    domain="${domains[0]}"
+    info "${green}Using domain: ${yellow}${domain}${reset}"
+    return 0
+  fi
+  while true; do
+    clear
+    echo -e "${blue}╔════════════════════════════════════════════════════╗${reset}"
+    echo -e "${blue}║              ${yellow}SELECT A DOMAIN TO MANAGE${blue}             ║${reset}"
+    echo -e "${blue}╠═════╦══════════════════════════════════════════════╣${reset}"
+    for i in "${!domains[@]}"; do
+      local domain_name="${domains[$i]}"
+      local icon=$(get_heartbeat "$domain_name")
+      printf "${blue}║ ${magenta}%-3s${blue} ║ %b ${green}%-42s${blue} ║${reset}\n" "$((i+1))" "$icon" "${domains[$i]}"
+    done
+    echo -e "${blue}╠═════╩══════════════════════════════════════════════╣${reset}"
+    echo -e "${blue}║ ${cyan}q${blue} = cancel                                         ║${reset}"
+    echo -e "${blue}╚════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${blue} Select domain: " choice
+    case "$choice" in
+      q|Q) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      '' ) continue ;;
+      *[!0-9]*)
+        echo -e "${red}Invalid input${reset}"
+        sleep 1
+        ;;
+      *)
+        idx=$((choice-1))
+        if [[ -n "${domains[$idx]}" ]]; then
+          domain="${domains[$idx]}"
+          info "${green}Selected: ${yellow}${domain}${reset}"
+          return 0
+        else
+          error "${red}Invalid selection${reset}"
+          sleep 1
+        fi
+        ;;
+    esac
+  done
+}
+get_heartbeat() {
+  local url="http://$1"
+  local status
+  status=$(curl -Is -o /dev/null -w "%{http_code}" --connect-timeout 2 "$url" 2>/dev/null)
+  case "$status" in
+    20[0-9]|30[1278]) 
+      echo -e "${green}●${reset}"
+      ;;
+    *)
+      echo -e "${red}●${reset}"
+      ;;
+  esac
+}
+create_isolated_php_runtime() {
+  local domain php_ver site_user webserver
+  domain="$1"
+  local php_ver="$2"
+  local site_user="$3" 
+  local webserver="$4"
+  if [[ -f "/usr/sbin/php-fpm$php_ver" ]]; then
+    php_bin="/usr/sbin/php-fpm$php_ver"
+  else
+    php_bin="/usr/sbin/php-fpm"
+  fi
+  local base_conf="/etc/one-click/php/$domain"
+  local run_dir="/run/one-click/$domain"
+  local log_dir="/var/log/one-click/$domain"
+  local lib_dir="/var/lib/one-click/$domain"
+  local ini_file="$base_conf/php.ini"
+  local fpm_conf="$base_conf/php-fpm.conf"
+  local pool_conf="$base_conf/pool.conf"
+  local systemd_unit="/etc/systemd/system/php-fpm@$domain.service"
+  mkdir -p "$base_conf" "$run_dir" "$log_dir" "$lib_dir"/{tmp,sessions}
+  chown -R "$site_user:$site_user" "$lib_dir"
+  chmod 700 "$lib_dir"
+  cat > "$ini_file" <<EOF
+[PHP]
+memory_limit = 256M
+upload_max_filesize = 64M
+post_max_size = 64M
+expose_php = Off
+display_errors = Off
+log_errors = On
+session.save_path = $lib_dir/sessions
+upload_tmp_dir = $lib_dir/tmp
+EOF
+    cat > "$pool_conf" <<EOF
+[$domain]
+user = $site_user
+group = $site_user
+listen = $run_dir/php.sock
+listen.owner = $site_user
+listen.group = $webserver
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 5
+php_admin_value[open_basedir] = /var/www/$domain:/tmp
+php_admin_value[upload_tmp_dir] = $lib_dir/tmp
+php_admin_value[session.save_path] = $lib_dir/sessions
+EOF
+    cat > "$fpm_conf" <<EOF
+[global]
+pid = $run_dir/php-fpm.pid
+error_log = $log_dir/php-fpm.log
+include = $pool_conf
+EOF
+    cat > "$systemd_unit" <<EOF
+[Unit]
+Description=One-Click isolated PHP-FPM runtime for $domain
+After=network.target
+
+[Service]
+ExecStart=$php_bin --nodaemonize --fpm-config $fpm_conf -c $ini_file
+ExecReload=/bin/kill -USR2 \$MAINPID
+User=root
+Group=root
+Slice=one-click_$domain.slice
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "php-fpm@$domain"
+  systemctl start "php-fpm@$domain"
+  if systemctl is-active --quiet "php-fpm@$domain"; then
+    success "PHP $php_ver runtime for $domain is active."
+    info "Socket: $run_dir/php.sock" "Logs:  $log_dir/php-fpm.log"
+  else
+    error "PHP $php_ver runtime for $domain failed to start!"
+    journalctl -u "php-fpm@$domain" --no-pager | tail -20
+  fi
 }
 ########################### ROLLBACK ########################
 create_rollback_snapshot() {
@@ -2150,13 +2245,15 @@ create_rollback_snapshot() {
   info "Creating rollback snapshot for $domain"
   if [[ "$type" == "wordpress" ]]; then
     base="/etc/one-click/wordpress"
-    wp_backup "$domain" >/dev/null 2>&1
+    wp_backup "$domain" "ran"
   else
     base="/etc/one-click/sites"
-    static_backup "$domain" >/dev/null 2>&1
+    static_backup "$domain"
   fi
+  set +o pipefail
   backup_source="$base/backups/$domain"
   latest=$(ls -dt "$backup_source/"* 2>/dev/null | head -n1)
+  set -o pipefail
   [[ -z "$latest" ]] && { error "No recent backup found to snapshot"; return 1; }
   rollback_dir="$base/rollback/$domain/$ts"
   mkdir -p "$rollback_dir"
@@ -2228,7 +2325,10 @@ rollback_restore() {
 declare -gA offense_count
 # ==== Do Not Monitor IPs In Whitelist ====
 WHITELIST=("127.0.0.1")
-monitor_history_file="/etc/one-click/rule-engine/guard/history"
+guard_dir="/etc/one-click/rule-engine/guard"
+monitor_history_file="$guard_dir/history"
+stats_file="$guard_dir/monitor_stats.db"
+mkdir -p "$guard_dir"
 apply_block() {
   local ip proto port action duration file
   if [[ "$ip" =~ .*:.* ]]; then
@@ -2245,7 +2345,7 @@ apply_block() {
   $fw_bin -I INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action"
   local ts
   ts=$(date +%s)
-  echo "{\"ts\":$ts,\"ip\":\"$ip\",\"proto\":\"$proto\",\"port\":\"$port\",\"action\":\"$action\",\"duration\":$duration}" >> "$monitor_history_file"
+  echo "{\"ts\":$ts,\"ip\":\"$ip\",\"proto\":\"$proto\",\"port\":\"$port\",\"action\":\"$action\",\"duration\":$duration,\"reason\":\"$reason\"}" >> "$monitor_history_file"
   (
     sleep "$duration"
     if $fw_bin -C INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action" &>/dev/null; then
@@ -2255,17 +2355,23 @@ apply_block() {
   ) &
 }
 monitor_web_logs() {
-  info() { 
+  local ip domain uri duration guard_id stats_file
+  domain="$1"
+  infos() { 
     s=$1
     printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s${s}\n" 
   }
+  error() { 
+    s=$1
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0) %s${s}\n" 
+  }
   local log_files=()
-  local ip reason duration guard_id stats_file
-  stats_file="/etc/one-click/rule-engine/guard//monitor_stats.db"
+  stats_file="/etc/one-click/rule-engine/guard/monitor_stats.db"
+  mkdir -p /etc/one-click/rule-engine/guard
   paths=(
-    "/var/log/nginx/access.log" "/var/log/nginx/error.log"
-    "/var/log/apache2/access.log" "/var/log/apache2/error.log"
-    "/var/log/httpd/access.log" "/var/log/httpd/error_log"
+    "/var/log/nginx/$domain/access.log" "/var/log/nginx/$domain/error.log"
+    "/var/log/apache2/$domain/access.log" "/var/log/apache2/$domain/error.log"
+    "/var/log/httpd/$domain/access.log" "/var/log/httpd/$domain/error.log"
   )
   for f in "${paths[@]}"; do
     [[ -f "$f" ]] && log_files+=("$f")
@@ -2278,21 +2384,25 @@ monitor_web_logs() {
       offense_count["$hist_ip"]=$hist_count
     done < "$stats_file"
   fi
-  info "Live Guard active on: ${log_files[*]}"
+  infos "Live Guard active on: ${log_files[*]}"
   tail -Fn0 "${log_files[@]}" | while read -r line; do
     if [[ "$line" =~ ([0-9]{1,3}(\.[0-9]{1,3}){3}) || "$line" =~ ^([a-fA-F0-9:]+)$ ]]; then
-      ip="${BASH_REMATCH[1]}"  
-      for safe_ip in "${WHITELIST[@]}"; do 
+      ip="${BASH_REMATCH[1]}"
+      for safe_ip in "${WHITELIST[@]}"; do
         [[ "$ip" == "$safe_ip" ]] && continue 2
       done
+      if [[ "$line" =~ "$domain" ]]; then
+      uri=$(awk -F'"' '{print $(NF-1)}' <<< "$line")
       if [[ "$line" =~ " 404 " ]]; then
         ((offense_count["$ip"]++))
         if (( offense_count["$ip"] >= 10 )); then
           reason="Web Scanner (404 Spamming)"
           duration=3600
-          info "Guard: Banning $ip for $duration seconds ($reason)"
+          echo "Guard: Banning $ip for $duration seconds ($reason)"
           apply_block "$ip" "all" "0:65535" "DROP" "$duration"
-          offense_count["$ip"]=0 
+          ts=$(date +%s)
+          echo "{\"ts\":$ts,\"ip\":\"$ip\",\"domain\":\"$domain\",\"uri\":\"$uri\",\"reason\":\"$reason\"}" >> "$monitor_history_file"
+          offense_count["$ip"]=0
         fi
       fi
       if [[ "$line" =~ "login failed" || "$line" =~ "wplogin" ]]; then
@@ -2301,12 +2411,20 @@ monitor_web_logs() {
           reason="Brute Force Attempt"
           duration=86400
           apply_block "$ip" "all" "0:65535" "DROP" "$duration"
+          ts=$(date +%s)
+          echo "{\"ts\":$ts,\"ip\":\"$ip\",\"domain\":\"$domain\",\"uri\":\"$uri\",\"reason\":\"$reason\"}" >> "$monitor_history_file"
           offense_count["$ip"]=0
         fi
-      fi      
-      printf "%s %s\n" "${offense_count["$ip"]}" "$ip" >> "$stats_file.tmp"
-      mv "$stats_file.tmp" "$stats_file"
+      fi
+      ts=$(date +%s)
+      touch "$stats_file.tmp"
+      if printf "%s %s\n" "${offense_count["$ip"]}" "$ip" >> "$stats_file.tmp"; then
+        cat "$stats_file.tmp" "$stats_file" > "$stats_file.mv"
+        rm -f "$stats_file.tmp" "$stats_file"
+        mv "$stats_file.mv" "$stats_file"
+      fi
     fi
+  fi
   done
 }
 if [[ ! -f /etc/systemd/system/one-click-guard.service ]]; then
@@ -2328,12 +2446,40 @@ EOF
 fi
 if [[ "$1" == "--monitor" ]]; then
   detect_env
-  monitor_web_logs
+  monitor_web_logs "$2"
 fi
 if ! systemctl is-active one-click-guard.service &> /dev/null; then
   systemctl daemon-reload
   systemctl enable one-click-guard.service --now
 fi
+view_security() {
+  local filter_domain="$1"
+  local history="${monitor_history_file}" 
+     draw_row() {
+    local ts="$1" ip="$2" domain="$3" uri="$4" reason="$5"
+    printf "${blue}│ %-13s │ %-20s │ %-13s │ %-13s │ %-13s │${reset}\n" "$ts" "$ip" "$domain" "$uri" "$reason"
+  } 
+  [[ ! -f "$history" ]] && { echo "[INFO]: No history available."; return 0; }
+  printf "${blue}┌───────────────┬──────────────────────┬───────────────┬───────────────┬───────────────┐${reset}\n"
+  printf "${blue}│ %-13s │ %-17s    │ %-13s │ %-13s │ %-13s │${reset}\n" "Timestamp" "IP" "Domain" "URI" "Reason"
+  printf "${blue}├───────────────┼──────────────────────┼───────────────┼───────────────┼───────────────┤${reset}\n"
+  while IFS= read -r line; do
+    local ip=$(jq -r '.ip // "0.0.0.0"' <<< "$line")
+    local domain=$(jq -r '.domain // "System"' <<< "$line")
+    local uri=$(jq -r '.uri // .action // "-"' <<< "$line")
+    local reason=$(jq -r '.reason // "Firewall"' <<< "$line") 
+    local ts=$(jq -r '.ts' <<< "$line")
+    [[ "$reason" =~ Timeout|UNBLOCKED ]] && continue
+    if [[ -n "$filter_domain" ]]; then
+      [[ "$domain" != "System" && "$domain" != "$filter_domain" ]] && continue
+    fi
+    local ts_fmt=$(date -d "@$ts" "+%m/%d %H:%M" 2>/dev/null || echo "$ts")
+    local uri_short="${uri:0:13}"
+    local reason_short="${reason:0:13}"
+    draw_row "$ts_fmt" "$ip" "$domain" "$uri_short" "$reason_short"
+  done < "$history"
+  printf "${blue}└───────────────┴──────────────────────┴───────────────┴───────────────┴───────────────┘${reset}\n"
+}
 ######################################## REMOTE BACKUP & RESTORE ##################################
 #config_dir="$base/sites/config"
 #profiles_file="$config_dir/remotes.conf"
@@ -2410,6 +2556,18 @@ load_profile() {
       exit
     }
   ' "$profiles_file")
+  profile_type=$(awk -v p="[$profile]" '
+    $0==p {f=1; next}
+    /^\[/ {f=0}
+    f && /^TYPE=/ {print substr($0,6); exit}
+' "$profiles_file")
+  if [[ "$profile_type" == "local" ]]; then
+    remote_host=""
+    remote_user=""
+    remote_base=""
+    profile_pass=""
+    return 0
+  fi
   if [[ -n "$profile_pass_enc" ]]; then
     profile_pass=$(decrypt_password "$profile_pass_enc")
   else
@@ -2428,39 +2586,51 @@ load_profile() {
 resolve_profile() {
   local domain
   domain="$1"
-  if grep "^$domain=" "$map_file" 2>/dev/null; then
-    profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
-  else
-    profile=
-  fi
+  profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
   if [[ -z "$profile" ]]; then
     info "No profile assigned to $domain"
-    profile_assign "$domain"
-    profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
+    profile="local-default"
   fi
   load_profile "$profile"
   remote_host="$profile_host"
   remote_user="$profile_user"
   remote_base="$profile_base"
 }
+assign_profile_to_domain() {
+  local domain="$1"
+  echo "Available profiles:"
+  profile_list
+  read -rp "${cyan}[USER]${blue} Select profile: " profile
+  grep -v "^$domain=" "$map_file" 2>/dev/null > /tmp/map.tmp || true
+  echo "$domain=$profile" >> /tmp/map.tmp
+  mv -f /tmp/map.tmp "$map_file"
+  success "$domain → $profile"
+}
+ensure_local_profile() {
+  if ! grep -q "^\[Not Assigned\]" "$profiles_file" 2>/dev/null; then
+    cat >> "$profiles_file" <<EOF
+[local-default]
+TYPE=local
+EOF
+  fi
+}
 check_auth() {
-  if [[ -n "${profile_pass:-}" ]]; then
-    sshpass="$profile_pass"
-    use_sshpass=1
+  if [[ "$profile_type" == "local" ]]; then
+    use_sshpass=0
     return 0
   fi
-  if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "$user@$host" "exit" >/dev/null 2>&1; then
-    read -rsp "${cyan}[USER]${blue} ${host}'s password: " sshpass
-    if [[ -n "$sshpass" ]]; then
-      e_pass=$(encrypt_password "$sshpass")
-    fi
-    echo
+  if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "${user:-remote_user}@${host:-remote_host}" "exit" >/dev/null 2>&1; then
+    #read -rsp "${cyan}[USER]${blue} ${host:-remote_host}'s password: " sshpass
+    #if [[ -n "$sshpass" ]]; then
+    #  e_pass=$(encrypt_password "$sshpass")
+    #fi
+    #echo
     use_sshpass=1
   else
     use_sshpass=0
   fi
-  export e_pass
-  export d_pass
+  #export e_pass
+  #export d_pass
 }
 run_ssh() {
   if [[ "$use_sshpass" == 1 ]]; then
@@ -2480,7 +2650,20 @@ remote_backup() {
   local domain type
   domain="$1"
   type="$2"
+  info "A remote backup will be processed by creating a local backup first" \
+    "Once complete, it will be sent to your remote storage based on profile"
   resolve_profile "$domain"
+  pass_profile=$(awk -v p="[$profile]" '
+    $0==p {f=1; next}
+    /^\[/ {f=0}
+    f && /^E-PASSWD=/ {
+      print substr($0,10)
+      exit
+    }
+  ' "$profiles_file")
+  if [[ -n "$pass_profile" ]]; then
+    d_pass=$(decrypt_password "$pass_profile")
+  fi
   if [[ "$type" == "wordpress" ]]; then
     wp_backup "$domain"
     base="/etc/one-click/wordpress"
@@ -2488,16 +2671,21 @@ remote_backup() {
     static_backup "$domain"
     base="/etc/one-click/sites"
   fi
-  latest=$(ls -dt "$base/backups/$domain/"* | head -n1)
+  shopt -s nullglob
+  backups=( "$base/backups/$domain/"* )
+  if (( ${#backups[@]} == 0 )); then
+    error "No backups found for $domain"
+    return 1
+  fi
+  sleep 3
+  latest=$((printf '%s\n' "${backups[@]}" | sort -r | head -n1) || true)
   timestamp=$(basename "$latest")
-  d_pass="$profile_pass"
-  info "A remote backup will be processed by creating a local backup first" \
-    "Once complete, it will be sent to your remote storage based on profile"
   remote_path="$remote_base/$(hostname)/$domain/$timestamp"
   check_auth
   run_ssh "mkdir -p $remote_path"
   run_rsync "$latest/" "$remote_user@$remote_host:$remote_path/"
   success "Remote backup completed"
+  return
 }
 remote_backup_scheduler() {
   local domain="${1:-}"
@@ -2528,6 +2716,7 @@ remote_restore() {
   remote_list "$domain" "" restore
   tmp="/tmp/oneclick-$domain-$ts"
   mkdir -p "$tmp"
+  shopt -s nullglob
   run_rsync "$remote_user@$remote_host:$remote_base/*/$domain/$ts/" "$tmp/"
   if [[ "$type" == "wordpress" ]]; then
     wp_restore "$domain" "$tmp"
@@ -2580,49 +2769,61 @@ remote_list() {
   read -rp "${cyan}[USER]${blue} Press Enter to continue"
 }
 local_list() {
-  local domain type base timestamp
+  local domain type base ts mode choice
   domain="$1"
   mode="${2:-}"
-  if [[ "${mode:-}" == "wordpress" ]]; then
+  if [[ "$mode" == "wordpress" ]]; then
     base="/etc/one-click/wordpress/backups/$domain"
   else
     base="/etc/one-click/sites/backups/$domain"
   fi  
-  [[ ! -d "$base" ]] && { 
-    error "No local backups found for $domain"; 
-    return 1; 
-  }
+  [[ ! -d "$base" ]] && { error "No local backups found for $domain"; return 1; }
   echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╗\e[0m"
   echo -e "\e[34m║ ID ║ Timestamp            ║ Type                 ║\e[0m"
   echo -e "\e[34m╠════╬══════════════════════╬══════════════════════╣\e[0m"
-  mapfile -t backups < <(ls -dt "$base"/*/ 2>/dev/null)
-  timestamps=()
+  mapfile -t backup_paths < <(ls -dt "$base"/*/ 2>/dev/null)
+  [[ ${#backup_paths[@]} -eq 0 ]] && { error "No backups found"; return 1; }
   local i=1
-  for b in "${backups[@]}"; do
+  local ts_list=()
+  for b in "${backup_paths[@]}"; do
     ts=$(basename "$b")
-    timestamps+=("$ts")
-    if [[ -f "$b/db.sql.gz" ]]; then
-      type="wordpress"
-    else
-      type="static"
-    fi
+    ts_list+=("$ts")
+    type=$( [[ -f "$b/db.sql.gz" ]] && echo "wordpress" || echo "static" )
     printf "\e[34m║ %-2s ║ %-20s ║ %-20s ║\e[0m\n" "$i" "$ts" "$type"
     ((i++))
   done
   echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╝\e[0m"
-  if [[ "${2:-}" == "restore" ]]; then
-    local choice
-    while true; do
-      read -rp "${cyan}[USER]${blue} Select backup ID to restore: ${reset}" choice
-      if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#timestamps[@]} )); then
-        ts="${timestamps[$((choice-1))]}"
-        return 0
-      else
-        error "Invalid choice, try again."
-      fi
-    done
-  fi
-  read -rp "${cyan}[USER]${blue} Press Enter to continue"
+  while true; do
+    echo -e "${cyan}[INFO]${reset} Enter ID to ${red}Delete${reset}, or ${yellow}q${reset} to Exit"
+    read -rp "${cyan}[USER]${blue} Choice: ${reset}" choice
+    case "$choice" in
+      q|Q|exit) return 0 ;;
+      [0-9]*)
+        local del_idx="${choice#d}"
+        if (( del_idx >= 1 && del_idx <= ${#ts_list[@]} )); then
+          local target_ts="${ts_list[$((del_idx-1))]}"
+          read -rp "${red}Are you sure you want to delete backup $target_ts? (y/n): ${reset}" confirm
+          if [[ "$confirm" == "y" ]]; then
+            rm -rf "$base/$target_ts"
+            success "Backup $target_ts deleted."
+            return 0 
+          fi
+        else
+          error "Invalid ID for deletion."
+        fi
+        ;;
+      [0-9]*)
+        if (( choice >= 1 && choice <= ${#ts_list[@]} )); then
+          ts="${ts_list[$((choice-1))]}"
+          selected_backup_ts="$ts" 
+          return 0
+        else
+          error "Invalid ID for restore."
+        fi
+        ;;
+      *) error "Invalid input." ;;
+    esac
+  done
 }
 profile_switch() {
   local profiles choice selected
@@ -2664,21 +2865,21 @@ get_current_profile() {
   last_backup=$((ls -1 /etc/one-click/${type}/backups/${domain:-}/ 2> /dev/null | head -1) || true)
   lb_ts=$(echo "$last_backup" | sed -E 's/(.{4})(..)(..).(..)(..).*/\3-\2-\1 \4:\5/')
   disk_usage=$(awk '{print $1}' <(du -s -h /etc/one-click/${type}/${domain:-}/ 2> /dev/null))
-  monitor_info=$(get_monitor_stats)
+  monitor_info=$(get_monitor_stats "$domain")
   if [[ -z "${domain:-}" ]]; then
     lb_ts="Not Loaded"
     disk_usage="Not Loaded"
   fi
   if [[ -f "$current_profile_file" ]]; then
     printf "${yellow}[${red}[${magenta}Current Profile: ${blue}$(cat ${current_profile_file:-Not Loaded})${red}]${yellow}]${reset}\n"
-    echo -e "${blue}┌──────────────────────────────────────────────────────────┐"
-    printf "${blue}│${yellow}  %-15s${blue} │${yellow} %-37s ${blue}│${reset}\n" "Uptime" "$monitor_info"
-    printf "${blue}├──────────────────────────────────────────────────────────┤\n" 
+    echo -e "${blue}┌──────────────────┬───────────────────────────────────────┐"
+    printf "${blue}│${yellow}  %-15s${blue} │${yellow} %-47s ${blue}│${reset}\n" "Uptime" "$monitor_info"
+    printf "${blue}├──────────────────┼───────────────────────────────────────┤\n" 
     printf "${blue}│${magenta}  %-15s ${blue}│${green} %-37s ${blue}│${reset}\n" \
       "Domain" "${domain:-N/A}" \
       "Last Backup" "$lb_ts" \
       "Disk Usage" "$disk_usage"
-    echo -e "${blue}└──────────────────────────────────────────────────────────┘${reset}"
+    echo -e "${blue}└──────────────────┴───────────────────────────────────────┘${reset}"
   fi
 }
 ####################### REMOTE PROFILES MANAGEMENT ################################
@@ -2692,7 +2893,7 @@ remote_profile_add() {
     return 1
   fi
   read -rp "${cyan}[USER]${blue} Enter the remote host IP: " host
-  read -rp "${cyan}[USER]${blue} Enter ${hosts}'s username [root]: " user
+  read -rp "${cyan}[USER]${blue} Enter ${host}'s username [root]: " user
   user="${user:-root}"
   read -rp "${cyan}[USER]${blue} Enter remote base path [/backups]: " base_path
   base_path="${base_path:-/backups}"
@@ -2836,114 +3037,6 @@ remote_profile_test() {
         error "${red}Connection failed to $profile_host as $profile_user${reset}"
     fi
 }
-################################## RESOURCE CONTROL ######################################
-create_site_slice() {
-  local domain="$1"
-  local mem_limit="${2:-512M}"
-  local cpu_limit="${3:-50%}" 
-  local slice_name="one-click_${domain}.slice"
-  if [[ -z "$domain" ]]; then
-    error "No domain provided"
-    return 1
-  fi
-  local slice_file="/etc/systemd/system/${slice_name}"
-  cat > "$slice_file" <<EOF
-[Unit]
-Description=One-Click Resource Slice for $domain
-
-[Slice]
-MemoryMax=$mem_limit
-CPUQuota=$cpu_limit
-EOF
-  systemctl daemon-reload
-  systemctl start "$slice_name"
-  systemctl enable "$slice_name" >/dev/null 2>&1
-  success "Slice $slice_name created with Memory=$mem_limit CPU=$cpu_limit"
-  if [[ -d "/etc/php-fpm.d/" ]]; then
-    local pool_file="/etc/php-fpm.d/${domain}.conf"
-  else
-    local pool_file="/etc/php/${domain}.conf"
-  fi
-  if [[ -f "$pool_file" ]]; then
-    systemctl reload php-fpm-${domain}.service --now
-    info "PHP-FPM pool $domain assigned to slice $slice_name"
-  fi
-  info "Any future cron or CLI tasks for $domain can be run in this slice using:"
-  printf "${magenta}%s${reset}\n" "systemd-run --slice=$slice_name --unit=oneclick-$domain <command>"
-  success "Per-site resource isolation ready for $domain"
-}
-create_service_file() {
-  local domain service_file
-  domain="${1:-}"
-  service_file="/etc/systemd/system/php-fpm-${domain}.service"
-  if [[ -f /usr/sbin/php-fpm ]]; then
-    local php_path="/usr/sbin/php-fpm"
-  else
-    local php_path="/usr/sbin/php-fpm${php_ver:-}"
-  fi
-  if [[ -d "/etc/php-fpm.d/" ]]; then
-    local pool_file="/etc/php-fpm.d/${domain}.conf"
-  else
-    local pool_file="/etc/php/${domain}.conf"
-  fi
-  cat > "$service_file" <<EOF
-[Unit]
-Description=PHP-FPM for $domain
-After=network.target
-
-[Service]
-Type=notify
-Slice=one-click_${domain}.slice
-ExecStart=$php_path --nodaemonize --fpm-config "$pool_file"
-ExecReload=/bin/kill -USR2 \$MAINPID
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-}
-create_php_pool() {
-  local domain="$1"
-  local slice_name="one-click_${domain}.slice"
-  if [[ -d "/etc/php-fpm.d/" ]]; then
-    local pool_file="/etc/php-fpm.d/${domain}.conf"
-  else
-    local pool_file="/etc/php/${domain}.conf"
-  fi
-  if grep -q "nginx" /etc/group; then
-    local webserver="nginx"
-  elif grep -q "www-data" /etc/group; then
-    local webserver="www-data"
-  elif grep -q "apache" /etc/group; then
-    local webserver="apache"
-  else
-    local webserver="nobody"
-  fi
-  local socket="/run/php${php_ver:-}-fpm-${domain}.sock"
-  cat > "$pool_file" <<EOF
-[$domain]
-user = $web_user
-group = $web_user
-
-listen = $socket
-listen.owner = $web_user
-listen.group = $webserver
-listen.mode = 0660
-
-pm = ondemand
-pm.max_children = 10
-pm.process_idle_timeout = 10s
-pm.max_requests = 500
-
-; Logging
-php_admin_value[error_log] = /var/log/php-fpm${php_ver:-}-$domain.log
-php_admin_flag[log_errors] = on
-EOF
-  systemctl disable php-fpm --now || systemctl disable php${php_ver:-}-fpm --now
-  #systemctl enable php-fpm-${domain}.service --now
-  success "PHP-FPM pool created for $domain on socket $socket and slice $slice_name"
-  info "To control the php service, use the following" "${magenta}php-fpm-${domain}.service${reset}"
-}
 ################################# SITE REMOVAL ###############################
 delete_site() {
   local domain="$1"
@@ -2951,7 +3044,7 @@ delete_site() {
   detect_env 
   local type="${2:-wordpress}"
   local slice_name="one-click_${domain}.slice"
-  local service_name="php-fpm-${domain}.service"
+  local service_name="php-fpm@${domain}.service"
   local site_user
   [[ -z "$domain" ]] && { error "No domain provided"; return 1; }
   read -rp "${cyan}[USER]${red} WARNING: Delete $domain permanently? (y|n): ${reset}" confirm
@@ -3036,58 +3129,67 @@ delete_site() {
   success "Fully removed $domain"
 }
 get_monitor_stats() {
-  if [[ ! -f /etc/one-click/.domain.profile ]]; then
-    domain="${1:-}"
-  else
-    domain=$(cat /etc/one-click/.domain.profile)
+  local domain="${1:-}"
+  monitor "$domain"
+  local profile_file="/etc/one-click/monitor/${domain}/${domain}.profile"
+  local status_file="/etc/one-click/monitor/${domain}/monitor_status"
+  local log_file="/var/log/${webserver}/${domain}/monitor.log"
+  mkdir -p "/etc/one-click/monitor/${domain}"
+  if [[ ! -f /etc/cron.d/one-click-uptime-monitor_$domain ]]; then
+    echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site $domain > /dev/null 2>&1" > /etc/cron.d/one-click-uptime-monitor_$domain
   fi
-  check_url="https://${domain:-}"
-  status_file="/tmp/.monitor_${domain:-}_status"
-  log_file="/var/log/monitor_${domain:-}.log"
-  if [[ -f "$status_file" ]]; then
-    read -r state start_ts < "$status_file"
-    diff=$(( $(date +%s) - start_ts ))
-    uptime_str="$(($diff / 86400))d $(($diff % 86400 / 3600))h $(($diff % 3600 / 60))m"
-      if [[ -n "$domain" ]]; then
-        echo "$domain" > /etc/one-click/.domain.profile
-      fi
-      if [[ "$state" == "UP" ]]; then
-        echo "Online for $uptime_str"
-      else
-        echo "Offline for $uptime_str"
-      fi
-    else
+  if [[ -f "$profile_file" ]]; then
+    read -r saved_domain < "$profile_file"
+    [[ -n "$saved_domain" ]] && domain="$saved_domain"
+  fi
+  if [[ ! -f "$status_file" ]]; then
+    echo "INIT $(date +%s)" > "$status_file"
     echo "No data yet"
+    return
+  fi
+  read -r state start_ts < "$status_file"
+  now=$(date +%s)
+  diff=$(( now - start_ts ))
+  uptime_str="$(($diff / 86400))d $(($diff % 86400 / 3600))h $(($diff % 3600 / 60))m"
+  if [[ -n "$domain" ]]; then
+    echo "$domain" > "$profile_file"
+  fi
+  if [[ "$state" == "UP" ]]; then
+    echo "${green}Online for $uptime_str${reset}               "
+  else
+    echo "${red}Offline for $uptime_str${reset}                "
   fi
 }
 monitor() {
   domain="${1:-}"
   check_url="https://$domain"
-  status_file="/tmp/.uptime-monitor_${domain}_status"
-  log_file="/var/log/uptime-monitor_${domain}.log"
+  status_file="/etc/one-click/monitor/${domain}/monitor_status"
+  log_file="/var/log/${webserver}/${domain}/monitor.log"
+  mkdir -p "/etc/one-click/monitor/${domain}"
   now=$(date +%s)
-  http_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 2 "$check_url")
+  http_status=$(curl -o /dev/null -s -w "%{http_code}" \
+    --max-time 5 --connect-timeout 3 "$check_url" || echo "000")
   if [[ -f "$status_file" ]]; then
     read -r last_state last_ts < "$status_file"
   else
-  last_state="INIT"
-  last_ts=$now
+    last_state="INIT"
+    last_ts=$now
   fi
-  if [[ "$http_status" -eq 200 ]]; then
-    if [[ "$last_state" == "DOWN" ]]; then
-      downtime=$((now - last_ts))
-      echo "$(date): $domain is BACK UP. It was down for $downtime seconds." >> "$log_file"
-    fi
-    if [[ "$last_state" != "UP" ]]; then
-      echo "UP $now" > "$status_file"
-    else
-      echo "UP $last_ts" > "$status_file"
-    fi
+  if [[ "$http_status" =~ ^2|3 ]]; then
+    current_state="UP"
   else
-    if [[ "$last_state" == "UP" || "$last_state" == "INIT" ]]; then
-      echo "$(date): $domain is DOWN (Status: $http_status)" >> "$log_file"
-      echo "DOWN $now" > "$status_file"
+    current_state="DOWN"
+  fi
+  if [[ "$current_state" != "$last_state" ]]; then
+    if [[ "$current_state" == "UP" ]]; then
+      downtime=$((now - last_ts))
+      echo "$(date): $domain is BACK UP (down for $downtime sec, status: $http_status)" >> "$log_file"
+    else
+      echo "$(date): $domain is DOWN (status: $http_status)" >> "$log_file"
     fi
+    echo "$current_state $now" > "$status_file"
+  else
+    echo "$current_state $last_ts" > "$status_file"
   fi
 }
 ################################# CRON NAVIGATION ##############################
@@ -3103,6 +3205,6 @@ fi
 if [[ "${1:-}" == "-staticrotate" ]]; then
   static_backup_rotate "${2:-}"
 fi
-if [[ "${1:-}" == "--monitor" ]]; then
+if [[ "${1:-}" == "--monitor-site" ]]; then
   get_monitor_stats "${2:-}"
 fi
