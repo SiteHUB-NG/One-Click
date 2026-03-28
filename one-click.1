@@ -1,151 +1,220 @@
 .\" Man page for one-click
 .TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "One-Click Manual"
 
-.SH DESCRIPTION
+.SH NAME
+one-click \- Modular server management, security auditing, and disaster recovery toolkit
 
+.SH SYNOPSIS
 .B one-click
-is a modular server management and disaster recovery toolkit designed for predictable,
-repeatable, and auditable Linux system administration.
+[\fICOMMAND\fR] [\fISUBCOMMANDS\fR] [\fIOPTIONS\fR]
+
+.SH DESCRIPTION
+.B one-click
+is a high-performance, modular toolkit designed for predictable and auditable Linux system administration. It specializes in automated deployments, natural-language security management, and "bare-metal" style recovery.
 
 .PP
-It provides tools for:
-
+Key architectural features include:
 .IP \(bu 2
-Operating system reinstallation
-
-.IP \(bu 2
-Backup and restore
-
-.IP \(bu 2
-System migration
-
-.IP \(bu 2
-Boot recovery
-
-.IP \(bu 2
-Network repair
-
-.IP \(bu 2
-Scheduled automation (cron)
-
-.IP \(bu 2
-System inspection and monitoring
-
-.PP
-The toolkit is suitable for VPS, dedicated servers, and bare-metal systems.
-Operations may be interactive or fully automated.
-
-.PP
-Long-running operations are automatically executed within a
+.B Resilience:
+Long-running operations execute within a 
 .BR tmux (1)
-session to prevent interruption and ensure persistent execution even if SSH connections are lost.
+session to ensure persistence against SSH disconnects.
+.IP \(bu 2
+.B Safety:
+Destructive operations (reinstall, migrate) require explicit confirmation and hardware-level validation.
+.IP \(bu 2
+.B Isolation:
+Web services and installers run in dedicated system slices and secured user environments.
 
 .PP
-All commands are explicit and user-initiated. Destructive operations require confirmation before proceeding to protect system integrity.
+The toolkit is suitable for VPS, dedicated servers, and bare-metal systems. Operations may be interactive or fully automated.
+
+.PP
+All commands are explicit and user-initiated. Destructive operations require confirmation to protect system integrity.
+
+.SH SECURITY & AUDITING
+
+.SS IDS (Intrusion Detection System)
+The built-in IDS monitors integrity of system binaries and critical directories (e.g., /bin, /sbin, /etc). 
+.IP \(bu 2
+.B Baseline:
+Creates a cryptographically signed snapshot of the "clean" system state on first execution.
+.IP \(bu 2
+.B Monitoring:
+Subsequent scans compare the live system against the baseline to detect unauthorized modifications, file replacements, or malware persistence.
+
+.SS Security Audits
+Provides deep inspection of the server, including active socket analysis, process tree validation, and reputation lookups for active connections via external intelligence APIs.
+
+.SH RULE-ENGINE (Firewall Management)
+The 
+.B rule-engine
+is a human-parsable wrapper for 
+.B iptables 
+and 
+.B nftables.
+It allows administrators to manage firewalls in natural language while maintaining extreme safety.
+
+.SS Triple-Layer Lockout Protection
+Prevents accidental remote lockout using three layers:
+.IP "1. Visual Guard:"
+Displays a clear summary of translated commands and affected ports before execution.
+.IP "2. Namespace Dry-Run:"
+Spawns an isolated network namespace, clones the current firewall state, and tests new rules against simulated critical services (SSH, DNS, Web) before modifying production.
+.IP "3. Auto-Rollback (Transactional Commit):"
+After applying live rules, the system enters a "Pending" state. The user has 
+.B 15 seconds
+to confirm connectivity. If no confirmation occurs, the previous configuration is automatically restored.
+
+.SH WORDPRESS & WEB INSTALLER
+The WordPress module implements a "Site-as-a-Container" approach without Docker overhead.
+.IP \(bu 2
+.B Resource Isolation:
+Each site runs under its own Linux user and PHP-FPM pool.
+.IP \(bu 2
+.B Systemd Slices:
+CPU and RAM limits are enforced per site via systemd slices.
+.IP \(bu 2
+.B Automated Backups:
+Supports local snapshots and remote off-site rsync/rclone scheduling per domain.
 
 .SH COMMANDS
-
-Displays available commands with descriptions:
-
 .TS
 tab(|) box;
 l l.
 Command | Description
 _
-reinstall | Perform a destructive operating system reinstallation over the network.
+reinstall | Perform a destructive OS reinstallation over the network.
 backup | Create incremental or compressed backups locally or remotely.
-boot-recovery | Create or restore boot and root partition snapshots.
+boot-recovery | Create or restore boot/root partition snapshots.
 repair | Repair or restore network configurations.
-migrate | Migrate entire systems using block-level or file-level methods.
-bench | Run system benchmark suite (OCB).
+migrator | Migrate entire systems using block-level or file-level methods.
+migrate | Migrate One-Click configuration files.
+bench | Run the system benchmark suite (OCB).
 sys-info | Display live system statistics.
 cron | Configure scheduled automation tasks.
-uninstall | Remove one-click and all associated files.
+--web-admin | Create a backup of a selected static site.
+--web-create | Install a blank static HTML or PHP website.
+--wp | Basic WordPress and cron management.
+--wp-admin | Manage WordPress including staging, backups, and SSL.
+--wp-create | Install WordPress with either Nginx or Apache.
+--ssl | Install SSL for WordPress or any virtual host.
+--php | Manage system-wide or per-site PHP settings.
+--version | Display version information.
+uninstall | Remove One-Click and all associated files.
 help | Display the interactive help menu.
 .TE
 
-.SH OPTIONS
-Currently,
-.B one-click
-uses subcommands instead of traditional command-line options.
+.SH RULE-ENGINE SUBCOMMANDS
+Usage:
+.B one-click rule-engine "<natural language command>"
 
-Future versions may introduce additional flags.
+.TS
+tab(|) box;
+l l.
+Subcommand | Description
+_
+allow/drop/reject | Traffic actions (accept, discard silently, or notify).
+from/to | Specify source or destination (IP, CIDR, or Alias).
+multiport/range | Handle multiple ports or contiguous ranges.
+alias-create | Define a named group of IPs (e.g., "office").
+audit ssh | Display unique IPs and usernames from brute-force attempts.
+audit lookup | Query IP reputation via AbuseIPDB.
+audit scan | Trigger IDS integrity/malware scan.
+--dry-run | Force namespace testing of the provided command.
+.TE
 
 .SH EXAMPLES
 
-Reinstall operating system:
+.B Natural Language Firewall:
 .RS
-.B one-click reinstall
+one-click rule-engine "allow ssh from office and drop http"
 .RE
 
-Create a backup:
+.B IDS Baseline Initialization:
 .RS
-.B one-click backup
+one-click rule-engine "audit scan --init"
 .RE
 
-Repair network configuration:
+.B WordPress Site Creation:
 .RS
-.B one-click repair
+one-click --wp-create
 .RE
 
-Migrate system:
+.B System Migration:
 .RS
-.B one-click migrate
+one-click migrate to root@destination-server
 .RE
 
-View system information:
+.B Reinstall Operating System:
 .RS
-.B one-click sys-info
+one-click reinstall
 .RE
 
-Configure cron automation:
+.B Create a Backup:
 .RS
-.B one-click cron
+one-click backup
 .RE
 
-Uninstall toolkit:
+.B Repair Network Configuration:
 .RS
-.B one-click uninstall
+one-click repair
+.RE
+
+.B Migrate System:
+.RS
+one-click migrate
+.RE
+
+.B View System Information:
+.RS
+one-click sys-info
+.RE
+
+.B Configure Cron Automation:
+.RS
+one-click cron
+.RE
+
+.B Uninstall Toolkit:
+.RS
+one-click uninstall
 .RE
 
 .SH WORDPRESS
-
 The
 .B one-click
-tool includes a built‑in WordPress automation module.
+tool includes a built-in WordPress automation module for unattended or guided site deployment. This module handles webserver configuration, database setup, optional caching, and SSL certificate provisioning.
 
-This module enables unattended or guided installation of a WordPress site
-including webserver configuration, database setup, optional caching,
-and SSL certificate provisioning.
-
-Before using these commands, ensure that DNS A records for both the
-root domain and the www subdomain are pointed to this server’s IP.
+.PP
+Before using these commands, ensure DNS A records for both the root domain and the www subdomain point to this server’s IP.
 
 .PP
 WordPress sites installed via
 .B one-click
-are created under
-.I /etc/one-click/wordpress/www/<domain>
-and use a dynamic database name based on the provided site and user.
+are located under:
+.RS
+/etc/one-click/wordpress/<domain>/www
+.RE
+Databases are dynamically named based on the site and user.
 
 .SH WORDPRESS COMMANDS
-
 Usage:
 
 .RS
 .B one-click --wp-create
 .RE
 
-Installs a new WordPress site. Prompts interactively for:
+Installs a new WordPress site interactively. Prompts for:
 
 .IP \(bu 2
-Domain name (validated with a basic regex)
+Domain name (validated with regex)
 
 .IP \(bu 2
 Site title
 
 .IP \(bu 2
-Admin user and password (with minimum complexity guard)
+Admin username and password (enforced minimum complexity)
 
 .IP \(bu 2
 Admin email
@@ -154,143 +223,115 @@ Admin email
 Database username and password
 
 .IP \(bu 2
-Webserver choice (nginx or apache)
+Webserver choice (Nginx or Apache)
 
 .IP \(bu 2
 Optional Redis plugin activation
 
 .PP
-The installer will:
+Installer actions:
 
 .IP \(bu 2
 Install required packages (webserver, PHP, MariaDB, certbot, etc.)
 
 .IP \(bu 2
-Configure the selected webserver with a document root and virtual host
+Configure selected webserver with document root and virtual host
 
 .IP \(bu 2
-Create a database and database user (or reuse existing)
+Create database and user (or reuse existing)
 
 .IP \(bu 2
 Download and configure WordPress via WP‑CLI
 
 .IP \(bu 2
-Optionally install plugins including caching and security
+Optionally install plugins including caching and security tools
 
 .IP \(bu 2
-Attempt to provision Let's Encrypt SSL and update WordPress URLs
+Attempt Let's Encrypt SSL provisioning and update WordPress URLs
 
 .PP
-If SSL provisioning fails, the user is given a retry/skip menu.
+If SSL provisioning fails, users can retry, skip, or modify options.
 
 .RS
 .B one-click --wp-ssl <domain>
 .RE
 
-Ensures SSL is provisioned for an existing WordPress site.
-
-This command:
+Ensures SSL is provisioned for an existing WordPress site:
 
 .IP \(bu 2
-Validates DNS records for the domain and www subdomain
+Validates DNS for domain and www subdomain
 
 .IP \(bu 2
-Invokes Certbot to issue or renew a certificate
+Invokes Certbot to issue or renew certificate
 
 .IP \(bu 2
-Reloads the configured webserver
+Reloads configured webserver
 
 .IP \(bu 2
-Updates WordPress home and site URL to use HTTPS when successful
+Updates WordPress URLs to HTTPS if successful
 
 .PP
-If DNS does not point correctly or certbot fails, the command presents
-options to retry, change the contact email, view logs, or skip.
+If DNS or Certbot fails, options are provided to retry, change contact email, view logs, or skip.
 
 .SH EXAMPLES
-
 Install a new WordPress site:
-
 .RS
 .B one-click --wp-create
 .RE
 
-Provision SSL for an existing WordPress site:
-
+Provision SSL for existing site:
 .RS
 .B one-click --wp-ssl example.com
 .RE
 
 .SH NOTES
-
-WordPress installations are stored in:
-
+WordPress site files:
 .RS
 /etc/one-click/wordpress/www/<domain>
 .RE
 
-Backups are created under:
-
+Backups:
 .RS
 /etc/one-click/wordpress/backups/<domain>
 .RE
 
-SSL certificates are managed by Certbot and stored under the
-standard Let's Encrypt directory:
-
+SSL certificates managed by Certbot:
 .RS
 /etc/letsencrypt/live/<domain>
 .RE
 
 .PP
-Domains must resolve to the server before SSL can be issued.
+Domains must resolve to this server before SSL issuance.
 
 .SH RULE-ENGINE
-
 The
 .B rule-engine
-module provides natural-language firewall management within the
-.B one-click
-toolkit.
+module provides natural-language firewall management within
+.B one-click.
 
 .PP
-It allows administrators to construct firewall rules using human-readable syntax,
-which are automatically translated into valid commands for the active firewall backend.
-
-Supported backends include:
-
-.IP \(bu 2
-.B iptables / ip6tables
-
-.IP \(bu 2
-.B nftables
+It allows administrators to construct human-readable firewall rules, which are automatically translated into valid commands for the active firewall backend (supported: iptables/ip6tables, nftables).
 
 .PP
-The rule-engine combines natural language parsing with a transactional
-execution model designed to prevent accidental lockouts.
-
-.PP
-Firewall changes are applied using a staged commit process with automatic rollback protection.
-A
+Firewall changes use a staged commit process with automatic rollback. A
 .B 10-second verification timer
-ensures that changes can be automatically reverted if confirmation is not received.
+ensures that changes are reverted if confirmation is not received.
 
 .SH RULE-ENGINE FEATURES
-
 .IP \(bu 2
-Human-readable firewall rule parsing
+Human-readable firewall parsing
 
 .IP \(bu 2
 Support for TCP, UDP, ICMP, and multiport rules
 
 .IP \(bu 2
-Source and destination filtering using IPv4, IPv6, and CIDR ranges
+Source and destination filtering via IPv4, IPv6, and CIDR ranges
 
 .IP \(bu 2
 Service-name to port mapping (e.g., ssh → 22)
 
 .IP \(bu 2
-Automatic detection of the firewall backend
+Automatic firewall backend detection
 
 .IP \(bu 2
 Natural language and raw command chaining
@@ -308,13 +349,12 @@ Dry-run preview mode (--dry-run)
 Audit mode for rule inspection
 
 .IP \(bu 2
-Full firewall backup and restore management
+Full firewall backup and restore
 
 .IP \(bu 2
-Transactional commit system with rollback protection
+Transactional commit with rollback protection
 
 .SH RULE-ENGINE COMMANDS
-
 Usage:
 
 .RS
@@ -326,67 +366,51 @@ tab(|) box;
 l l.
 Subcommand | Description
 _
---dry-run | Preview rules without applying them.
-open [table|all] | Show current firewall rules in a readable format.
-flush <table> | Remove all rules from a specific table.
-flush all | Remove all rules from all tables.
-backup | save | Create a backup of the firewall configuration.
-restore | Restore firewall rules from a backup.
-raw <iptables cmd> | Execute native iptables commands directly.
-.TE
-
-.SH RULE-ENGINE SUBCOMMANDS
-
-.TS
-tab(|) box;
-l l.
-Command | Description
-_
-open [table|all] | Display firewall rules in a readable table format; optionally specify a table or use 'all'.
-flush <table> | Remove all rules from a specific table.
-flush all | Remove rules from all firewall tables.
-backup | save | Create a backup of current firewall configuration.
-restore | Restore firewall rules from a previous backup.
-raw <iptables cmd> | Execute raw iptables commands directly (advanced usage).
-allow <arg> | Accept incoming traffic (port number or service name).
-deny | drop <arg> | Silently drop matching packets.
-reject | decline <arg> | Reject packets with a response notification.
-delete | remove <arg> | Delete rules, backups, or aliases.
-mask | hide | Enable NAT masquerading for source or destination IPs.
-enable icmp | echo | Enable ICMP ping responses.
-disable icmp | echo | Disable ICMP ping responses.
-tcp | Apply rule to TCP traffic (default).
-udp | Apply rule to UDP traffic.
-multiport <ports...> | Apply rule to multiple ports simultaneously.
-range <start-end> | Apply rule to a range of ports.
-alias-create | Create named IP groups for easier rule management.
-alias-append | Add IPs to an existing alias.
-alias-prune | Remove IPs from an alias.
-sensitive <ports...> | Mark ports as sensitive to require confirmation before changes.
-sensitive-list | Display all ports marked sensitive.
-sensitive-remove | Remove ports from the sensitive list.
-from <IP|alias> | Specify source IP or alias.
-to <IP|alias> | Specify destination IP or alias.
-audit | Inspect active firewall rules, drops, and intrusion events.
-audit ssh | Display SSH brute-force attempts with IPs, usernames, and counts.
-audit block <ID> [dur=N] | Temporarily block attacker; optional duration in minutes.
-audit block <ID> perm | Permanently ban IP.
-audit unblock <ID> | Remove a previously applied block.
-audit history | View historical attacker actions.
-audit banlist | Show combined ban list from RuleEngine and Fail2Ban.
-audit key <APIKEY> | Configure AbuseIPDB API key.
-audit lookup <IP> | Check reputation of an IP via AbuseIPDB.
-audit scan | Lightweight file integrity and malware scan.
-audit scan --deep | Deep scan of filesystem and binaries.
---dry-run | Preview rules without applying them.
+--dry-run | Preview rules without applying them
+open [table|all] | Display current firewall rules
+flush <table> | Remove all rules from a specific table
+flush all | Remove all rules from all tables
+backup | save | Create firewall configuration backup
+restore | Restore firewall rules from a backup
+raw <iptables cmd> | Execute raw iptables command
+allow <arg> | Accept incoming traffic (port or service)
+deny | drop <arg> | Silently drop matching packets
+reject | decline <arg> | Reject packets with notification
+delete | remove <arg> | Delete rules, backups, or aliases
+mask | hide | Enable NAT masquerading for source/destination IPs
+enable icmp | echo | Allow ICMP ping responses
+disable icmp | echo | Disable ICMP ping responses
+tcp | Apply rule to TCP traffic (default)
+udp | Apply rule to UDP traffic
+multiport <ports...> | Apply rule to multiple ports
+range <start-end> | Apply rule to port range
+alias-create | Create named IP groups
+alias-append | Add IPs to existing alias
+alias-prune | Remove IPs from alias
+sensitive <ports...> | Mark ports as sensitive (requires confirmation)
+sensitive-list | Show all sensitive ports
+sensitive-remove | Remove ports from sensitive list
+from <IP|alias> | Specify source IP/alias
+to <IP|alias> | Specify destination IP/alias
+audit | Inspect rules, drops, and intrusions
+audit ssh | Show SSH brute-force attempts
+audit block <ID> [dur=N] | Temporarily block attacker (minutes)
+audit block <ID> perm | Permanently ban IP
+audit unblock <ID> | Remove previously applied block
+audit history | View attacker history
+audit banlist | Show combined RuleEngine and Fail2Ban ban list
+audit key <APIKEY> | Configure AbuseIPDB API key
+audit lookup <IP> | Check IP reputation via AbuseIPDB
+audit scan | Lightweight file/malware scan
+audit scan --deep | Deep scan filesystem and binaries
 .TE
 
 .PP
 Subcommands may be chained using
 .B and
 or
-.B , 
-for multiple rules in a single command.
+.B ,
+to execute multiple rules in a single command.
 
 .RS
 .B Example:
@@ -398,137 +422,116 @@ one-click rule-engine "allow ssh and allow https"
 one-click rule-engine "allow 80,allow 443"
 .RE
 
-.PP
-Traffic Rules:
-
+.SH RULE-ENGINE TRAFFIC RULES
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-allow <arg> | Accept incoming traffic (ports or service names).
-deny | drop <arg> | Silently discard matching packets.
-reject | decline <arg> | Reject packets with a response notification.
-delete | remove <arg> | Remove rules, backups, or aliases.
-mask | hide | Apply NAT masquerading.
+allow <arg> | Accept incoming traffic (ports or service names)
+deny | drop <arg> | Silently discard matching packets
+reject | decline <arg> | Reject packets with a notification
+delete | remove <arg> | Remove rules, backups, or aliases
+mask | hide | Apply NAT masquerading
 .TE
 
-.PP
-Protocol Control:
-
+.SH RULE-ENGINE PROTOCOL CONTROL
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-enable icmp | echo | Enable ICMP echo requests (ping).
-disable icmp | echo | Disable ICMP echo requests.
-tcp | udp | Specify protocol for rule application.
+enable icmp | echo | Enable ICMP echo requests (ping)
+disable icmp | echo | Disable ICMP echo requests
+tcp | udp | Specify protocol for rule application
 .TE
 
-.PP
-Port Handling:
-
+.SH RULE-ENGINE PORT HANDLING
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-multiport <ports...> | Apply rule to multiple ports.
-range <start-end> | Apply rule across a port range.
+multiport <ports...> | Apply rule to multiple ports simultaneously
+range <start-end> | Apply rule across a contiguous port range
 .TE
 
-.PP
-IP Aliases:
-
+.SH RULE-ENGINE IP ALIASES
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-alias-create | Create a named IP group.
-alias-append | Add IPs to an existing alias.
-alias-prune | Remove IPs from an alias.
+alias-create | Create a named IP group
+alias-append | Add IPs to an existing alias
+alias-prune | Remove IPs from an alias
 .TE
 
-.PP
-Sensitive Ports:
-
+.SH RULE-ENGINE SENSITIVE PORTS
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-sensitive <ports...> | Mark ports as sensitive to trigger confirmation.
-sensitive-list | List sensitive ports.
-sensitive-remove | Remove ports from the sensitive list.
+sensitive <ports...> | Mark ports as sensitive to require confirmation
+sensitive-list | Display all sensitive ports
+sensitive-remove | Remove ports from the sensitive list
 .TE
 
-.PP
-Source/Destination Filtering:
-
+.SH RULE-ENGINE SOURCE/DESTINATION FILTERING
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-from <IP/CIDR> | Specify source IP or subnet for the rule.
-to <IP/CIDR> | Specify destination IP or subnet for the rule.
+from <IP/CIDR> | Specify source IP or subnet for the rule
+to <IP/CIDR> | Specify destination IP or subnet for the rule
 .TE
 
-.PP
-Audit and Security:
-
+.SH RULE-ENGINE AUDIT AND SECURITY
 .TS
 tab(|) box;
 l l.
 Subcommand | Description
 _
-audit | Inspect firewall activity.
-audit ssh | Show SSH brute-force attempts.
-audit block <ID> [dur=N|perm] | Temporarily or permanently block detected IP.
-audit unblock <ID> | Remove a previously applied block.
-audit history | View historical actions.
-audit banlist | Show combined ban lists.
-audit key <APIKEY> | Configure AbuseIPDB key.
-audit lookup <IP> | Check IP reputation via AbuseIPDB.
-audit scan [--deep] | Run file integrity / malware scan.
+audit | Inspect firewall activity and events
+audit ssh | Show SSH brute-force attempts with IPs and usernames
+audit block <ID> [dur=N|perm] | Temporarily (minutes) or permanently block a detected IP
+audit unblock <ID> | Remove a previously applied block
+audit history | View historical attacker or rule actions
+audit banlist | Show combined RuleEngine and Fail2Ban ban lists
+audit key <APIKEY> | Configure AbuseIPDB API key
+audit lookup <IP> | Check IP reputation via AbuseIPDB
+audit scan [--deep] | Run file integrity and malware scan; use --deep for full scan
 .TE
 
 .SH RULE-ENGINE EXAMPLES
-
 Allow SSH:
-
 .RS
 .B one-click rule-engine "allow ssh"
 .RE
 
-Block SMTP:
-
+Block SMTP traffic:
 .RS
 .B one-click rule-engine "drop smtp"
 .RE
 
-Allow HTTP and HTTPS:
-
+Allow HTTP and HTTPS together:
 .RS
 .B one-click rule-engine "allow http and allow https"
 .RE
 
-Enable ICMP:
-
+Enable ICMP (ping) responses:
 .RS
 .B one-click rule-engine "enable icmp"
 .RE
 
-Preview rules without applying them:
-
+Preview rules without applying:
 .RS
 .B one-click rule-engine --dry-run "allow 443"
 .RE
 
-Create alias and use it:
-
+Create an alias and use it:
 .RS
 .B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
 .RE
@@ -537,32 +540,29 @@ Create alias and use it:
 .B one-click rule-engine "allow ssh from office"
 .RE
 
-Audit scan example:
-
+Perform a deep audit scan:
 .RS
 .B one-click rule-engine "audit scan --deep"
 .RE
 
 Backup firewall configuration:
-
 .RS
 .B one-click rule-engine "backup firewall"
 .RE
 
 Restore firewall configuration:
-
 .RS
 .B one-click rule-engine "restore firewall"
 .RE
 
-Create an alias:
+.SH RULE-ENGINE ALIAS MANAGEMENT
 
+Create a new IP alias:
 .RS
 .B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
 .RE
 
-Add to an alias:
-
+Add IP addresses to an existing alias:
 .RS
 .B one-click rule-engine "alias-append office 192.168.1.12"
 .RE
@@ -574,12 +574,13 @@ The
 command performs a complete operating system reinstallation.
 
 .B WARNING:
-This operation destroys all existing data.
+This operation destroys all existing data on the target system.
 
-Features include:
+.PP
+Features:
 
 .IP \(bu 2
-Network and cloud based installation
+Network- and cloud-based installation
 
 .IP \(bu 2
 Supports Linux and Windows targets
@@ -591,10 +592,7 @@ Independent of current system state
 Suitable for recovery or reprovisioning
 
 .PP
-The original system can be any system listed in the table below.
-
-.PP
-System requirements for the target system:
+Supported target systems and versions:
 
 .TS
 tab(|) box;
@@ -603,96 +601,91 @@ l l l l.
 System | Version | Memory | Disk
 _
 Alpine | 3.20, 3.21, 3.22, 3.23 | 256 MB | 1 GB
-Debian | 9, 10, 11, 12, 13 | 256 MB | 1 ~ 1.5 GB ^
-Kali | Rolling | 256 MB | 1 ~ 1.5 GB ^
-Ubuntu | 16.04 LTS - 24.04 LTS, 25.10 | 512 MB * | 2 GB
+Debian | 9–13 | 256 MB | 1–1.5 GB ^
+Kali | Rolling | 256 MB | 1–1.5 GB ^
+Ubuntu | 16.04 LTS–24.04 LTS, 25.10 | 512 MB * | 2 GB
 Anolis | 7, 8, 23 | 512 MB * | 5 GB
-RHEL / AlmaLinux / Rocky / Oracle | 8, 9, 10 | 512 MB * | 5 GB
+RHEL / AlmaLinux / Rocky / Oracle | 8–10 | 512 MB * | 5 GB
 OpenCloudOS | 8, 9, Stream 23 | 512 MB * | 5 GB
 CentOS Stream | 9, 10 | 512 MB * | 5 GB
 Fedora | 42, 43 | 512 MB * | 5 GB
-openEuler | 20.03 LTS - 24.03 LTS, 25.09 | 512 MB * | 5 GB
-openSUSE | Leap 15.6, 16.0, Tumbleweed (Rolling) | 512 MB * | 5 GB
+openEuler | 20.03–24.03 LTS, 25.09 | 512 MB * | 5 GB
+openSUSE | Leap 15.6, 16.0, Tumbleweed | 512 MB * | 5 GB
 NixOS | 25.11 | 512 MB | 5 GB
 Arch | Rolling | 512 MB | 5 GB
 Gentoo | Rolling | 512 MB | 5 GB
 AOSC OS | Rolling | 512 MB | 5 GB
 fnOS | 1 | 512 MB | 8 GB
 Windows (DD) | Any | 512 MB | Depends on image
-Windows (ISO) | Vista, 7, 8.x (Server 2008 - 2012 R2) | 512 MB | 25 GB
-Windows (ISO) | 10, 11 (Server 2016 - 2025) | 1 GB | 25 GB
+Windows (ISO) | Vista, 7, 8.x / Server 2008–2012 R2 | 512 MB | 25 GB
+Windows (ISO) | 10, 11 / Server 2016–2025 | 1 GB | 25 GB
 .TE
 
 .PP
-* Indicates installation using cloud images, not traditional network installation.
+* Installation using cloud images rather than traditional network installation.  
 
-.PP
-^ Indicates either:
+^ Either:  
 .br
-256 MB memory + 1.5 GB disk
+256 MB memory + 1.5 GB disk  
 .br
-or
+or  
 .br
-512 MB memory + 1 GB disk
+512 MB memory + 1 GB disk  
 
-.PP
-Additional Notes:
+.SH REINSTALL NOTES
 
 .IP \(bu 2
-Username is
+Target username is
 .B root.
-The script prompts for a password. If left blank, a random one is generated.
+The installer prompts for a password; if left blank, a random one is generated.
 
 .IP \(bu 2
-When installing the latest version, the version number does not need to be specified.
+When installing the latest version, specifying the version number is optional.
 
 .IP \(bu 2
-Maximizes disk space usage: no boot partition (except Fedora) and no swap partition.
+Maximizes disk usage: no separate boot partition (except Fedora) and no swap partition.
 
 .IP \(bu 2
-Automatically selects optimized kernels based on machine type (e.g., Cloud or HWE kernels).
+Automatically selects optimized kernels based on machine type (Cloud or HWE kernels).
 
 .IP \(bu 2
-When installing Red Hat, you must provide a qcow2 image link obtained from:
+Red Hat installations require a qcow2 image link from:
 .br
-https://access.redhat.com/downloads/content/rhel
-.br
+https://access.redhat.com/downloads/content/rhel  
 Other RHEL-based qcow2 images (e.g., Alibaba Cloud Linux, TencentOS Server) are also supported.
 
 .IP \(bu 2
-After reinstallation, if changing the SSH port or switching to key-based login,
-you must also modify files inside:
+After reinstallation, if changing SSH port or switching to key-based authentication, also update:
 .br
 .I /etc/ssh/sshd_config.d/
 
 .IP \(bu 2
-Supports raw and fixed-size VHD image formats.
-Images may be uncompressed or compressed as:
+Supports raw and fixed-size VHD images. Supported formats:  
 .br
 .I .gz, .xz, .zst, .tar, .tar.gz, .tar.xz, .tar.zst
 
 .IP \(bu 2
-When deploying a Windows image:
+Windows deployment notes:  
 .br
-The system disk is automatically expanded.
+System disk is automatically expanded.  
 .br
-Machines with a static IP will have the IP configured automatically.
+Static IPs are configured automatically.  
 .br
-It may take several minutes after first boot for configuration to complete.
+Initial configuration may take several minutes after first boot.
 
 .IP \(bu 2
-When deploying a Linux image:
+Linux deployment notes:  
 .br
-The installer will NOT modify any contents of the image.
+Installer preserves all contents of the provided image; it does not modify it.
 
 .SH BACKUP
 
 The
 .B backup
-command creates incremental backups using:
+command performs incremental backups using multiple methods:
 
 .IP \(bu 2
-rsync local snapshots
+Local rsync snapshots
 
 .IP \(bu 2
 Remote rsync over SSH
@@ -701,37 +694,36 @@ Remote rsync over SSH
 Cloud storage via rclone
 
 .PP
-Backups are incremental and optimized for efficiency and fast restore.
+Backups are incremental, efficient, and designed for rapid restoration.
 
 .PP
-Features include:
+Key features:
 
 .IP \(bu 2
-Block level incremental transfers using rsync delta algorithm
+Block-level incremental transfers using the rsync delta algorithm
 
 .IP \(bu 2
-Snapshot style backups using hard links to minimize disk usage
+Snapshot-style backups with hard links to minimize disk usage
 
 .IP \(bu 2
-Local, remote, and cloud destination support
+Support for local, remote, and cloud destinations
 
 .IP \(bu 2
-Bandwidth efficient operation suitable for limited network environments
+Bandwidth-efficient operation for limited networks
 
 .IP \(bu 2
-Fast restore capability with minimal reconstruction time
+Fast restoration with minimal reconstruction
 
 .IP \(bu 2
 Preserves permissions, ownership, timestamps, and symbolic links
 
 .IP \(bu 2
-Supports full system and partial directory backups
+Supports full system or partial directory backups
 
 .IP \(bu 2
-Safe operation on live systems without requiring downtime
+Safe operation on live systems without downtime
 
-.PP
-Supported backup destinations:
+.SH BACKUP DESTINATIONS
 
 .TS
 tab(|) box;
@@ -745,8 +737,9 @@ Network storage | SSH, NFS, or mounted filesystem
 External disk | Direct filesystem backup
 .TE
 
-.PP
-Supported cloud providers (via rclone) include but are not limited to:
+.SH BACKUP CLOUD PROVIDERS
+
+Supported cloud providers (via rclone) include, but are not limited to:
 
 .IP \(bu 2
 Amazon S3
@@ -772,8 +765,7 @@ Cloudflare R2
 .IP \(bu 2
 Any provider supported by rclone
 
-.PP
-Backup behavior:
+.SH BACKUP BEHAVIOR
 
 .IP \(bu 2
 Initial backup creates a full snapshot
@@ -785,13 +777,12 @@ Subsequent backups transfer only changed files
 Unchanged files are referenced using hard links
 
 .IP \(bu 2
-Deleted files may be retained in previous snapshots
+Deleted files may remain in previous snapshots
 
 .IP \(bu 2
 Backup integrity is verified during transfer
 
-.PP
-Restore capability:
+.SH RESTORE CAPABILITIES
 
 .IP \(bu 2
 Individual file restore
@@ -803,10 +794,9 @@ Directory restore
 Full system restore
 
 .IP \(bu 2
-Bare metal recovery support
+Bare-metal recovery support
 
-.PP
-Requirements:
+.SH BACKUP REQUIREMENTS
 
 .TS
 tab(|) box;
@@ -819,17 +809,16 @@ Cloud backup | rclone configured remote
 Filesystem | Supports permissions and hard links
 .TE
 
-.PP
-Security considerations:
+.SH SECURITY CONSIDERATIONS
 
 .IP \(bu 2
 Remote transfers use SSH encryption
 
 .IP \(bu 2
-Cloud transfers use provider supported encryption
+Cloud transfers leverage provider-supported encryption
 
 .IP \(bu 2
-Authentication handled via SSH keys or rclone configuration
+Authentication is handled via SSH keys or rclone configuration
 
 .IP \(bu 2
 Backup data remains unchanged unless explicitly modified
@@ -846,72 +835,69 @@ The
 command creates and restores boot-critical snapshots.
 
 .PP
-This includes the following components:
+Components included:
 
 .IP \(bu 2
-Bootloader – preserves GRUB or other bootloader configuration and binaries
+Bootloader – preserves GRUB or alternative bootloader configuration and binaries
 
 .IP \(bu 2
-Kernel – captures the current kernel image(s) in use
+Kernel – captures the currently active kernel image(s)
 
 .IP \(bu 2
-Initramfs – stores the initial RAM filesystem for boot
+Initramfs – stores the initial RAM filesystem used during boot
 
 .IP \(bu 2
 Root filesystem metadata – maintains essential filesystem structures required for boot
 
 .PP
-Use
-.B boot-recovery
-for:
+Typical use cases:
 
 .IP \(bu 2
-Recovering from boot failures caused by kernel or bootloader corruption
+Recover from boot failures caused by kernel or bootloader corruption
 
 .IP \(bu 2
-Testing new kernels or boot configurations without risking system unbootability
+Test new kernels or boot configurations without risking system unbootability
 
 .IP \(bu 2
-Safe rollback after failed updates or misconfigured boot parameters
+Perform safe rollback after failed updates or misconfigured boot parameters
 
 .PP
 Operation details:
 
 .IP \(bu 2
-Snapshots can be created on local storage or remote locations
+Snapshots may be stored locally or on remote locations
 
 .IP \(bu 2
 Restoration overwrites only boot-critical components
 
 .IP \(bu 2
-Does not affect user data outside boot-critical areas
+User data outside boot-critical areas is preserved
 
 .IP \(bu 2
-Supports incremental snapshotting of boot-critical files to save space
+Supports incremental snapshotting to reduce storage usage
 
 .PP
-Security and safety considerations:
+Security and safety:
 
 .IP \(bu 2
-Requires root privileges to create or restore boot-critical snapshots
+Root privileges are required to create or restore snapshots
 
 .IP \(bu 2
-Restoration is destructive to the boot components; ensure backups are verified
+Restoration is destructive to boot components; verify backups first
 
 .IP \(bu 2
-Safe to use with backup snapshots created by the
+Compatible with
 .B backup
-command
-for coordinated system recovery
+snapshots for coordinated system recovery
 
 .SH REPAIR
 
 The
 .B repair
-command restores network configuration from snapshots.
+command restores network configurations from snapshots.
 
 .PP
-This allows recovery from:
+Recovery scenarios:
 
 .IP \(bu 2
 Firewall misconfiguration – restores iptables, nftables, or equivalent rules
@@ -923,111 +909,107 @@ Interface errors – resets network interfaces to the snapshot state
 Routing failures – restores static routes, gateways, and routing tables
 
 .PP
-Use
-.B repair
-especially for:
+Ideal usage:
 
 .IP \(bu 2
-Remote servers where manual access is limited
+Remote servers with limited manual access
 
 .IP \(bu 2
-Systems that must maintain network uptime and connectivity
+Systems requiring high network uptime and connectivity
 
 .IP \(bu 2
-Recovering from configuration errors without requiring a full system reinstall
+Recovery from configuration errors without full system reinstall
 
 .PP
 Operation details:
 
 .IP \(bu 2
-Snapshots can be local or stored remotely
+Snapshots may be stored locally or remotely
 
 .IP \(bu 2
-Restoration applies only to network configuration files and runtime settings
+Restoration affects only network configuration files and runtime settings
 
 .IP \(bu 2
-Supports both interface-based and system-wide configuration restores
+Supports interface-level or system-wide restores
 
 .IP \(bu 2
-Safe incremental restores prevent overwriting unrelated settings
+Incremental restores prevent overwriting unrelated settings
 
 .PP
-Security and safety considerations:
+Security and safety:
 
 .IP \(bu 2
-Requires root privileges to restore network configuration
+Root privileges are required
 
 .IP \(bu 2
-Ensure backups are verified to avoid restoring misconfigured snapshots
+Verify backup integrity to avoid restoring misconfigured snapshots
 
 .IP \(bu 2
-When restoring remote servers, consider a temporary console or alternate connection to prevent lockout
+For remote systems, consider temporary console or alternative access to avoid lockout
 
 .PP
 The
 .B repair
-command is ideal for maintaining network stability and quick recovery from misconfiguration.
+command ensures network stability and fast recovery from misconfigurations.
 
 .SH MIGRATE
 
 The
 .B migrate
-command transfers entire systems from one host or storage to another.
+command transfers entire systems between hosts or storage.
 
 .PP
-Supported methods:
+Supported migration methods:
 
 .TP
 .B dd
-Block-level cloning – creates an exact disk image, including all partitions, bootloader, and filesystem structures.
+Block-level cloning – creates an exact disk image including all partitions, bootloader, and filesystem structures
 
 .TP
 .B rsync
-File-level migration – copies files and directories while preserving permissions, ownership, and timestamps.
+File-level migration – copies files and directories while preserving permissions, ownership, and timestamps
 
 .PP
-Use
-.B migrate
-for:
+Use cases:
 
 .IP \(bu 2
-Server replacement – move systems to new hardware with minimal downtime.
+Server replacement – migrate systems to new hardware with minimal downtime
 
 .IP \(bu 2
-Failover preparation – replicate systems for high availability or disaster recovery.
+Failover preparation – replicate systems for high availability or disaster recovery
 
 .IP \(bu 2
-Infrastructure migration – migrate servers to new hosts, data centers, or cloud environments.
+Infrastructure migration – move servers to new hosts, data centers, or cloud environments
 
 .PP
 Operation details:
 
 .IP \(bu 2
-Supports local, remote, and network-based migrations over SSH or mounted storage.
+Supports local, remote, and network-based migrations via SSH or mounted storage
 
 .IP \(bu 2
-Can perform incremental file-level migrations to reduce transfer time.
+Incremental file-level migrations reduce transfer time
 
 .IP \(bu 2
-Preserves system configuration, installed packages, and user data.
+Preserves system configuration, installed packages, and user data
 
 .IP \(bu 2
-Supports bare metal restores using dd images or rsync snapshots.
+Bare-metal restores supported via dd images or rsync snapshots
 
 .PP
-Safety and security considerations:
+Safety and security:
 
 .IP \(bu 2
-Requires root privileges to perform full system migration.
+Root privileges are required for full system migration
 
 .IP \(bu 2
-Ensure target storage has sufficient space for the source system.
+Ensure target storage has sufficient space
 
 .IP \(bu 2
-When migrating remote systems, verify network reliability to avoid incomplete transfers.
+Verify network reliability when migrating remote systems
 
 .IP \(bu 2
-Block-level cloning overwrites all target disk contents – use with caution.
+Block-level cloning overwrites all target disk contents – use with extreme caution
 
 .SH BENCH
 
@@ -1035,11 +1017,10 @@ The
 .B bench
 command (also referred to as
 .BR "one-click bench" " (OCB)" )
-runs a comprehensive system benchmark suite designed to evaluate
-server performance across CPU, memory, disk, and network subsystems.
+runs a comprehensive system benchmark suite that evaluates server performance across CPU, memory, disk, and network subsystems.
 
 .PP
-OCB is intended for:
+OCB is suitable for:
 
 .IP \(bu 2
 VPS performance validation
@@ -1057,7 +1038,7 @@ Pre-deployment verification
 Post-migration performance checks
 
 .PP
-Benchmark components include:
+Benchmark components:
 
 .IP \(bu 2
 CPU performance – multi-threaded and single-threaded computational tests
@@ -1069,7 +1050,7 @@ Memory performance – sequential read and write bandwidth measurements
 Disk performance – sequential and random I/O throughput and latency
 
 .IP \(bu 2
-Network latency – multi-target latency testing and sorting by lowest response time
+Network latency – multi-target latency testing, sorted by lowest response time
 
 .IP \(bu 2
 System inspection – kernel, virtualization detection, CPU model, and architecture
@@ -1078,13 +1059,13 @@ System inspection – kernel, virtualization detection, CPU model, and architect
 Operation details:
 
 .IP \(bu 2
-Targets are latency-tested first and sorted by lowest round-trip time before bandwidth tests are executed
+Targets are latency-tested and sorted by lowest round-trip time before bandwidth tests
 
 .IP \(bu 2
-Tests are executed sequentially in ranked order for consistency
+Tests are executed sequentially for consistency
 
 .IP \(bu 2
-Results are displayed in a structured table format
+Results are displayed in structured tables
 
 .IP \(bu 2
 Optional color-coded scoring for quick performance assessment
@@ -1093,12 +1074,12 @@ Optional color-coded scoring for quick performance assessment
 Non-destructive and safe for production systems
 
 .PP
-OCB automatically installs required dependencies if missing and runs within a
+Dependencies are installed automatically if missing, and OCB runs inside a
 .BR tmux (1)
 session when executed interactively to prevent interruption.
 
 .PP
-The benchmark does not modify system configuration and does not persist changes.
+The benchmark does not modify system configuration or persist changes.
 
 .PP
 Example:
@@ -1107,19 +1088,14 @@ Example:
 .B one-click bench
 .RE
 
-.PP
-The
-.B bench
-command provides a fast, consistent method of evaluating infrastructure quality and identifying performance bottlenecks.
-
 .SH SYS-INFO/SYSTEM
 
 The
 .B sys-info
-command displays live system statistics, providing a real-time overview of system performance.
+command displays live system statistics, providing a real-time overview.
 
 .PP
-Monitored metrics include:
+Monitored metrics:
 
 .IP \(bu 2
 CPU usage – overall and per-core utilization
@@ -1140,7 +1116,7 @@ Load average – 1, 5, and 15 minute system load metrics
 Additional features:
 
 .IP \(bu 2
-Real-time updates with refresh intervals
+Real-time updates with configurable refresh intervals
 
 .IP \(bu 2
 Sortable and filterable per CPU, memory, or disk device
@@ -1149,33 +1125,38 @@ Sortable and filterable per CPU, memory, or disk device
 Optional color-coded output for quick status assessment
 
 .IP \(bu 2
-Supports remote monitoring via SSH (if configured)
+Supports remote monitoring via SSH
 
 .PP
 Provides functionality similar to
 .BR top (1)
 and
-.BR htop (1), while integrating with other system management utilities.
+.BR htop (1)
+while integrating with other system management utilities.
 
 .SH CRON
 
 The
 .B cron
-command provides an interface for configuring scheduled automation tasks.
+command provides an interface for scheduling automation tasks.
 
 .PP
-Supported tasks include:
+Supported tasks:
 
 .IP \(bu 2
 Scheduled backups – automatically run
 .B backup
-jobs at specified intervals
+jobs
 
 .IP \(bu 2
-Maintenance automation – perform routine system maintenance, cleanup, or updates
+Maintenance automation – perform routine cleanup, updates, or maintenance
 
 .IP \(bu 2
-Snapshot rotation – manage retention and pruning of backup and boot-recovery snapshots
+Snapshot rotation – manage retention of
+.B backup
+and
+.B boot-recovery
+snapshots
 
 .PP
 Additional features:
@@ -1184,7 +1165,7 @@ Additional features:
 Flexible scheduling using standard cron syntax or simplified intervals
 
 .IP \(bu 2
-Supports logging of task output for auditing and troubleshooting
+Supports logging of task output for auditing
 
 .IP \(bu 2
 Integration with
@@ -1192,17 +1173,19 @@ Integration with
 .B boot-recovery,
 and
 .B repair
-commands for automated system management
+for automated system management
 
 .IP \(bu 2
-Safe execution – tasks run with defined privileges to prevent accidental system damage
+Safe execution with defined privileges to prevent accidental damage
 
 .SH MIGRATE
 
 The
 .B migrate
-command transfers the One-Click toolkit configuration between systems.
-This includes:
+command transfers One-Click toolkit configuration between systems.
+
+.PP
+Migrated components:
 
 .IP \(bu 2
 User configuration
@@ -1217,7 +1200,7 @@ Firewall backups
 Scheduled automation tasks (cron)
 
 .PP
-Migration archives are created as compressed tar files that can be transferred to another system and imported.
+Migration archives are compressed tar files that can be transferred and imported on a target system.
 
 .SH USAGE
 
@@ -1232,7 +1215,7 @@ one-click migrate to <user@host> | Send migration archive to a remote host and o
 .TE
 
 .PP
-The archive includes:
+Archive contents:
 
 .IP \(bu 2
 One-Click configuration directory (/etc/one-click)
@@ -1257,43 +1240,44 @@ Import configuration from a local archive:
 .B one-click migrate import /etc/one-click/migrate/one-click-migration-20260315162903.tar.gz
 .RE
 
-Directly send and import migration archive on a remote host:
+Send and import migration archive on a remote host:
 
 .RS
 .B one-click migrate to root@server2
 .RE
 
 .PP
-During remote migration, the target system is automatically checked for One-Click.
-If it is missing, it will be installed automatically before importing the archive.
-The user may be prompted to confirm the import.
-
-.PP
-Notes:
+During remote migration:
 
 .IP \(bu 2
-Remote migration requires either SSH keys or password authentication.
+The target system is checked for One-Click and installed automatically if missing
 
 .IP \(bu 2
-Target host must allow SSH access and have basic tools installed (bash, tar, curl).
+User may be prompted to confirm import
 
 .IP \(bu 2
-Migration is safe and does not overwrite unrelated system files.
+SSH keys or password authentication is required
+
+.IP \(bu 2
+Target host must allow SSH and have basic tools (bash, tar, curl)
+
+.IP \(bu 2
+Migration is safe and does not overwrite unrelated system files
 
 .SH UNINSTALL
 
 The
 .B uninstall
-command removes the one-click tool and all associated files from the system.
+command removes the One-Click tool and all associated files from the system.
 
 .PP
-Components removed include:
+Components removed:
 
 .IP \(bu 2
 Installed scripts – all executable binaries and supporting scripts
 
 .IP \(bu 2
-Configuration files – user and system-wide configuration files
+Configuration files – system-wide and user-specific settings
 
 .IP \(bu 2
 Cron jobs – any scheduled automation tasks created by the tool
@@ -1308,7 +1292,7 @@ Operation details:
 Requires root privileges to remove system-wide files and cron entries
 
 .IP \(bu 2
-Performs cleanup safely without affecting unrelated system files
+Performs cleanup safely without affecting unrelated files
 
 .IP \(bu 2
 Leaves no residual data when executed correctly
@@ -1320,29 +1304,29 @@ Can be used to prepare the system for reinstallation or migration
 
 .TP
 .I /etc/one-click/
-Configuration directory storing system and user settings.
+Configuration directory storing system and user settings
 
 .TP
 .I /var/log/one-click/
-Log directory for command execution and system events.
+Log directory for command execution and system events
 
 .TP
 .I /usr/local/bin/one-click
-Executable for the one-click tool.
+Executable for the One-Click tool
 
 .TP
 .I /usr/local/share/man/man8/one-click.8
-Man page for reference and usage documentation.
+Man page for reference and usage documentation
 
 .SH ENVIRONMENT
 
 .TP
 .B TMUX
-Used automatically to manage persistent sessions when running commands interactively.
+Used automatically to manage persistent sessions when running commands interactively
 
 .TP
 .B HOME
-User home directory; used to store user-specific configuration files and temporary data.
+User home directory; used to store user-specific configuration and temporary data
 
 .SH SECURITY
 
@@ -1351,10 +1335,10 @@ The
 tool requires root privileges for most operations.
 
 .PP
-Users should follow best practices:
+Best practices:
 
 .IP \(bu 2
-Verify script source integrity – ensure the tool and updates are obtained from trusted sources.
+Verify script source integrity – ensure the tool and updates are obtained from trusted sources
 
 .IP \(bu 2
 Review destructive commands before execution – especially
@@ -1363,23 +1347,21 @@ Review destructive commands before execution – especially
 .B repair,
 and
 .B uninstall
-operations.
 
 .IP \(bu 2
-Maintain backups before reinstall or migration – to prevent data loss and allow recovery in case of errors.
+Maintain backups before reinstall or migration to prevent data loss and allow recovery
 
 .PP
 Additional considerations:
 
 .IP \(bu 2
-Use secure credentials and SSH keys for remote operations.
+Use secure credentials and SSH keys for remote operations
 
 .IP \(bu 2
-Restrict access to system configuration and snapshot directories.
+Restrict access to system configuration and snapshot directories
 
 .IP \(bu 2
-Monitor logs to detect unauthorized or failed operations.
-
+Monitor logs to detect unauthorized or failed operations
 .SH VERSION
 
 One-Click v@VERSION@
