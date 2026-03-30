@@ -38,11 +38,12 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  engine | rule-engine    Natural-language firewall interface for iptables." \
     "  help                    Display this help menu." \
     "  logs | log-browser      Browse and inspect system log files interactively." \
+    "  menu                    Central menu with direct access to most tools." \
     "  migrate                 Migrate system settings, configurations and cron tasks." \
     "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
     "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
     "  reinstall               Perform a full operating system reinstallation." \
-    "  repair                  Diagnose and repair network configuration issues." \
+    "  net-repair                  Diagnose and repair network configuration issues." \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
     "  --web-admin             Create a backup of selected static site." \
@@ -131,7 +132,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  audit scan --deep       Perform a deeper filesystem inspection." "" \
     "$(tput bold)Examples$(tput sgr0)" \
     "────────────────────────────────────────────────────────────────────────────" \
-    "  one-click repair" \
+    "  one-click net-repair" \
     "      Diagnose and repair networking." "" \
     "  one-click backup" \
     "      Launch backup and restore interface." "" \
@@ -187,7 +188,8 @@ yellow=$(tput setaf 11)
 grey="$(tput setaf 8)"
 green="$(tput setaf 2)"
 warning="$(tput setaf 3)"
-orange=$(tput setaf 208)
+orange="$(tput setaf 208)"
+magenta=$(tput setaf 5)
 bold="$(tput bold)"
 reset="$(tput sgr 0)"
 ul="$(tput smul)"
@@ -280,13 +282,21 @@ check_for_updates() {
     return 0
   fi
   if [[ "$remote_version" != "$current_version" ]]; then
-    printf '%s\n' "${yellow}╔══════════════════════════════════════════════════════════════════╗${reset}" \
-      "${yellow}║ [UPDATE] A newer version ($remote_version) is available!                   ║${reset}" \
-      "${yellow}║ Run 'one-click update' to get the latest features.               ║${reset}" \
-      "${yellow}╚══════════════════════════════════════════════════════════════════╝${reset}" " "
+    printf "${yellow}%s${reset}\n" \
+      "                  ╔══════════════════════════════════════════════════════════════════╗" \
+      "                  ║ [UPDATE] A newer version ($remote_version) is available!                   ║" \
+      "                  ║ Run 'one-click update' to get the latest features.               ║" \
+      "                  ╚══════════════════════════════════════════════════════════════════╝" " "
   fi
 }
 check_for_updates
+if [[ ! -f "/etc/one-click/backup/guard/system_baseline.json" ]]; then
+  printf "${yellow}%s${reset}\n" \
+    "                  ╔══════════════════════════════════════════════════════════════════╗" \
+    "                  ║ ${red}[${yellow}SECURITY${red}]${blue} Your IDS Scanner has not been initialized.            ${yellow}║" \
+    "                  ║ ${blue}Run $(tput setaf 63)one-click engine 'audit scan --init'${blue} to enable.${yellow}              ║" \
+    "                  ╚══════════════════════════════════════════════════════════════════╝"
+fi
 if [[ ! -f "$deps_ok" ]]; then
   install_dependancies
   mkdir -p "$base"
@@ -570,6 +580,7 @@ conf_migrate() {
       fi
     "
     success "Migration successful to ${target#*@}"
+    info "Please now use migrator to migrate your system and data"
   fi
 }
 if [[ "${1:-}" == "migrate" ]]; then
@@ -589,6 +600,131 @@ if [[ "${1:-}" == "migrate" ]]; then
       exit 1
       ;;
   esac
+  exit 0
+fi
+# ==== MAIN MENU ====
+one_click_menu() {
+  local rule int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
+  skip_check=0
+  out=$(ip -s link show "$nic")
+  isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
+  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
+  if command -v netstat &> /dev/null; then
+    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
+  elif command -v nstat &> /dev/null; then
+    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+  fi
+  gw=$(awk '/default/{print $3}' <(ip r))
+  dev=$(awk '/default/{print $5}' <(ip r))
+  gw6=$(awk '/default/{print $3}' <(ip -6 r))
+  dev6=$(awk '/default/{print $5}' <(ip -6 r))
+  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
+  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
+  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
+  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
+  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
+  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
+  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}TOOL${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Rule Engine Dry Run${blue}" "${blue}one-click engine --dry-run${blue}" \
+      "${magenta}2${blue}"  "${blue}Rule Engine${blue}"         "${blue}one-click engine${blue}" \
+      "${magenta}3${blue}"  "${blue}Backups${blue}"             "${blue}one-click backup${blue}" \
+      "${magenta}4${blue}"  "${blue}Benchmark${blue}"           "${blue}one-click bench${blue}" \
+      "${magenta}5${blue}"  "${blue}Migrator${blue}"            "${blue}one-click migrator${blue}" \
+      "${magenta}6${blue}"  "${blue}Migrate${blue}"             "${blue}one-click migrate${blue}" \
+      "${magenta}7${blue}"  "${blue}Boot Recovery${blue}"       "${blue}one-click recovery${blue}" \
+      "${magenta}8${blue}"  "${blue}OS Reinstall${blue}"        "${blue}one-click reinstall${blue}" \
+      "${magenta}9${blue}"  "${blue}Network Repair${blue}"      "${blue}one-click net-repair${blue}" \
+      "${magenta}10${blue}"  "${blue}System Information${blue}"  "${blue}one-click system${blue}" \
+      "${magenta}11${blue}" "${blue}Cron Manager${blue}"        "${blue}one-click cron${blue}" \
+      "${magenta}12${blue}" "${blue}Log Browser${blue}"         "${blue}one-click logs${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}13${blue}" "${blue}Security Audit${blue}" "${blue}one-click engine audit${blue}" \
+      "${magenta}14${blue}" "${blue}Security (IDS) Scan${blue}"     "${blue}one-click engine 'audit scan'${blue}" \
+      "${magenta}15${blue}" "${blue}Firewall Ban List${blue}"   "${blue}one-click engine 'audit banlist'${blue}" \
+      "${magenta}16${blue}" "${blue}Malicious DROP History${blue}" "${blue}one-click engine 'audit history'${blue}" \
+      "${magenta}17${blue}" "${blue}Drop IP${blue}"         "${blue}one-click engine 'audit drop <ID>'${blue}" 
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}18${blue}" "${blue}WordPress Installer${blue}" "${blue}one-click --wp-create${blue}" \
+      "${magenta}19${blue}" "${blue}WordPress Admin${blue}"     "${blue}one-click --wp-admin${blue}" \
+      "${magenta}20${blue}" "${blue}WordPress Manager${blue}"   "${blue}one-click --wp${blue}" \
+      "${magenta}21${blue}" "${blue}Static Web Installer${blue}" "${blue}one-click --web-create${blue}" \
+      "${magenta}22${blue}" "${blue}Web Manager${blue}"         "${blue}one-click --web-admin${blue}" \
+      "${magenta}23${blue}" "${blue}Issue SSL${blue}"         "${blue}one-click --ssl${blue}" \
+      "${magenta}24${blue}" "${blue}PHP Manager${blue}"         "${blue}one-click --php${blue}"
+     printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}25${blue}" "${blue}Network Health${blue}" "${blue}N/A${blue}" 
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}97${blue}" "${blue}How To Use${blue}"          "${blue}man one-click${blue}" \
+      "${magenta}98${blue}" "${blue}Update One-Click${blue}"    "${blue}one-click update${blue}" \
+      "${magenta}99${blue}" "${blue}Uninstall One-Click${blue}" "${blue}one-click uninstall${blue}" \
+      "${red}0${blue}"  "${blue}Exit Menu${blue}"           "${red}exit${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Enter option ${magenta}number${reset}: " choice
+    case "$choice" in
+      1) 
+        read -rp "${cyan}[USER]:${reset} Enter what you would like the firewall to do: (e.g drop ssh)
+        ${orange}[RULE]:${reset}: " rule
+        rule="${rule,,}"
+        one-click engine --dry-run "$rule" ;;
+      2) 
+        read -rp "${cyan}[USER]:${reset} Enter what you would like the firewall to do: (e.g allow nginx from 1.2.3.4)
+        ${orange}[RULE]:${reset}: " rule
+        rule="${rule,,}"
+        one-click engine "$rule" ;;
+      3) one-click backup        ;;
+      4) one-click bench         ;;
+      5) one-click migrator      ;;
+      6) one-click migrate       ;;
+      7) one-click recovery      ;;
+      8) one-click reinstall     ;;
+      9) one-click net-repair    ;;
+      10) one-click system       ;;
+      11) one-click cron         ;;
+      12) one-click logs         ;;
+      13) one-click engine audit           ;;
+      14) one-click engine 'audit scan'    ;;
+      15) one-click engine 'audit banlist' ;;
+      16) one-click engine 'audit history' ;;
+      17) 
+        one-click engine 'audit ssh'
+        read -rp "${cyan}[USER]:${reset} Enter ID of IP to drop: " drop_ip
+        if [[ ! "$drop_ip" =~ [0-9] ]]; then
+          warn "Invalid ID!"
+          break
+        fi
+        one-click engine "audit drop $drop_ip"
+        ;;
+      18) one-click --wp-create  ;;
+      19) one-click --wp-admin   ;;
+      20) one-click --wp         ;;
+      21) one-click --web-create ;;
+      22) one-click --web-admin  ;;
+      23) one-click --ssl        ;;
+      24) one-click --php        ;;
+      25) 
+        load_net_repair
+        health_check menu        ;;
+      97) man one-click          ;;
+      98) one-click update       ;;
+      99) one-click uninstall    ;;
+      0) break                   ;;
+      *) echo "Invalid option"   ;;
+    esac
+    echo
+  done
+}
+if [[ $1 == "menu" ]]; then
+  clear
+  one_click_menu
   exit 0
 fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
@@ -870,7 +1006,7 @@ map_one_click() {
       update)           echo "--update"      ;;
       --wp-admin)       echo "-wm"           ;;
       --wp-create)      echo "-wp"           ;;
-      --wp-ssl)         echo "-ssl"          ;;
+      --ssl)            echo "-ssl"          ;;
       --wp)             echo "-backup"       ;;
       --web-create)     echo "-st"           ;;
       --web-admin)      echo "-st-backup"    ;;
@@ -1034,6 +1170,9 @@ if [[ $# -gt 0 ]]; then
             rm -rf "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
           fi
           rm -rf "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
+          find /etc /var /run -type f -name '*one-click*' | while read line; do
+            rm -f "$line"
+          done
           printf "${green}[SUCCESS]${reset}%s\n" "One-Click has been uninstalled."
           complete -r one-click
           unset -f _one-click
@@ -1124,9 +1263,10 @@ if [[ $# -gt 0 ]]; then
         "  backup                  Backup with rsync + rclone" \
         "  bench                   Benchmarking tool automates the execution of tests" \
         "  (engine|rule-engine)    Converts natural language into iptables commands" \
+        "  menu                    Central menu with direct access to most tools." \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
-        "  repair                  Repair network (Includes snapshots and backup of network files)" \
+        "  net-repair                  Repair network (Includes snapshots and backup of network files)" \
         "  (system|sys-info)       System Information" \
         "  (log-browser|logs)      System Log File Browswer" \
         "  cron                    Configure a cron job" \
@@ -1141,7 +1281,7 @@ if [[ $# -gt 0 ]]; then
         "  --php                   Manage system-wide or per site php settings." \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
-        "  $(tput setaf 3)one-click $(tput setaf 4)repair$(tput sgr 0)        Run network repair" \
+        "  $(tput setaf 3)one-click $(tput setaf 4)net-repair$(tput sgr 0)    Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
         exit "$exit_code"
       ;;
