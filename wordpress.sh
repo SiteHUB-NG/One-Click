@@ -141,8 +141,8 @@ wp_restore() {
   db_user=$(grep DB_USER "$config_path" | cut -d"'" -f4)
   db_pass=$(grep DB_PASSWORD "$config_path" | cut -d"'" -f4)
   pv "$backup_dir/db.sql.gz" | gunzip | mysql -u"$db_user" -p"$db_pass" "$db_name"
-  chown -R "$web_user":"$web_user" "$site_dir"
-  chown "$web_user":"$web_user" "$config_path"
+  chown -R "$web_user":"$webserver" "$site_dir"
+  chown "$web_user":"$webserver" "$config_path"
   chmod 644 "$config_path"
   success "Restore complete for $domain"
 }
@@ -416,7 +416,7 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
-  chown "$web_user":"$web_user" "$site"
+  chown "$web_user":"$webserver" "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
     $wp_cmd core download  || {
@@ -446,7 +446,7 @@ install_wp() {
 harden_wp() {
   $wp_cmd config set DISALLOW_FILE_EDIT true --raw 
   $wp_cmd config shuffle-salts 
-  chown -R "$web_user":"$web_user" /etc/one-click/wordpress/$domain/www
+  chown -R "$web_user":"$webserver" /etc/one-click/wordpress/$domain/www
   find /etc/one-click/wordpress/$domain/www -type d -exec chmod 755 {} \;
   find /etc/one-click/wordpress/$domain/www -type f -exec chmod 644 {} \;
 }
@@ -583,9 +583,9 @@ server {
 
     location ~ \.php$ {
         include fastcgi_params;
-        fastcgi_pass unix:/run/php${php_ver:-}-fpm-${domain}.sock;
+        fastcgi_pass unix:/run/one-click/${domain}/php.sock;
         fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
@@ -839,9 +839,9 @@ server {
 
     location ~ \.php$ {
         include fastcgi_params;
-        fastcgi_pass unix:/run/php${php_ver:-}-fpm-${domain}.sock;
+        fastcgi_pass unix:/run/one-click/${domain}/php.sock;
         fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
 
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
@@ -1008,6 +1008,11 @@ install_letsencrypt() {
           echo "Invalid domain name"
         fi
       done
+      if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
+        site="/etc/one-click/wordpress/${domain}/www"
+      elif [[ -d "/etc/one-click/sites/${domain}" ]]; then
+        site="/etc/one-click/static/www/$domain"
+      fi
       if [[ "$mode" == "wordpress" ]]; then
         site="/etc/one-click/wordpress/$domain/www"
       else
@@ -1071,7 +1076,7 @@ install_letsencrypt() {
       read -rp "${cyan}[USER]${reset} Choose an option: " choice
       case "$choice" in
         1)
-          if certbot certonly --webroot -w "${site:-${site_dir}}" -d "$domain" -d "www.$domain" --non-interactive --agree-tos -m "$email"; then
+          if certbot certonly --webroot -w "${site:-${site_dir:-}}" -d "$domain" -d "www.$domain" --non-interactive --agree-tos -m "$email"; then
             bot_installed=0
             manual_install=1
             success "SSL installed"
@@ -1200,7 +1205,7 @@ run_script() {
   wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
-  chown "$web_user":"$web_user" /etc/one-click/wordpress/$domain/meta.conf
+  chown "$web_user":"$webserver" /etc/one-click/wordpress/$domain/meta.conf
   echo
   while true; do
     read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
@@ -1263,7 +1268,7 @@ run_script() {
   install_webserver wordpress "$domain" "site_dir"
   info "Creating resource slice for $domain"
   info "Configuring PHP-FPM"
-  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver"
+  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "wordpress"
   info "Enabling PHP"
   systemctl enable php-fpm@${domain}.service --now 
   info "Confguring MariaDB"
@@ -1292,7 +1297,7 @@ run_script() {
   fi
   mkdir -p /etc/one-click/wordpress/backups
   chmod -R 700 /etc/one-click/wordpress/backups
-  chown -R root:root /etc/one-click/wordpress/backups
+  chown "$web_user":"$webserver" /etc/one-click/wordpress/backups
   # ==== Open Firewall ====
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver"
@@ -1301,11 +1306,13 @@ run_script() {
   $wp_cmd option get home 
   info "Configuring SSL"
   install_letsencrypt wordpress
+  set +o pipefail
   if [[ "${manual_install:-}" -eq 1 ]]; then
     webroot_nginx_template
   fi
+  set -o pipefail
   wp_backup_scheduler
-  "$pkg_mgr" restart "$webserver"
+  systemctl restart "$webserver"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_wp-web-monitor_$domain
   success "One-Click Wordpress has now been installed!"
   info "Access the site from ${magenta}https://${domain}${reset}"
@@ -1476,7 +1483,7 @@ create_static_site() {
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   site_dir="/etc/one-click/sites/$domain/www"
   mkdir -p "$site_dir"
-  chown "$web_user":"$web_user" "$site_dir"
+  chown "$web_user":"$webserver" "$site_dir"
   touch /etc/one-click/sites/$domain/meta.conf
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
   while true; do
@@ -1497,7 +1504,7 @@ EOF
       *) echo "Invalid selection"; return 1 ;;
   esac
   install_webserver static "$domain" "$site_dir"
-  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver"
+  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "sites"
   dns_check
   one-click engine "allow $webserver"
   install_letsencrypt static
@@ -1530,7 +1537,7 @@ server {
 
     location ~ \.php\$ {
         include fastcgi_params;
-        fastcgi_pass unix:/run/php${php_ver:-}-fpm-${domain}.sock;
+        fastcgi_pass unix:/run/one-click/${domain}/php.sock;
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     }
@@ -1725,7 +1732,7 @@ static_restore() {
       fi
       ;;
   esac
-  chown -R "$web_user":"$web_user" "$site_dir"
+  chown -R "$web_user":"$webserver" "$site_dir"
   success "Restore complete for $domain"
 }
 select_static_domain() {
@@ -2158,6 +2165,7 @@ create_isolated_php_runtime() {
   local php_ver="$2"
   local site_user="$3" 
   local webserver="$4"
+  local type="$5"
   if [[ -f "/usr/sbin/php-fpm$php_ver" ]]; then
     php_bin="/usr/sbin/php-fpm$php_ver"
   else
@@ -2184,6 +2192,9 @@ display_errors = Off
 log_errors = On
 session.save_path = $lib_dir/sessions
 upload_tmp_dir = $lib_dir/tmp
+extension=mysqli
+extension=pdo_mysql
+extension=mysqlnd
 EOF
     cat > "$pool_conf" <<EOF
 [$domain]
@@ -2195,9 +2206,12 @@ listen.group = $webserver
 listen.mode = 0660
 pm = ondemand
 pm.max_children = 5
-php_admin_value[open_basedir] = /var/www/$domain:/tmp
+php_admin_value[open_basedir] = /etc/one-click/${type}/${domain}/:/etc/one-click/${type}/${domain}/www/:/tmp:/var/lib/one-click/${domain}/
 php_admin_value[upload_tmp_dir] = $lib_dir/tmp
 php_admin_value[session.save_path] = $lib_dir/sessions
+php_admin_value[disable_functions] =
+php_admin_value[display_errors] = Off
+php_admin_value[error_log] = /var/log/one-click/php/${domain}-error.log
 EOF
     cat > "$fpm_conf" <<EOF
 [global]
@@ -3107,21 +3121,25 @@ delete_site() {
       user_occurrence=$((grep -r "DB_USER.*'$db_user'" /etc/one-click/wordpress/*/wp-config.php 2>/dev/null | wc -l) || true)
       if [[ "$user_occurrence" -le 1 ]]; then
         info "dry_run$db_user. Dropping user..."
-        mysql -e "DROP USER IF EXISTS '$db_user'@'localhost';"
+        mysql -e "DROP USER IF EXISTS '$db_user'@'localhost';" || true
       else
         warn "DB User $db_user is still in use by $((user_occurrence - 1)) other site(s). Skipping user deletion."
       fi
     fi
   fi
   # ==== MISC LOST+FOUND ====
-  find /etc /var /run -type f -name '*one-click*' | while read line; do
-    rm -f "$line"
-  done
+  warn "Deleting all other associated files and directories for $domain"
+  (locate "$domain" | while read line; do 
+    rm -rf "$line"
+  done) 2> /dev/null
   # ==== Remove system user ====
+  set +o pipefail
+  info "Removing system user $site_user"
   if id "$site_user" &>/dev/null; then
     gpasswd -d nginx "$site_user" 2>/dev/null
     userdel "$site_user"
   fi
+  set -o pipefail
   # ==== Systemd cleanup ====
   systemctl daemon-reexec
   systemctl daemon-reload
