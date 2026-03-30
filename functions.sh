@@ -1386,11 +1386,14 @@ password_strength() {
 # =========================================== End Of Secure Password ============================================== #
 # =============================================== Rule Engine =======================================================
 dry_run() {
-  local cmds ns critical_ports broken
+  local cmds ns critical_ports broken check_list ssh_port
   cmds=("$@")
   ns="one-click_dry-run_namespace"
   broken=0
-  printf '%s\n' "${magenta}[DRY-RUN]${reset} Preparing dry run environment..."
+  target_ports=$(grep -oE '[0-9]{1,5}' <<< "${cmds[*]}")
+  ssh_port=$(awk '/\./{split($5,a,":");print a[2]}' <(ss -taulpn | grep -i ssh))
+  check_list=("${ssh_port}:SSH" "53:DNS" "80:HTTP" "443:HTTPS")
+  printf '%s\n' "${magenta}[DRY-RUN]${reset} Preparing dry run isolated environment for safe testing..."
   ip netns add "$ns"
   ip -n "$ns" link set lo up
   ip link add oneclick_vetdry type veth peer name oneclick_vethst
@@ -1408,9 +1411,10 @@ dry_run() {
     # ==== Handle RAW Entries ====
     cmd=$(
       sed -E '
-      s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
-      s/input|output|forward|prerouting/\U&/g;
-    ' <<< "$cmd")
+        s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
+        s/input|output|forward|prerouting/\U&/g;
+      ' <<< "$cmd"
+	)
     read -r -a arr <<< "$cmd"
 	used_port=$(sed -E 's/.*port ([0-9]+).*/\1/' <<< "$cmd")
 	used_ports+=($used_port)
@@ -1420,29 +1424,64 @@ dry_run() {
     fi
   done
   # ==== Test connectivity in namespace ====
-  for port in "${used_ports[@]}"; do
-    ip netns exec "$ns" nc -l -p "$port" &
-	sleep 2
-    if ! nc -zv -w 1 10.200.200.2 "$port" 2>/dev/null; then
-      printf '%s\n' "${yellow}[DRY-RUN]${reset} Your firewall rule will block port ${port}!"
-      broken=1
-    else
-      printf '%s\n' "${green}[DRY-RUN]${reset}  Port $port OK"
+  local check_list=()
+  mapfile -t check_list < <(
+    ss -taulpn | awk '/\(/{print $NF}' | awk -F'"' '{print $2}' | while read -r line; do 
+        awk -v service="$line" '/\./{split($5,a,":"); print a[2]":"service}' <(ss -taulpn | grep -i "$line")
+    done | sort -u
+  )
+  printf '%s\n' "${magenta}[DRY-RUN]${reset} Verifying system accessibility..."
+  if ! ip netns exec "$ns" ping -c 1 -W 1 127.0.0.1 &>/dev/null; then
+    printf "${magenta}[DRY-RUN]${reset} %s\n" "${red}Loopback (lo) is BLOCKED!${reset}"
+    broken=1
+  fi
+  for entry in "${check_list[@]}"; do
+    local c_port="${entry%%:*}"
+    local c_name="${entry##*:}"
+    local is_user_targeted=0
+    if grep -qw "$c_port" <<< "$target_ports"; then
+      is_user_targeted=1
     fi
+    ip netns exec "$ns" timeout 2 nc -l -p "$c_port" &
+    local nc_pid=$!
+    sleep 0.2
+    if ! nc -zv -w 1 10.200.200.2 "$c_port" &>/dev/null; then
+      if [[ "$c_port" == "22" || "$c_name" == "sshd" ]]; then
+        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "FATAL: $c_name (Port $c_port) will be BLOCKED! This will cause a lockout if applied."
+        broken=1
+      elif [[ "$is_user_targeted" -eq 0 ]]; then
+        if [[ "$c_name" =~ (mariadb|mysql|redis|nginx|httpd) ]]; then
+          printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "Critical service $c_name (Port $c_port) will be accidentally blocked!"
+          broken=1
+        else
+          printf "${magenta}[DRY-RUN]${yellow}[WARN] %s${reset}\n" "Service $c_name (Port $c_port) will become unreachable."
+        fi
+      else
+        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" " Port $c_port ($c_name) will successfully remain filtered/blocked."
+      fi
+    else
+      if [[ "$is_user_targeted" -eq 1 ]]; then
+        printf "${magenta}[DRY-RUN]${yellow}[WARN] %s${reset}\n" "Logic Error: You tried to block $c_port, but it will remain OPEN."
+      else
+        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "Service $c_name (Port $c_port) remains accessible."
+      fi
+    fi
+    kill "$nc_pid" 2>/dev/null
   done
   ip link delete oneclick_vethst 2>/dev/null || true
   ip netns delete "$ns" 2>/dev/null
   if [[ "$broken" -eq 1 ]]; then
-    printf '%s\n' "${magenta}[DRY-RUN]${red} Firewall rules failed dry-run test.${reset}"
+    printf '%s\n' "${magenta}[DRY-RUN]${red}[FAIL] Firewall rules failed dry-run test.${reset}"
     return 1
   fi
-  printf '%s\n' "${green}[DRY-RUN] Rules passed dry-run test.${reset}"
+  printf '%s\n' "${magenta}[DRY-RUN]${green}[SUCCESS] Rules passed dry-run test.${reset}"
   read -rp "${cyan}Would you like to apply these rules now? (y|n): " apply_rules
   apply_rules="${apply_rules,,}"
   if [[ "$apply_rules" =~ ^(y|yes)$ ]]; then
     return 0
   else
     warn "Rule Engine will now abort!"
+	return 1
   fi
 }
 detect_firewall_backend() {
@@ -1854,37 +1893,80 @@ view_ssh_stats() {
   local last_view_ts=$(cat "$last_audit" 2>/dev/null || echo 0)
   local current_ts=$(date +%s)
   printf '%s\n' " " "Take action against brute force attempts with useful insight into the actor and hintable patterns" \
-    "You can drop malicious actors at the firewall with ${cyan}one-click engine 'audit drop <ID number>'${reset}" " "
+    "You can drop malicious actors at the firewall with ${cyan}one-click engine 'audit drop <ID number>'${reset}" \
+	"If a row has a background color, the IP is already in the drop list" " "
   printf "${blue}%s${reset}\n" \
-    "╔════╦═════════════════╦═════════╦══════════════════════════════════════════════════════════╦═════════════╗" \
-    "║ ${magenta}ID${blue} ║ ${magenta}IP${blue}              ║ ${magenta}COUNT${blue}   ║ ${magenta}USERS${blue}                                                    ║ ${magenta}LAST SEEN${blue}   ║" \
-    "╠════╬═════════════════╬═════════╬══════════════════════════════════════════════════════════╬═════════════╣"
+    "╔══════╦═════════════════╦═════════╦══════════════════════════════════════════════════════════╦═════════════╗" \
+    "║ ${magenta}ID${blue}   ║ ${magenta}IP${blue}              ║ ${magenta}COUNT${blue}   ║ ${magenta}USERS${blue}                                                    ║ ${magenta}LAST SEEN${blue}   ║" \
+    "╠══════╬═════════════════╬═════════╬══════════════════════════════════════════════════════════╬═════════════╣"
   local id_counter=1
-  jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length, ([.[] | .user | select(. != null and . != "")] | unique | join(",")), ([.[] | .ts] | max)] | @tsv' "$monitor_ssh_file" 2> /dev/null | sort -rnk2 | while IFS=$'\t' read -r ip count users last; do
-    local d_last=$(date -d @"$last" "+%m-%d %H:%M")
-    local display_users="${users:0:53}"; [[ ${#users} -gt 53 ]] && display_users="${display_users}.."
-	if (( count <= 5 )); then
-	  ip="${green}${ip}${reset}"
-      count="${green}${count}${reset}"
-	  display_users="${green}${display_users}${reset}"
-	  d_last="${green}${d_last}${reset}"
-    elif (( count > 5 && count <= 20 )); then
-	  ip="${yellow}${ip}${reset}"
-      count="${yellow}${count}${reset}"
-	  display_users="${yellow}${display_users}${reset}"
-	  d_last="${yellow}${d_last}${reset}"
-    else
-	  ip="${red}${ip}${reset}"
-      count="${red}${count}${reset}"
-	  display_users="${red}${display_users}${reset}"
-	  d_last="${red}${d_last}${reset}"
-    fi
-  printf "${blue}║${reset} %-14s ${blue}║${reset} %-27s ${blue}║${reset} %-19s ${blue}║${reset} %-68s ${blue}║${reset} %-23s ${blue}║${reset}\n" \
-    "${magenta}$id_counter${reset}" "$ip" "$count" "$display_users" "$d_last"
-    ((id_counter++))
-  done
-  printf "${blue}%s${reset}\n" "╚════╩═════════════════╩═════════╩══════════════════════════════════════════════════════════╩═════════════╝${reset}"
+  set +o pipefail
+  jq -r '[.ip, .user, .ts] | @tsv' "$monitor_ssh_file" 2>/dev/null | \
+  awk -F'\t' '
+    {
+      count[$1]++; 
+      if ($2 != "" && $2 != "null") users[$1] = (users[$1] == "" ? $2 : users[$1] "," $2);
+      if ($3 > last[$1]) last[$1] = $3;
+    } 
+    END {
+      for (ip in count) {
+        split(users[ip], a, ",");
+        delete u;
+        u_list="";
+        for (i in a) if (!(a[i] in u)) { u[i]; u_list = (u_list == "" ? a[i] : u_list "," a[i]) };
+        print ip "\t" count[ip] "\t" u_list "\t" last[ip]
+      }
+    }' | sort -rnk2 | sed -E '
+	  :a;
+	  s/([^,]*,)([a-z_]*,)?\1/\2/;
+	  ta
+	' | while IFS=$'\t' read -r ip count users last; do
+      local d_last=$(date -d @"$last" "+%m-%d %H:%M")
+      local display_users="${users:0:53}"; [[ ${#users} -gt 53 ]] && display_users="${display_users}.."
+	  cln_ip="$ip"
+	  if (( count <= 5 )); then
+	    ip="${green}${ip}${reset}"
+        count="${green}${count}${reset}"
+	    display_users="${green}${display_users}${reset}"
+  	    d_last="${green}${d_last}${reset}"
+		colored=234
+      elif (( count > 5 && count <= 20 )); then
+	    ip="${yellow}${ip}${reset}"
+        count="${yellow}${count}${reset}"
+	    display_users="${yellow}${display_users}${reset}"
+	    d_last="${yellow}${d_last}${reset}"
+		colored=197
+      else
+	    ip="${red}${ip}${reset}"
+        count="${red}${count}${reset}"
+	    display_users="${red}${display_users}${reset}"
+	    d_last="${red}${d_last}${reset}"
+		colored=208
+      fi
+	  t_flag=0
+	  blocked_ips=($( sed -En '/[0-9a-fA-F]+[.:]/{/reject|drop/{s/[^.:]* ([0-9.:a-fA-F]+).*/\1/p}}' <(nft list ruleset 2> /dev/null) <(iptables -S) <(ip6tables -S)))
+	  for rejected in "${blocked_ips[@]}"; do
+	    if [[ "$cln_ip" =~ "$rejected" ]]; then
+		  t_flag=1
+		fi
+	  done
+	  if [[ "$t_flag" -eq 1 ]]; then
+        local colored_id=$(printf "$(tput setab $colored)${magenta}%-4s$(tput sgr0)" "$id_counter")
+		local colored_ip=$(printf "$(tput setab $colored)${magenta}%-27s$(tput sgr0)" "$ip")
+		local colored_count=$(printf "$(tput setab $colored)${magenta}%-19s$(tput sgr0)" "$count")
+		local colored_users=$(printf "$(tput setab $colored)${magenta}%-68s$(tput sgr0)" "$display_users")
+		local colored_last=$(printf "$(tput setab $colored)${magenta}%-23s$(tput sgr0)" "$d_last")
+        printf "${blue}║${reset} %b ${blue}║${reset} %b ${blue}║${reset} %b ${blue}║${reset} %b ${blue}║${reset} %b ${blue}║${reset}\n" \
+          "$colored_id" "$colored_ip" "$colored_count" "$colored_users" "$colored_last"
+      else
+        printf "${blue}║${reset} %-16s ${blue}║${reset} %-27s ${blue}║${reset} %-19s ${blue}║${reset} %-68s ${blue}║${reset} %-23s ${blue}║${reset}\n" \
+          "${magenta}$id_counter${reset}" "$ip" "$count" "$display_users" "$d_last"
+      fi
+      ((id_counter++))
+    done
+  printf "${blue}%s${reset}\n" "╚══════╩═════════════════╩═════════╩══════════════════════════════════════════════════════════╩═════════════╝${reset}"
   date +%s > "$last_audit"
+  set -o pipefail
 }
 show_rules() {
   local fw_bin total_blocked_pkts total_blocked_bytes clean_rule clean_src clean_dst clean_pkts color table_output tables chains p_count ips
@@ -1935,6 +2017,7 @@ show_rules() {
       done 3< <(nft list tables)
     fi
     tables=($(iptables-save 2>/dev/null | grep '^*' | cut -d'*' -f2))
+	set +o pipefail
     printf '%s\n' \
       "${blue}╔══════════════════════════════╗" \
       "║ ${cyan}Transverse Legacy Tables     ${blue}║" \
@@ -1989,12 +2072,13 @@ show_rules() {
         warn "${red}SCANNER ALERT:${yellow} ${crit_count} binary tampering events detected!${reset}"
       fi
     fi
+	printf "${blue}╚%s╝${reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
     command -v start_monitors >/dev/null && start_monitors
+	set -o pipefail
+	return
   }
   individual_table_rules
-  if [[ "$track_flag" -eq 0 ]]; then
-    printf "${blue}╚%s╝${reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
-  fi
+  return
 }
 view_guard_history() {
   local ts ip act rea d_str
@@ -2291,17 +2375,17 @@ check_sensitive_ports() {
       local service_desc alert1 alert2 len1 len2 width border border2
 	  service_desc="${default_sensitive_ports[$p]}"
 	  if [[ "$dry_run" -eq 1 ]]; then
-        alert1="[DRY-RUN] Action: $current_action detected on Port $p ($service_desc)."
-        alert2="[DRY-RUN] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+        alert1="${magenta}[DRY-RUN]${reset} Action: $current_action detected on Port $p ($service_desc)."
+        alert2="${magenta}[DRY-RUN]${reset} This is a CORE SERVICE. Proceeding may cause connectivity issues! "
 	  else
-        alert1="[ALERT] Action: $current_action detected on Port $p ($service_desc)."
-        alert2="[ALERT] This is a CORE SERVICE. Proceeding may cause connectivity issues! "
+        alert1="${yellow}[ALERT]${reset} Action: $current_action detected on Port $p ($service_desc)."
+        alert2="${yellow}[ALERT]${reset} This is a CORE SERVICE. Proceeding may cause connectivity issues! "
 	  fi
       len1=${#alert1}
       len2=${#alert2}
       width=$(( len1 > len2 ? len1 : len2 ))
-      border=$(printf '═%.0s' $(seq 1 "$((width + 2))"))
-	  border2=$(printf '═%.0s' $(seq 1 "$(((width / 2)-10))"))
+      border=$(printf '═%.0s' $(seq 1 "$(((width + 2)-12))"))
+	  border2=$(printf '═%.0s' $(seq 1 "$(((width / 2)-16))"))
       case "$current_action" in
         DROP|REJECT|DELETE)
           echo -e "${red}╔${border2} ${yellow}[ CRITICAL WARNING ]${red} ${border2}╗${reset}"
@@ -2486,7 +2570,28 @@ parse_firewall_command() {
   if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(delete|drop|block|reject)[[:space:]]+(guard[[:space:]]+)?([0-9]+) ]]; then
     local target_id="${BASH_REMATCH[4]}"
 	local duration=3600
-    local target_ip=$(jq -r -s 'group_by(.ip) | .[] | [.[0].ip, length] | @tsv' "$monitor_ssh_file" | sort -rnk2 | sed -n "${target_id}p" | awk '{print $1}')
+    local target_ip=$(
+	  jq -r '[.ip, .user, .ts] | @tsv' "$monitor_ssh_file" |   awk -F'\t' '
+        {  
+          count[$1]++; 
+          if ($2 != "" && $2 != "null") users[$1] = (users[$1] == "" ? $2 : users[$1] "," $2);
+          if ($3 > last[$1]) last[$1] = $3;
+        } 
+        END {
+          for (ip in count) {
+            split(users[ip], a, ",");
+            delete u;
+            u_list="";
+            for (i in a) if (!(a[i] in u)) { u[i]; u_list = (u_list == "" ? a[i] : u_list "," a[i]) };
+            print ip "\t" count[ip] "\t" u_list "\t" last[ip]
+          }
+        }
+	  ' | sort -rnk2 | sed -E '
+	    :a;
+		s/([^,]*,)([a-z_]*,)?\1/\2/;
+		ta
+	  ' | awk -v w="${target_id}" 'NR == w{print $1}'
+	)
 	if [[ -z "$target_ip" ]]; then
       error "Invalid Guard ID: $target_id. Check 'audit ssh' for valid IDs."
       exit 1
