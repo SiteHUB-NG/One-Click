@@ -1,27 +1,68 @@
 # One-Click Toolkit
 ![One-Click Logo](https://as214354.network/one-click.png)
-One-Click is a modular Linux infrastructure automation toolkit built for controlled server lifecycle management.
-It provides structured, repeatable workflows for:
+# One-Click — Linux Infrastructure Automation Toolkit
 
-- OS reinstallation
-- Disk migration
-- Backup & restore
-- Boot recovery
-- Network repair
-- Log inspection
-- Firewall Wrapper
-- One-Click Benchmark
-- Static and Wordpress setups
+**One-Click** is your personal Linux system administration companion. A modular infrastructure automation toolkit designed for **controlled, repeatable server lifecycle management**.
 
-Designed for hosting providers, infrastructure engineers, DevOps operators, and system administrators managing development and production Linux environments.
+It provides a structured approach to managing Linux environments, eliminating manual repetition while maintaining full control and transparency.
+
+---
+
+## Features
+
+One-Click delivers streamlined workflows for essential system administration tasks:
+
+- **OS Reinstallation**
+- **Disk Migration**
+- **Backup & Restore**
+- **Boot Recovery**
+- **Network Repair**
+- **Log Inspection**
+- **Firewall Configuration**
+- **System Benchmarking**
+- **Secure System State Management**
+- **Web Hosting Deployment**
+- **Fully Isolated Web Hosting Environments (vhosts)**
+
+## Purpose
+
+One-Click is built to:
+
+- Simplify repetitive administrative tasks  
+- Standardize infrastructure operations  
+- Provide consistent, predictable system behavior  
+- Enable rapid deployment and recovery workflows  
+
+Whether you're managing a single server or multiple environments, One-Click ensures your operations remain **reliable, reproducible, and efficient**.
+
+## Who is it for?
+
+- **Enthusiasts** — automate complex tasks without deep system knowledge  
+- **Advanced users** — accelerate workflows and maintain clean infrastructure  
+- **Production environments** — enforce consistency and reduce human error  
+- **Development setups** — quickly spin up and manage isolated environments  
 
 ## Supported Platforms
 
-One‑Click supports most mainstream Linux distributions, including Debian,
-Ubuntu, CentOS, Fedora, Rocky, AlmaLinux, openSUSE, Arch, and others.
+One-Click supports most mainstream Linux distributions, including:
 
-> Note: BSD systems are not supported at this time, and Alpine Linux may have
-> limited compatibility
+- Debian  
+- Ubuntu  
+- CentOS  
+- Fedora  
+- Rocky Linux  
+- AlmaLinux  
+- openSUSE  
+- Arch Linux  
+
+> **Note:** BSD and Alpine Linux are not supported at this time.
+
+## Design Philosophy
+
+- **Modular** — use only what you need  
+- **Deterministic** — predictable outcomes every time  
+- **Isolated** — per-service and per-site separation  
+- **Transparent** — no hidden magic, full control remains with the user  
 
 # How To Run
 ## Primary Mirror
@@ -171,7 +212,7 @@ one-click --wp-backup
 ### Notes
 
 - The WordPress module is designed to run with **non-root users where possible** to avoid permission conflicts.  
-- Make sure your DNS A records for both `www` and non-`www` point to the server before creating a WordPress instance.  
+- Ensure DNS A records (www and non-www) point to your server before deployment.  
 - Admin credentials and database passwords must meet minimum complexity requirements.  
 
 ## OS Reinstall
@@ -187,11 +228,11 @@ Designed for remote or recovery-only environments.
 
 ## Migration & Backup Modes
 
-- dd block-level disk migration
-- rsync incremental backups
+- `dd` block-level disk migration
+- `rsync` incremental backups
 - Profile-based configuration
 - Dry-run support
-- rclone integration
+- `rclone` integration
 - Snapshot-aware workflows
 - Non-interactive automation flags
 
@@ -210,7 +251,7 @@ Suitable for:
 - Recovery structure validation
 - Live-environment repair helpers
 
-Designed for systems that fail to boot after disk or migration operations.
+Designed for systems that **fail to boot after disk or migration operations**.
 
 ## Network Repair Module
 
@@ -223,7 +264,7 @@ Built for remote recovery scenarios where SSH access may be unstable.
 
 ## RuleEngine – Human-Readable Firewall Management
 
-`rule-engine` is a **human-readable firewall rule parser and executor** integrated into the One-Click toolkit. It allows administrators to manage firewall rules using **intuitive, plain-language commands**, which are automatically translated into the appropriate backend commands for `iptables`, `ip6tables`, `nftables`, `ufw`, or `firewalld`.
+`rule-engine` is a **human-readable firewall rule parser and executor** integrated into the One-Click toolkit. It allows administrators to manage firewall rules using **intuitive, plain-language commands**, which are automatically translated into the appropriate backend commands for `iptables`, `ip6tables` and `nftables`.
 
 ### Firewall Backup, Restore, and Delete
 
