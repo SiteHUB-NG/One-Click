@@ -314,24 +314,31 @@ main_board() {
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ ${magenta}1${blue}  ║ ${green}Backup Restores & Rollback  ${blue}                          ║" \
       "║ ${magenta}2${blue}  ║ ${green}Manage Profiles  ${blue}                                     ║" \
-      "║ ${magenta}3${blue}  ║ ${green}Cron   ${blue}                                               ║" \
-      "║ ${magenta}4${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
-      "║ ${magenta}5${blue}  ║ ${green}Guard   ${blue}                                              ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Manage Redis  ${blue}                                        ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Cron   ${blue}                                               ║" \
+      "║ ${magenta}5${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Guard   ${blue}                                              ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
       1) backup_board   ;;
       2) profiles_board ;;
-      3)
+      3)\
+        if [[ -f /etc/redis/one-click/${domain}.conf ]]; then
+          redis_menu
+        fi
+        error "$domain does not have Redis configured"
+        ;;
+      4)
         if [[ "$wpstatic" == "wordpress" ]]; then
           install_wp_cron "-wpback" "One-Click WordPress Backup" "$domain"
         else
           install_wp_cron "-staticback" "One-Click Static Backup" "$domain"
         fi
         ;;
-      4) select_domain  ;;
-      5) view_security "$domain" ;;
+      5) select_domain  ;;
+      6) view_security "$domain" ;;
       0)
         echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
@@ -475,29 +482,189 @@ draw_box() {
 # ==== Plugins ====
 wp_plugins() {
   $wp_cmd plugin install \
-    redis-cache \
     wordfence \
     wp-super-cache \
     --activate 
   # ==== Installing Selected Services ====
   if [[ "$enable_redis" == "y" ]]; then
-    if [[ "$pkg_mgr" =~ (debian|ubuntu) ]]; then
-      "$pkg_mgr" install redis-server -y
+    info "Installing and configuring Redis"
+    # ==== Install Redis ====
+    if [[ "$pkg_mgr" == "apt" ]]; then
+      $pkg_mgr install -y redis-server php-redis
       systemctl enable redis-server --now
+      local service="redis-${domain}"
+      redis_conf="/etc/redis/redis.conf"
+      php_user="$webserver"
     else
       redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
-      if dnf -y module enable redis:$redis_ver; then
-        "$pkg_mgr" install redis -y
-        systemctl enable redis --now
-      fi
+      dnf -y module enable redis:$redis_ver
+      $pkg_mgr install -y redis php-pecl-redis
+      systemctl enable redis --now
+      local service="redis-${domain}"
+      redis_conf="/etc/redis/redis.conf"
+      php_user="$webserver"
     fi
-    if ! redis-cli ping 2> /dev/null; then
+    redis_pw=$(openssl rand -base64 32)
+    local sock="/run/redis/redis-${domain}.sock"
+    # ==== Verify Redis ====
+    if ! redis-cli ping &>/dev/null; then
       error "Redis failed to install"
       return 1
     fi
-    $wp_cmd plugin activate redis-cache 
-    $wp_cmd redis enable 
+    # ==== Configure Redis ====
+    setup_redis "$domain"
+    redis_service "$domain"
+    $wp_cmd plugin install redis-cache --activate
+    wp_config="/etc/one-click/wordpress/${domain}/wp-config.php"
+    if ! grep -q "WP_REDIS_HOST" "$wp_config"; then
+      cat <<EOF >> "$wp_config"
+
+/** Redis Added By One-Click */
+define('WP_REDIS_SCHEME', 'unix');
+define('WP_REDIS_PATH', "$sock");
+define('WP_REDIS_HOST', null);
+define('WP_REDIS_PORT', null);
+define('WP_REDIS_PASSWORD', "$redis_pw");
+EOF
+    fi
+    usermod -aG redis "$webserver"
+    usermod -aG redis "$web_user"
+    systemctl daemon-reexec
+    systemctl enable "${service}" --now
+    for i in {1..10}; do
+      if [[ -S "$sock" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ ! -S "$sock" ]]; then
+      error "Socket /run/redis-${domain}.sock was never created. Check: journalctl -u redis-${domain}"
+      return 1
+    else
+      success "Isolated redis socket created"
+    fi
+    chown redis:$web_user "$sock"
+    mkdir -p /etc/systemd/system/php-fpm@${domain}.service.d/
+    cat > /etc/systemd/system/php-fpm@${domain}.service.d/${domain}-redis.conf <<EOF
+[Service]
+ReadWritePaths=/run/redis/
+EOF
+    systemctl daemon-reload
+    systemctl restart php-fpm@${domain}.service
+    $wp_cmd redis enable
+    success "Redis installed and configured."
   fi
+}
+# ==== REDIS ====
+setup_redis() {
+  local domain="$1"
+  local conf="/etc/redis/one-click/${domain}.conf"
+  local sock="/run/redis/redis-${domain}.sock"
+  local data_dir="/var/lib/redis/${domain}"
+  mkdir -p "$data_dir" $(dirname "$conf")
+  chown redis:redis "$data_dir"
+  cat > "$conf" <<EOF
+bind 127.0.0.1
+port 0
+
+requirepass $redis_pw
+unixsocket $sock
+unixsocketperm 770
+
+dir $data_dir
+
+maxmemory 128mb
+maxmemory-policy allkeys-lru
+
+daemonize no
+supervised systemd
+EOF
+}
+redis_service() {
+  local domain="$1"
+  local conf="/etc/redis/one-click/${domain}.conf"
+  local service="redis-${domain}"
+
+  cat > "/etc/systemd/system/${service}.service" <<EOF
+[Unit]
+Description=One-Click Redis Instance for ${domain}
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/redis-server $conf
+ExecStop=/usr/bin/redis-cli shutdown
+User=redis
+Group=$web_user
+RuntimeDirectory=redis
+RuntimeDirectoryMode=0775
+UMask=0002
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+redis_menu() {
+  local instance_conf="/etc/redis/one-click/${domain}.conf"
+  local instance_service="redis-${domain}"
+  local instance_sock="/run/redis/redis-${domain}.sock"
+  while true; do
+    local status_raw=$(systemctl is-active "$instance_service" 2>/dev/null)
+    if [[ "$status_raw" == "active" ]]; then
+      local status_tbl="${green}ACTIVE${reset}"
+      local usage=$(redis-cli -s "$instance_sock" info memory 2>/dev/null | grep "used_memory_human" | cut -d: -f2 | tr -d '\r')
+      local max_mem=$(grep "maxmemory " "$instance_conf" | awk '{print $2}')
+    else
+      local status_tbl="${red}INACTIVE${reset}"
+      local usage="N/A"
+      local max_mem=$(grep "maxmemory " "$instance_conf" 2>/dev/null | awk '{print $2}' || echo "N/A")
+    fi
+    clear
+    printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
+    printf "${blue}║${reset}  ${magenta}REDIS MANAGEMENT:${reset} %-49s ${blue}║${reset}\n" "$domain"
+    printf "${blue}╠══════════════════════╦══════════════════════╦════════════════════════╣${reset}\n"
+    printf "${blue}║${reset} ${cyan}STATUS:${reset} %-22b ${blue}║${reset} ${cyan}USED:${reset} %-14s ${blue}║${reset} ${cyan}LIMIT:${reset} %-15s ${blue}║${reset}\n" \
+      "$status_tbl" "$usage" "${max_mem^^}"
+    printf "${blue}╚══════════════════════╩══════════════════════╩════════════════════════╝${reset}\n"
+    printf "${magenta}ACTIONS:${reset}\n"
+    printf '%s\n' \
+      "  ${yellow}1)${reset} Start Instance        ${yellow}5)${reset} Edit Config (Manual)" \
+      "  ${yellow}2)${reset} Stop Instance         ${yellow}6)${reset} Set Max Memory" \
+      "  ${yellow}3)${reset} Restart Instance      ${yellow}7)${reset} Flush All Cache" \
+      "  ${yellow}4)${reset} View Live Logs        ${yellow}0)${reset} Back" \
+      "${blue}────────────────────────────────────────────────────────────────────────${reset}"
+    read -p "Select an option: " rchoice
+    case $rchoice in
+      1) systemctl start "$instance_service"   ;;
+      2) systemctl stop "$instance_service"    ;;
+      3) systemctl restart "$instance_service" ;;
+      4) 
+        echo -e "${cyan}--- Last 20 lines of logs for $domain ---${reset}"
+        journalctl -u "$instance_service" -n 20 --no-pager
+        read -p "Press Enter to continue..."
+        ;;
+      5) nano "$instance_conf" && systemctl restart "$instance_service" ;;
+      6) 
+        read -p "Enter new memory limit (e.g. 256mb): " new_limit
+        sed -i "s/^maxmemory .*/maxmemory $new_limit/" "$instance_conf"
+        systemctl restart "$instance_service"
+        success "Memory updated to $new_limit"
+        sleep 1
+        ;;
+      7) 
+        if [[ "$status_raw" == "active" ]]; then
+          redis-cli -s "$instance_sock" flushall
+          success "Redis cache for $domain cleared."
+        else
+          error "Cannot flush: Service is not running."
+        fi
+        sleep 1
+        ;;
+      0) return 0    ;;
+      *) invalid_opt ;;
+    esac
+  done
 }
 # ==== WP Staging ====
 wp_staging() {
@@ -620,6 +787,9 @@ EOF
 }
 wp_staging_enable() {
   local domain="$1"
+  if [[ ! -d /etc/one-click/wordpress/staging/$domain ]]; then
+    wp_staging "$domain"
+  fi
   if command -v nginx >/dev/null; then
     staging_vhost_nginx "$domain"
   else
@@ -1116,7 +1286,6 @@ run_script() {
       echo "Invalid domain name"
       br=1
     fi
-    
     if [[ -n "$domain" && "$br" -ne 1 ]]; then
       export domain
       break
@@ -1209,10 +1378,19 @@ run_script() {
   echo
   while true; do
     read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
-    [[ -n "$enable_redis" ]] && break
+    if [[ "$enable_redis" =~ ^[Y|y|yes|Yes|n|N|no|No]$ ]]; then
+      break
+    fi
+    warn "Please enter y or n"
   done
   #read -rp "${cyan}[USER]${reset} Enable Cloudflare (y|n): " enable_cloudflare
-  #read -rp "${cyan}[USER]${reset} Enable Staging? (y|n) " enable_staging
+  while true; do
+    read -rp "${cyan}[USER]${reset} Enable Staging? (y|n) " enable_staging
+    if [[ "$enable_staging" =~ ^[Y|y|yes|Yes|n|N|no|No]$ ]]; then
+      break
+    fi
+    warn "Please enter y or n"
+  done
   printf '%s\n' "Which webserver would you like to configure?" \
     "[1] Nginx" \
     "[2] Apache"
@@ -1229,6 +1407,7 @@ run_script() {
   esac
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
+  [[ "$enable_staging" == "n" ]] && staging_status=No || staging_status=Yes
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────┐" \
     "│                       ${yellow}CONFIRMATION DETAILS${blue}           │" \
@@ -1242,6 +1421,7 @@ run_script() {
     "Database User" "${yellow}${dbuser}${blue}" \
     "Database Password" "${yellow}$(sed -E ':a;s/([[:alnum:]]([[:alnum:]*]+)?)[][:alnum:]!"%£+=_&^@$.-[]/\1*/;ta' <<< $dbpass)${blue}" \
     "Use Redis" "${yellow}${redis}${blue}" \
+    "Enable Staging" "${yellow}${staging_status}${reset}" \
     "Webserver" "${yellow}${webserver}${blue}"
   printf '%s\n' "└──────────────────────────────────────────────────────┘${reset}"
   while true; do
@@ -1315,6 +1495,9 @@ run_script() {
   systemctl restart "$webserver"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_wp-web-monitor_$domain
   success "One-Click Wordpress has now been installed!"
+  if [[ "$enable_staging" =~ ^[y|Y|yes|Yes]$ ]]; then
+    wp_staging_enable "$domain"
+  fi
   info "Access the site from ${magenta}https://${domain}${reset}"
   info "You can access the admin from: ${magenta}https://${domain}/wp-admin${reset}"
 }
@@ -1413,7 +1596,7 @@ wp_generate_magic_link() {
   local domain site meta_file user key url
   domain="$1"
   site="/etc/one-click/wordpress/${domain}/www"
-  meta_file="/etc/one-click/wordpress/config/remotes.conf"
+  meta_file="/etc/one-click/wordpress/${domain}/.fp.conf"
   [[ ! -d "$site" ]] && { error "Site not found"; return 1; }
   cd "$site" || return 1
   user=$($wp_cmd user list --role=administrator --field=user_login | head -n1)
@@ -1431,7 +1614,7 @@ wp_generate_magic_link() {
 wp_get_magic_link() {
   local domain meta_file
   domain="$1"
-  meta_file="/etc/one-click/wordpress/config/remotes.conf"
+  meta_file="/etc/one-click/wordpress/${domain}/.fp.conf"
   [[ ! -f "$meta_file" ]] && { error "No metadata found"; return 1; }
   enc_url=$(awk -F= '/^WP_MAGIC_LINK=/{print $2}' "$meta_file")
   [[ -z "$enc_url" ]] && {
@@ -3128,8 +3311,12 @@ delete_site() {
     fi
   fi
   # ==== MISC LOST+FOUND ====
+  warn "Stopping services owned by $domain"
+  sed -n '/\.service$/p' <(locate "$domain") | while read line; do 
+    systemctl disable $(basename $line) --now
+  done
   warn "Deleting all other associated files and directories for $domain"
-  (locate "$domain" | while read line; do 
+  (sed -n '\,/var/log,!p' <(locate "$domain") | while read line; do 
     rm -rf "$line"
   done) 2> /dev/null
   # ==== Remove system user ====
