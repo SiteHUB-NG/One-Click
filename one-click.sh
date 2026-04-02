@@ -773,6 +773,7 @@ _one_click() {
     cmds["logs"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
+    cmds["menu"]=""
     cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
@@ -782,6 +783,7 @@ _one_click() {
     cmds["--wp"]=""
     cmds["--web-create"]=""
     cmds["--web-admin"]=""
+    cmds["--web-backup"]=""
     cmds["--php"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -891,6 +893,7 @@ _one_click() {
     cmds["logs"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
+    cmds["menu"]=""
     cmds["migrate"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
@@ -900,6 +903,7 @@ _one_click() {
     cmds["--wp"]=""
     cmds["--web-create"]=""
     cmds["--web-backup"]=""
+    cmds["--web-admin"]=""
     cmds["--php"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
