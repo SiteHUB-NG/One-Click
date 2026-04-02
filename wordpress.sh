@@ -13,7 +13,7 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
-if command -v install_dep 2> /dev/null; then
+if command -v install_dep &> /dev/null; then
   install_dep "php" "command -v php" "php-fpm" "$pkg_mgr" true
   install_dep "git" "command -v git" "git" "$pkg_mgr" true
 fi
@@ -24,11 +24,13 @@ webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
-if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
-  mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.init_one-click-bak
-  ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
+if [[ -f /etc/nginx/nginx.conf ]]; then
+  if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
+    mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.init_one-click-bak
+    ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
                         '\"\$request\" \$status \$body_bytes_sent '
                         '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba}' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
+  fi
 fi
 dns_check() {
   dns=$(dig +short "$domain" | tail -n1)
@@ -173,10 +175,11 @@ select_wp_domain() {
     type=site
   fi
   base="/etc/one-click/wordpress/"
-  mapfile -t sites < <(sed -n '/\./p' <(find "$base" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;))
+  mapfile -t sites < <(sed -n '/\./p' <(find "$base" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2> /dev/null))
   if [[ ${#sites[@]} -eq 0 ]]; then
-    error "No WordPress sites found in $base"
-    return 1
+    error "No WordPress sites found in $base." "Please install a wordpress instance first with ${yellow}one-click --wp-create${reset}"
+    sleep 5
+    ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
   fi
   printf '%s\n' "${blue}Available WordPress sites:${reset}" " "
   printf "${magenta}%-3s${blue} | ${yellow}%s${reset}\n" "No" "Domain"
@@ -2287,7 +2290,8 @@ select_domain() {
   mapfile -t domains < <(list_domains)
   if [[ ${#domains[@]} -eq 0 ]]; then
     error "${red}No domains found${reset}"
-    return 1
+    sleep 3
+    ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
   fi
   if [[ ${#domains[@]} -eq 1 ]]; then
     domain="${domains[0]}"
