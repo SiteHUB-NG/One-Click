@@ -1034,8 +1034,10 @@ if [[ ! -s "$manpage" ]]; then
 fi
 # ==== Install ====
 if ! command -v 'one-click' >/dev/null 2>&1; then
-  install_self
-  exec '/usr/local/bin/one-click' "$@"
+  if [[ ! -f /usr/local/bin/one-click ]]; then
+    install_self
+    exec '/usr/local/bin/one-click' "$@"
+  fi
 fi
 set -- $(map_one_click "$@")
 if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
