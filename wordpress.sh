@@ -26,7 +26,7 @@ if [[ "$ID" == "debian" ]]; then
 fi
 if [[ -f /etc/nginx/nginx.conf ]]; then
   if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
-    mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.init_one-click-bak
+    mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.one-click-bak
     ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
                         '\"\$request\" \$status \$body_bytes_sent '
                         '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba}' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
@@ -35,8 +35,8 @@ fi
 dns_check() {
   dns=$(dig +short "$domain" | tail -n1)
   dns_www=$(dig +short "www.$domain" | tail -n1)
-  if [[ "$dns" != "$sys_ip" ]]; then
-    warn "Domain does not resolve to this server ($sys_ip)"
+  if [[ "$dns" != "$sys_ip" || "$dns" != "$sys_ipv6" ]]; then
+    warn "Domain does not resolve to this server (${sys_ip:-${sys_ipv6}})"
   fi
 }
 # ==== Wordpress Backup ====
@@ -143,8 +143,8 @@ wp_restore() {
   db_user=$(grep DB_USER "$config_path" | cut -d"'" -f4)
   db_pass=$(grep DB_PASSWORD "$config_path" | cut -d"'" -f4)
   pv "$backup_dir/db.sql.gz" | gunzip | mysql -u"$db_user" -p"$db_pass" "$db_name"
-  chown -R "$web_user":"$webserver" "$site_dir"
-  chown "$web_user":"$webserver" "$config_path"
+  chown -R "$web_user":"${webserver_user:-${webserver}}" "$site_dir"
+  chown "$web_user":"${webserver_user:-${webserver}}" "$config_path"
   chmod 644 "$config_path"
   success "Restore complete for $domain"
 }
@@ -330,6 +330,7 @@ main_board() {
       3)\
         if [[ -f /etc/redis/one-click/${domain}.conf ]]; then
           redis_menu
+          exit 0
         fi
         error "$domain does not have Redis configured"
         ;;
@@ -426,7 +427,7 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
-  chown "$web_user":"$webserver" "$site"
+  chown "$web_user":"${webserver_user:-${webserver}}" "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
     $wp_cmd core download  || {
@@ -456,7 +457,7 @@ install_wp() {
 harden_wp() {
   $wp_cmd config set DISALLOW_FILE_EDIT true --raw 
   $wp_cmd config shuffle-salts 
-  chown -R "$web_user":"$webserver" /etc/one-click/wordpress/$domain/www
+  chown -R "$web_user":"$webserver_user" /etc/one-click/wordpress/$domain/www
   find /etc/one-click/wordpress/$domain/www -type d -exec chmod 755 {} \;
   find /etc/one-click/wordpress/$domain/www -type f -exec chmod 644 {} \;
 }
@@ -530,7 +531,7 @@ define('WP_REDIS_PORT', null);
 define('WP_REDIS_PASSWORD', "$redis_pw");
 EOF
     fi
-    usermod -aG redis "$webserver"
+    usermod -aG redis "$webserver_user"
     usermod -aG redis "$web_user"
     systemctl daemon-reexec
     systemctl enable "${service}" --now
@@ -587,7 +588,8 @@ redis_service() {
   local domain="$1"
   local conf="/etc/redis/one-click/${domain}.conf"
   local service="redis-${domain}"
-
+  echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
+  sysctl -p
   cat > "/etc/systemd/system/${service}.service" <<EOF
 [Unit]
 Description=One-Click Redis Instance for ${domain}
@@ -671,13 +673,16 @@ redis_menu() {
 }
 # ==== WP Staging ====
 wp_staging() {
-  prod="/etc/one-click/wordpress/$domain/www"
+  prod="/etc/one-click/wordpress/$domain/"
   stage="/etc/one-click/wordpress/staging/$domain"
   db_user=$(sed -En "/DB_USER/s/^[^)]*'([^']*)'.*/\1/p" "$prod/wp-config.php")
   db_pass=$(sed -En "/DB_PASSWORD/s/^[^)]*'([^']*)'.*/\1/p" "$prod/wp-config.php")
+  local wp_cmd="sudo -u $web_user /usr/local/bin/wp --path=$stage/www"
   info "Creating staging environment"
   mkdir -p "$stage"
   rsync -a "$prod/" "$stage/"
+  chown -R "$web_user":"$webserver_user" "$stage"
+  chmod 644 "$stage/wp-config.php"
   cd "$stage"
   $wp_cmd db export stage.sql 
   stage_db="stage_$(openssl rand -hex 4)"
@@ -714,22 +719,24 @@ wp_staging() {
     mysql -e "CREATE DATABASE $stage_db"
     mysql -e "GRANT ALL PRIVILEGES ON $stage_db.* TO '$db_user'@'localhost' IDENTIFIED BY '$db_pass'"
     $wp_cmd config set DB_NAME "$stage_db" 
-    $wp_cmd --path="$stage" db export stage.sql
-    $wp_cmd --path="$stage" db import stage.sql
-    $wp_cmd --path="$stage" option update siteurl "https://staging.$domain"
+    #$wp_cmd db export "$stage/stage.sql"
+    $wp_cmd db import "$stage/stage.sql"
+    $wp_cmd option update siteurl "https://staging.$domain"
+    $wp_cmd search-replace "https://$domain" "https://staging.$domain" --skip-columns=guid
     info "Staging created at staging.$domain"
   fi
 }
 wp_staging_push() {
   create_rollback_snapshot "$domain" "wordpress"
-  prod="/etc/one-click/wordpress/$domain/www"
+  prod="/etc/one-click/wordpress/$domain"
   stage="/etc/one-click/wordpress/staging/$domain"
-  info "Deploying staging to production"
+  local wp_cmd="sudo -u $web_user /usr/local/bin/wp --path=$prod/www"
+  printf '%s\n' "$(tput setaf 165)[PUSH}${reset} Deploying staging to production"
   rsync -a --delete "$stage/" "$prod/"
   cd "$prod"
   $wp_cmd db export deploy.sql 
   $wp_cmd db import deploy.sql 
-  info "Deployment completed"
+  printf '%s\n' "$(tput setaf 165)[PUSH}${green} Deployment completed: Push from staging successful${reset}"
 }
 staging_vhost_nginx() {
   local domain stage_root
@@ -770,7 +777,12 @@ staging_vhost_apache() {
   local domain stage_root
   domain="$1"
   stage_root="/etc/one-click/wordpress/staging/$domain"
-  cat > "/etc/httpd/conf.d/staging.$domain.conf" <<EOF
+  if [[ "$webserver_user" == "www-data" ]]; then
+    local conf="/etc/apache2/sites-enabled/staging.${domain}.conf"
+  else
+    local conf="/etc/httpd/conf.d/staging.${domain}.conf"
+  fi
+  cat > "$conf" <<EOF
 <VirtualHost *:80>
     ServerName staging.$domain
     ServerAlias www.staging.$domain
@@ -786,7 +798,7 @@ staging_vhost_apache() {
     
 </VirtualHost>
 EOF
-  systemctl reload httpd
+  systemctl reload httpd 2> /dev/null || systemctl reload apache2 2> /dev/null
 }
 wp_staging_enable() {
   local domain="$1"
@@ -799,7 +811,7 @@ wp_staging_enable() {
     staging_vhost_apache "$domain"
   fi
   enable_staging_ssl "$domain" 2>/dev/null || true
-  success "Staging enabled at https://staging.$domain"
+  success "Staging enabled at ${cyan}https://staging.$domain${reset}"
 }
 wp_staging_disable() {
   local domain="$1"
@@ -914,7 +926,7 @@ install_webserver() {
   site_dir="${3:-}"
   if [[ "$pkg_mgr" == "apt" ]]; then
     if [[ "$webserver" == "nginx" ]]; then
-      sed -i.one-click-bak '/^#deb-src/{s/^#//};/^deb /{s/^/#/}' /etc/apt/sources.list
+      sed -i.one-click-bak '/^#deb-src/{s/^#//}' /etc/apt/sources.list
       "$pkg_mgr" clean
       "$pkg_mgr" update -y
       if ! "$pkg_mgr" -y install nginx &>/dev/null; then
@@ -1184,12 +1196,12 @@ install_letsencrypt() {
       if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
         site="/etc/one-click/wordpress/${domain}/www"
       elif [[ -d "/etc/one-click/sites/${domain}" ]]; then
-        site="/etc/one-click/static/www/$domain"
+        site="/etc/one-click/sites/$domain/www"
       fi
       if [[ "$mode" == "wordpress" ]]; then
         site="/etc/one-click/wordpress/$domain/www"
       else
-        site="/etc/one-click/static/www/$domain"
+        site="/etc/one-click/sites/$domain/www"
       fi
       wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
       webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
@@ -1377,7 +1389,6 @@ run_script() {
   wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
-  chown "$web_user":"$webserver" /etc/one-click/wordpress/$domain/meta.conf
   echo
   while true; do
     read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
@@ -1402,8 +1413,22 @@ run_script() {
     [[ -n "$webserver" ]] && break
   done
   case "$webserver" in
-    1) webserver="nginx"                ;;
-    2) webserver="apache"               ;;
+    1) 
+      webserver="nginx"
+      if command -v apt &> /dev/null; then
+        webserver_user="www-data"
+      else
+        webserver_user="nginx"
+      fi
+      ;;
+    2) 
+      webserver="apache"
+      if command -v apt &> /dev/null; then
+        webserver_user="www-data"
+      else
+        webserver_user="apache"
+      fi
+      ;;
     *) 
       echo "Invalid selection" 
       ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
@@ -1472,7 +1497,7 @@ run_script() {
     if mv "$source_config" "$dest_config"; then
       info "Applying permissions to wp-config"
       chmod 644 "$dest_config"
-      success "wp-config.php moved to $dest_config and permissions set to 600."
+      success "wp-config.php moved to $dest_config and permissions set to 644."
     else
       error "Failed to move file. Check permissions and global server settings then try again."
       exit 1
@@ -1480,7 +1505,8 @@ run_script() {
   fi
   mkdir -p /etc/one-click/wordpress/backups
   chmod -R 700 /etc/one-click/wordpress/backups
-  chown "$web_user":"$webserver" /etc/one-click/wordpress/backups
+  chown "$web_user":"$webserver_user" /etc/one-click/wordpress/backups
+  chown "$web_user":"$webserver_user" /etc/one-click/wordpress/$domain/meta.conf
   # ==== Open Firewall ====
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver"
@@ -1527,19 +1553,42 @@ wp_plugin_manager() {
     read -rp "${cyan}[USER]${blue} Select an option: ${reset}" choice
     case "$choice" in
       1)
-        $wp_cmd plugin list
-        read -rp "Plugin to Toggle: " plugin
-        [[ -z "$plugin" ]] && continue
-        # Get current status to determine whether to activate or deactivate
-        status=$($wp_cmd plugin get "$plugin" --field=status 2>/dev/null)
-        if [[ "$status" == "active" ]]; then
-          $wp_cmd plugin deactivate "$plugin"
+        mapfile -t plugins < <($wp_cmd plugin list --fields=name,status --format=csv | tail -n +2)
+        if [[ ${#plugins[@]} -eq 0 ]]; then
+          error "No plugins found."
+          continue
+        fi
+        echo -e "\e[34m╔════╦══════════════════════════════════════════════════╦════════════╗\e[0m"
+        echo -e "\e[34m║ ${magenta}ID${blue} ║${yellow} Plugin${blue}                                           ║ ${yellow}Status${blue}     ║\e[0m"
+        echo -e "\e[34m╠════╬══════════════════════════════════════════════════╬════════════╣\e[0m"
+        i=1
+        for p in "${plugins[@]}"; do
+          slug=$(echo "$p" | cut -d',' -f1)
+          status=$(echo "$p" | cut -d',' -f2)
+          printf "\e[34m║ \e[35m%-2s\e[34m ║ %-48s ║ %-10s ║\e[0m\n" "$i" "$slug" "$status"
+          ((i++))
+        done
+        echo -e "\e[34m╚════╩══════════════════════════════════════════════════╩════════════╝\e[0m"
+        read -rp "${cyan}[USER]${blue} Select ID to toggle (0 to cancel): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#plugins[@]} )); then
+          selected="${plugins[$((choice-1))]}"
+          slug=$(echo "$selected" | cut -d',' -f1)
+          status=$(echo "$selected" | cut -d',' -f2)
+          if [[ "$status" == "active" ]]; then
+            info "Deactivating $slug..."
+            $wp_cmd plugin deactivate "$slug"
+          else
+            info "Activating $slug..."
+            $wp_cmd plugin activate "$slug"
+          fi
+        elif [[ "$choice" == "0" ]]; then
+          info "Action cancelled."
         else
-          $wp_cmd plugin activate "$plugin"
+          error "Invalid selection."
         fi
         ;;
       2)
-        read -rp "Search for plugin: " search_term
+        read -rp "${cyan}[USER]${blue} Search for plugin: " search_term
         info "Searching WordPress.org..."
         mapfile -t slugs < <($wp_cmd plugin search "$search_term" --field=slug --per-page=20)
         if [[ ${#slugs[@]} -eq 0 ]]; then
@@ -1664,12 +1713,31 @@ create_static_site() {
     fi
     echo "Domain cannot be empty!"
   done
+  info "Which webserver should host $domain?" \
+    "[1] Nginx" \
+    "[2] Apache"
+  read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver_choice
+  case "$webserver_choice" in
+    1) 
+      webserver="nginx"
+      webserver_user="$webserver"
+      ;;
+    2) 
+      webserver="apache"
+      if command -v apt &> /dev/null; then
+        webserver_user=www-data
+      else
+        webserver_user="apache"
+      fi
+      ;;
+    *) echo "Invalid selection"; return 1 ;;
+  esac
   warn "Creating web owner"
   web_user="ocb_$(echo -n "$domain" | sha1sum | cut -c1-8)"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   site_dir="/etc/one-click/sites/$domain/www"
   mkdir -p "$site_dir"
-  chown "$web_user":"$webserver" "$site_dir"
+  chown "$web_user":"$webserver_user" "$site_dir"
   touch /etc/one-click/sites/$domain/meta.conf
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
   while true; do
@@ -1680,15 +1748,6 @@ create_static_site() {
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>SiteHUB Default WebPage</title><link rel="icon" type="image/png" href="https://sitehub.agency/wp-content/uploads/2025/06/cropped-Untitled-design-9-e1750161170804.png"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box}body,html{height:100%;font-family:'Roboto',sans-serif}body{background:linear-gradient(135deg,#28a745,#003366);display:flex;flex-direction:column;justify-content:space-between;color:#fff}header{text-align:center;padding:50px 20px}header img.logo{height:80px;margin-bottom:20px}header h1{font-size:2.5em;margin-bottom:10px}header p{font-size:1.2em}.visuals{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;z-index:0}.visuals span{position:absolute;display:block;border-radius:50%;background:rgba(255,255,255,.05);animation:float 25s linear infinite}@keyframes float{0%{transform:translateY(0) rotate(0deg)}100%{transform:translateY(-1000px) rotate(720deg)}}main{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:20px;text-align:center}section{margin:50px 0}.main-hero h2{font-size:2em;margin-bottom:15px}.main-hero p{font-size:1.1em;line-height:1.6;margin-bottom:25px}.cta-btn{display:inline-block;background:#fff;color:#003366;font-weight:700;text-decoration:none;padding:12px 25px;border-radius:50px;margin:10px;transition:all .3s ease}.cta-btn:hover{background:#e0e0e0}footer{text-align:center;padding:20px;font-size:.9em;color:rgba(255,255,255,.7)}@media(max-width:768px){header h1{font-size:2em}.main-hero h2{font-size:1.6em}}</style></head><body><div class="visuals" id="visuals"></div><header><img class="logo" src="https://us1.plesk.sitehub.agency/images/logos/6EwrLBBn5Xg.png" alt="SiteHUB"><h1>Default Web Page for <span id="domain-name">dynamic-domain.ng</span></h1><p>This page is generated by <a href="https://sitehub.agency" style="color:darkgreen;text-decoration:none;">Site <span style="color:blue;text-decoration:none;">HUB</span></a>, the leading hosting provider in Nigeria.<br>You see this page because there is no website at this address.</p></header><main id="placeholder-content"></main><footer>Copyright &copy; SiteHUB Agency <span id="year"></span>. All rights reserved - RC6935293</footer><script>document.getElementById("year").textContent=new Date().getFullYear();document.addEventListener("DOMContentLoaded",()=>{const e=location.hostname,t=location.protocol+"//"+e+":8443",n="support@sitehub.agency";document.getElementById("domain-name").textContent=e;const o=document.getElementById("placeholder-content");let a="";a+=`<section class="main-hero"><h2>Your domain <strong>${e}</strong> is now live!</h2><p><strong>${e}</strong> default page has been generated by the One-Click Toolbox Automation tool . No website content has been uploaded yet.<br>For more information about One-Click Toolbox:</p><a class="cta-btn" href="https://github.com/SiteHUB-NG/One-Click/" target="_blank">View On GitHub</a><br><br><br><hr><br><h2>Need Hosting?</h2><p>Start your own website in minutes with our web hosting & VPS plans!</p><a class="cta-btn" href="https://sitehub.agency/shared/" target="_blank">View Web Hosting Plans</a><a class="cta-btn" href="https://features.sitehub.agency/vps/" target="_blank">View VPS Plans</a></section>`,a+=`<section class="main-hero"><h2>Need Help?</h2><p>Contact our support team: <a style="color:#fff;text-decoration:underline;" href="mailto:${n}">${n}</a></p></section>`,o.innerHTML=a;const r=document.getElementById("visuals");for(let t=0;t<30;t++){let n=document.createElement("span"),o=60*Math.random()+20;n.style.width=o+"px",n.style.height=o+"px",n.style.left=100*Math.random()+"%",n.style.top=100*Math.random()+"%",n.style.animationDuration=20+20*Math.random()+"s",r.appendChild(n)}});</script></body></html>
 EOF
   success "New site prepared at $site_dir"
-  info "Which webserver should host $domain?" \
-    "[1] Nginx" \
-    "[2] Apache"
-  read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver_choice
-    case "$webserver_choice" in
-      1) webserver="nginx"                  ;;
-      2) webserver="apache"                 ;;
-      *) echo "Invalid selection"; return 1 ;;
-  esac
   install_webserver static "$domain" "$site_dir"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "sites"
   dns_check
@@ -1773,10 +1832,17 @@ EOF
   install_php_mods
   if [[ "$pkg_mgr" == "apt" ]]; then
     a2ensite "$domain"
-    systemctl reload apache2
+    if systemctl is-active apache2 &> /dev/null; then
+      systemctl reload apache2
+    else
+      systemctl enable apache2 --now
+    fi
   else
-    systemctl enable httpd --now
-    systemctl reload httpd
+    if ! systemctl is-active httpd &> /dev/null; then
+      systemctl enable httpd --now
+    else
+      systemctl reload httpd
+    fi
   fi
 }
 static_backup() {
@@ -1813,10 +1879,10 @@ static_backup() {
   else
     if [[ -f "/etc/nginx/sites-available/$domain.conf" || -f "/etc/nginx/conf.d/$domain.conf" ]]; then
       webserver="nginx"
-    elif [[ -f "/etc/apache2/sites-available/$domain.conf" || -f "/etc/httpd/conf.d/$domain.conf" ]]; then
-      webserver="apache"
+    elif [[ -f "/etc/apache2/sites-available/$domain.conf" ]]; then
+      webserver="www-data"
     else
-      webserver="unknown"
+      webserver="apache"
     fi
   fi
   info "Archiving files..."
@@ -1879,6 +1945,7 @@ static_restore() {
   info "Restoring webserver configuration..."
   case "$WEBSERVER" in
     nginx)
+      webserver_user=nginx
       if [[ -f "$backup_dir/nginx.conf" ]]; then
         if systemctl is-active nginx.service &> /dev/null; then
           cp "$backup_dir/nginx.conf" /etc/nginx/sites-available/$domain.conf 2>/dev/null || \
@@ -1896,6 +1963,7 @@ static_restore() {
     apache)
       if [[ -f "$backup_dir/apache.conf" ]]; then
         if [[ -d /etc/apache2 ]]; then
+          webserver_user=www-data
           if systemctl is-active apache2.service &> /dev/null; then
             cp "$backup_dir/apache.conf" /etc/apache2/sites-available/$domain.conf
             a2ensite "$domain"       
@@ -1906,6 +1974,7 @@ static_restore() {
             return
           fi
         else
+          webserver_user=apache
           if systemctl is-active httpd.service &> /dev/null; then
             cp "$backup_dir/apache.conf" /etc/httpd/conf.d/$domain.conf
             systemctl reload httpd
@@ -1918,7 +1987,7 @@ static_restore() {
       fi
       ;;
   esac
-  chown -R "$web_user":"$webserver" "$site_dir"
+  chown -R "$web_user":"$webserver_user" "$site_dir"
   success "Restore complete for $domain"
 }
 select_static_domain() {
@@ -2389,7 +2458,7 @@ user = $site_user
 group = $site_user
 listen = $run_dir/php.sock
 listen.owner = $site_user
-listen.group = $webserver
+listen.group = ${webserver_user:-${webserver}}
 listen.mode = 0660
 pm = ondemand
 pm.max_children = 5
@@ -3247,9 +3316,9 @@ delete_site() {
   local slice_name="one-click_${domain}.slice"
   local service_name="php-fpm@${domain}.service"
   local site_user
-  [[ -z "$domain" ]] && { error "No domain provided"; return 1; }
+  [[ -z "$domain" ]] && { error "No domain provided"; return; }
   read -rp "${cyan}[USER]${red} WARNING: Delete $domain permanently? (y|n): ${reset}" confirm
-  [[ "$confirm" != "y" ]] && { info "Cancelled"; return 1; }
+  [[ "$confirm" != "y" ]] && { info "Cancelled"; return; }
   info "Tearing down $domain..."
   site_user=$(get_site_user "$domain")
   # ==== Extract DB ====
@@ -3374,7 +3443,7 @@ monitor() {
   check_url="https://$domain"
   status_file="/etc/one-click/monitor/${domain}/monitor_status"
   log_file="/var/log/${webserver}/${domain}/monitor.log"
-  mkdir -p "/etc/one-click/monitor/${domain}"
+  mkdir -p "/etc/one-click/monitor/${domain}" "/var/log/${webserver}/${domain}"
   now=$(date +%s)
   http_status=$(curl -o /dev/null -s -w "%{http_code}" \
     --max-time 5 --connect-timeout 3 "$check_url" || echo "000")
