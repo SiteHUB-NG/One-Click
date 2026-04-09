@@ -21,6 +21,7 @@ fi
 secret_key="/etc/one-click.backup_secret.key"
 current_profile_file="$config_dir/current_profile"
 webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
+cent0s_ver=$(grep -Eo [0-9]+ /etc/centos-release)
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
@@ -1390,13 +1391,17 @@ run_script() {
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   echo
-  while true; do
-    read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
-    if [[ "$enable_redis" =~ ^[Y|y|yes|Yes|n|N|no|No]$ ]]; then
-      break
-    fi
-    warn "Please enter y or n"
-  done
+  if [[ "$centos_ver" -lt 10 ]]; then
+    while true; do
+      read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
+      if [[ "$enable_redis" =~ ^[Y|y|yes|Yes|n|N|no|No]$ ]]; then
+        break
+      fi
+      warn "Please enter y or n"
+    done
+  else
+    warn "CentOS $centos_ver does not support redis"
+  fi
   #read -rp "${cyan}[USER]${reset} Enable Cloudflare (y|n): " enable_cloudflare
   while true; do
     read -rp "${cyan}[USER]${reset} Enable Staging? (y|n) " enable_staging
