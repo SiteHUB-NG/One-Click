@@ -13,25 +13,25 @@
 # === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
+if [[ "$pkg_mgr" == "apt" ]]; then
+  dig_pkg=dnsutils
+  php_pkg="php"
+else
+  dig_pkg=bind-utils
+  php_pkg="$(awk '$0 !~ /=/ {print $1}' <($pkg_mgr search php 2> /dev/null) | head -1)"
+fi
 if command -v install_dep &> /dev/null; then
-  install_dep "php" "command -v php" "php-fpm" "$pkg_mgr" true
+  install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
   install_dep "git" "command -v git" "git" "$pkg_mgr" true
+  install_dep "dig" "command -v dig" "$dig_pkg" "$pkg_mgr" true
 fi
 . /etc/os-release
 secret_key="/etc/one-click.backup_secret.key"
 current_profile_file="$config_dir/current_profile"
 webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
-cent0s_ver=$(grep -Eo [0-9]+ /etc/centos-release)
+centos_ver=$(grep -Eo [0-9]+ /etc/centos-release 2> /dev/null || true)
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
-fi
-if [[ -f /etc/nginx/nginx.conf ]]; then
-  if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
-    mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.one-click-bak
-    ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
-                        '\"\$request\" \$status \$body_bytes_sent '
-                        '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba}' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
-  fi
 fi
 dns_check() {
   dns=$(dig +short "$domain" | tail -n1)
@@ -434,6 +434,13 @@ download_wp() {
     $wp_cmd core download  || {
       warn "WP available in this location..."
     }
+  fi
+  # ==== Ensure mysqli ====
+  vers=$(sed -En '1s/[^.]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    "$pkg_mgr" -y install php${vers}-mysql || true
+  else
+    "$pkg_mgr" -y install php-mysqlnd || true
   fi
   # ==== Configure WP ====
   $wp_cmd config create \
@@ -934,6 +941,14 @@ install_webserver() {
         "$pkg_mgr" install -y debian-archive-keyring
         "$pkg_mgr" install -y nginx || "$pkg_mgr" install -y nginx-full
       fi
+      if [[ -f /etc/nginx/nginx.conf ]]; then
+        if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
+          mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.one-click-bak
+          ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
+                        '\"\$request\" \$status \$body_bytes_sent '
+                        '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba};/access_log/s/main/oneclick/' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
+        fi
+      fi
       nginx_conf
     else
       "$pkg_mgr" install -y apache2 libapache2-mod-php
@@ -1039,6 +1054,7 @@ EOF
   if [[ "$pkg_mgr" == "apt" ]]; then
     ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/$domain.conf
   fi
+  sed -Ei.one-click.bak '/log_format|access_log/{s/main/oneclick/}' /etc/nginx/nginx.conf
   nginx -t
   systemctl enable nginx --now
   systemctl reload nginx
@@ -1389,7 +1405,7 @@ run_script() {
   echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
-  id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
+  id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
   echo
   if [[ "$centos_ver" -lt 10 ]]; then
     while true; do
@@ -1401,6 +1417,7 @@ run_script() {
     done
   else
     warn "CentOS $centos_ver does not support redis"
+    enable_redis=n
   fi
   #read -rp "${cyan}[USER]${reset} Enable Cloudflare (y|n): " enable_cloudflare
   while true; do
