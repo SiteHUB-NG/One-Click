@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ======================= # ======================== # ======================= #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
 if [[ "$pkg_mgr" == "apt" ]]; then
@@ -2236,21 +2236,44 @@ switch_cli_php() {
   success "CLI is now $(php -v | head -n1)"
 }
 switch_site_php() {
-  local domain="$1"
+  local domain base_conf ini_file fpm_conf ver_nodot binary_path service_file current_ver
+  domain="$1"
   set_domain_context || return 1
-  local base_conf="/etc/one-click/php/$domain"
-  local ini_file="$base_conf/php.ini"
-  local fpm_conf="$base_conf/php-fpm.conf"
+  base_conf="/etc/one-click/php/$domain"
+  ini_file="$base_conf/php.ini"
+  fpm_conf="$base_conf/php-fpm.conf"
+  current_ver=$(awk -F"[ /]" '/ExecStart/{print $4}' <(systemctl cat php-fpm@$domain.service))
   read -rp "Enter PHP version (e.g., 8.2): " new_ver
-  local ver_nodot="${new_ver//.}"
-  local binary_path="/opt/remi/php${ver_nodot}/root/usr/sbin/php-fpm"
-  if [[ ! -f "$binary_path" ]]; then
-    echo "Installing PHP $new_ver..."
-    dnf install -y "php${ver_nodot}-php-fpm" "php${ver_nodot}-php-cli" "php${ver_nodot}-php-mbstring"
+  ver_nodot="${new_ver//.}"
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    if ! dpkg -l | grep -q "php${new_ver}-fpm"; then
+      info "Installing PHP $new_ver from the current version $current_ver"
+      apt update -y
+      apt install -y php${new_ver}-fpm php${new_ver}-cli php${new_ver}-mysql php${new_ver}-mbstring php${new_ver}-xml
+      a2enconf php${new_ver}-fpm
+    fi
+    binary_path="/usr/sbin/php-fpm${new_ver}"
+  else
+    if [[ ! -f "/opt/remi/php${ver_nodot}/root/usr/sbin/php-fpm" ]]; then
+      info "Installing PHP $new_ver from the current version $current_ver"
+      dnf install -y "php${ver_nodot}-php-fpm" "php${ver_nodot}-php-cli" "php${ver_nodot}-php-mbstring"
+    fi
+    binary_path="/opt/remi/php${ver_nodot}/root/usr/sbin/php-fpm"
+  fi
+  if [[ ! -x "$binary_path" ]]; then
+    error "PHP-FPM binary not found: $binary_path"
+    return 1
+  fi
+  service_file="/etc/systemd/system/php-fpm@${domain}.service"
+  if [[ ! -f "$service_file" ]]; then
+    error "Service file not found: $service_file"
+    return 1
   fi
   sed -Ei "s,(ExecStart=)[^ \t]*,\1$binary_path," /etc/systemd/system/php-fpm@${domain}.service
+  systemctl daemon-reexec
   systemctl daemon-reload
   systemctl restart "php-fpm@$domain"
+  systemctl  reload "$webserver"
   success " $domain is now using PHP $new_ver"
 }
 setup_repos() {
@@ -2348,8 +2371,8 @@ php_menu() {
   select_domain || return 1
   detect_env
   set_domain_context
-  php_version=$(sed -En '/^ExecStart=[^0-9]*([0-9]+).*/{s//\1/;s/./&./p}' /etc/systemd/system/php-fpm@${domain}.service)
   while true; do
+    php_version=$(awk -F"[ /]" '/ExecStart/{print $4}' <(systemctl cat php-fpm@$domain.service) | sed 's/[^0-9]*//')
     paste <(printf '%s\n' \
       "${yellow}--- PHP MANAGER ---${reset}" \
       "${magenta}OS:${green} $os_family ${blue}| ${magenta}Webserver: ${green}${webserver}" \
@@ -2361,7 +2384,7 @@ php_menu() {
       "${magenta}[${yellow}5${magenta}]${reset} Site-Specific Tuning" \
       "${magenta}[${yellow}6${magenta}]${reset} PHP Process Control" \
       "${magenta}[${yellow}7${magenta}]${reset} Change Domain" \
-      "${magenta}[${yellow}0${magenta}]${reset} Exit") <(printf "${blue}[${green}${domain}${blue}] PHP ${php_version} | ${webserver}${reset}")
+      "${magenta}[${yellow}0${magenta}]${reset} Exit") <(printf "${blue}[${green}${domain}${blue}] ${yellow}PHP VERSION:${blue} ${php_version} ${magenta}║ ${yellow}WEBSERVER:${blue} ${webserver}${reset}")
       read -rp "${cyan}[USER]${reset} Option: " opt
       case "$opt" in
         1) 
@@ -2447,7 +2470,7 @@ select_domain() {
     fi
   else
     list_domains() {
-      ls /etc/one-click/wordpress /etc/one-click/sites | sed -n '/\./p'
+      ls /etc/one-click/wordpress /etc/one-click/sites 2> /dev/null | sed -n '/\./p'
     }
   fi
   mapfile -t domains < <(list_domains)
@@ -2542,10 +2565,13 @@ display_errors = Off
 log_errors = On
 session.save_path = $lib_dir/sessions
 upload_tmp_dir = $lib_dir/tmp
-extension=mysqli
-extension=pdo_mysql
-extension=mysqlnd
+#extension=mysqli
+#extension=pdo_mysql
+#extension=mysqlnd
 EOF
+    if [[ "$pkg_mgr" != "apt" ]]; then
+      sed -E 's/^#//' "$ini_file"
+    fi
     cat > "$pool_conf" <<EOF
 [$domain]
 user = $site_user
