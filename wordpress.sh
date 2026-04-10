@@ -596,8 +596,10 @@ redis_service() {
   local domain="$1"
   local conf="/etc/redis/one-click/${domain}.conf"
   local service="redis-${domain}"
-  echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
-  sysctl -p
+  if ! grep -Eq 'vm.overcommit_memory = 1' /etc/sysctl.conf; then
+    echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
+    sysctl -p
+  fi
   cat > "/etc/systemd/system/${service}.service" <<EOF
 [Unit]
 Description=One-Click Redis Instance for ${domain}
@@ -801,6 +803,10 @@ staging_vhost_apache() {
         Require all granted
     </Directory>
 
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
+    </FilesMatch>
+
     ErrorLog ${apache_log_dir}/$domain-error.log
     CustomLog ${apache_log_dir}/$domain-access.log combined
     
@@ -813,7 +819,7 @@ wp_staging_enable() {
   if [[ ! -d /etc/one-click/wordpress/staging/$domain ]]; then
     wp_staging "$domain"
   fi
-  if command -v nginx >/dev/null; then
+  if [[ "$webserver" == "nginx" ]]; then
     staging_vhost_nginx "$domain"
   else
     staging_vhost_apache "$domain"
@@ -999,11 +1005,14 @@ install_php_mods() {
     a2enmod rewrite
     a2enmod ssl
     a2enmod headers
+    a2enmod proxy
+    a2enmod proxy_fcgi
     a2ensite "$domain"
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     "$pkg_mgr" install -y \
       httpd \
       mod_ssl \
+      mod_proxy_fcgi \
       php \
       php-fpm \
       php-mysqlnd \
@@ -1084,6 +1093,10 @@ apache_conf() {
         Require all granted
     </Directory>
 
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
+    </FilesMatch>
+
     ErrorLog ${apache_log_dir}/$domain-error.log
     CustomLog ${apache_log_dir}/$domain-access.log combined
 </VirtualHost>
@@ -1111,12 +1124,19 @@ apache_ssl_conf() {
         Require all granted
     </Directory>
 
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
+    </FilesMatch>
+
     ErrorLog ${apache_log_dir}/$domain-ssl-error.log
     CustomLog ${apache_log_dir}/$domain-ssl-access.log combined
 </VirtualHost>
 </IfModule>
 EOF
   sed -Ei 's/#(Redirect permanent)/\1/' "$apache_confi"
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    a2ensite "$(basename $ssl_apache_conf)"
+  fi
 }
 webroot_nginx_template() {
   if [[ "$pkg_mgr" == "apt" ]]; then
@@ -1270,11 +1290,12 @@ install_letsencrypt() {
       break
     else
       warn "Certbot failed."
-      echo "Options:"
-      echo "  [1] Try webroot installation"
-      echo "  [2] Change email"
-      echo "  [3] Skip SSL setup"
-      echo "  [4] View logs"
+      printf '%s\n' "Options:" \
+        "  [1] Try webroot installation" \
+        "  [2] Change email" \
+        "  [3] Skip SSL setup" \
+        "  [4] Install Self-Signed Certificate" \
+        "  [5] View logs"
       read -rp "${cyan}[USER]${reset} Choose an option: " choice
       case "$choice" in
         1)
@@ -1291,7 +1312,53 @@ install_letsencrypt() {
             [[ -n "$email" ]] && break
           done                                       ;;
         3) warn "Skipping SSL setup."; return        ;;
-        4) less /var/log/letsencrypt/letsencrypt.log ;;
+        4)
+          info "Installing self signed certificate"
+          openssl req -x509 -nodes -days 365 \
+            -newkey rsa:4096 \
+            -keyout ${site}-oneclick_selfsigned-privkey.pem \
+            -out ${site}-oneclick_selfsigned-fullchain.pem \
+            -subj "/C=NG/ST=Lagos/L=Lagos/O=Site/CN=$domain"
+          chmod 640 ${site}-oneclick_selfsigned-privkey.pem
+          chmod 644 ${site}-oneclick_selfsigned-fullchain.pem
+          chown "$web_user":"$webserver_user" "${site}-oneclick_selfsigned-fullchain.pem" "${site}-oneclick_selfsigned-privkey.pem"
+          if [[ "$webserver" == "nginx" ]]; then
+            if [[ "$pkg_mgr" == "apt" ]]; then
+              nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
+            else
+              nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
+            fi
+            apachehttpd=nginx
+            sed -Ei.oneclick-bak "
+              /server_name/ {
+                h;
+                n;
+                G;
+                s,se.*,return 301 https://\$host\$request_uri;\n}\n\nserver {\n    listen 443 ssl; #Managed By One-Click\n    server_name $domain\n,}
+            "  "$nginx_conf_file"
+          else
+            if [[ "$pkg_mgr" == "apt" ]]; then
+              ssl_apache_conf=/etc/apache2/sites-available/$domain-le-ssl.conf
+              apachehttpd=apache2
+            elif [[ "$pkg_mgr" == "dnf" ]]; then
+              ssl_apache_conf=/etc/httpd/conf.d/$domain-le-ssl.conf
+              apachehttpd=httpd
+            fi
+            sed -Ei.oneclick-bak "
+              /DocumentRoot/ {
+                h;
+                n;
+                G;
+                s,D.*,SSLEngine on\n    SSLCertificateFile ${site}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${site}-oneclick_selfsigned-privkey.pem\n,
+              }
+            " "$ssl_apache_conf"
+          fi
+          if systemctl reload "$apachehttpd" 2> /dev/null; then
+            success "Self signed certificate installed"
+          fi
+          return
+          ;;
+        5) less /var/log/letsencrypt/letsencrypt.log ;;
         *) warn "Invalid option"                     ;;
       esac
     fi
@@ -1844,7 +1911,7 @@ apache_static_conf() {
     </Directory>
 
     <FilesMatch \.php$>
-        SetHandler "proxy:unix:/run/php${php_ver:-}-fpm-${domain}.sock|fcgi://localhost/"
+        SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
     </FilesMatch>
 
     ErrorLog ${apache_log_dir}/$domain-error.log
@@ -2103,8 +2170,13 @@ detect_env() {
     [[ "$os_family" == "debian" ]] && conf_path="/etc/nginx/sites-enabled" || conf_path="/etc/nginx/conf.d"
   elif systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then
     webserver="apache"
-    [[ "$os_family" == "debian" ]] && conf_path="/etc/apache2/sites-enabled" || conf_path="/etc/httpd/conf.d"
-    [[ "$os_family" == "rhel" ]] && webserver="httpd"
+    if [[ "$os_family" == "debian" ]]; then 
+      conf_path="/etc/apache2/sites-enabled"
+      webserver="apache2"
+    else
+      conf_path="/etc/httpd/conf.d"
+      webserver="httpd"
+    fi
   else
     error "No supported webserver detected!" 
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
