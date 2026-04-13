@@ -34,7 +34,7 @@ if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
 dns_check() {
-  dns=$(dig +short "$domain" | tail -n1)
+  dns=$(dig "$domain" +short @8.8.8.8 | tail -n1)
   dns_www=$(dig +short "www.$domain" | tail -n1)
   if [[ "$dns" != "$sys_ip" || "$dns" != "$sys_ipv6" ]]; then
     warn "Domain does not resolve to this server (${sys_ip:-${sys_ipv6}})"
@@ -3483,6 +3483,9 @@ delete_site() {
   rm -f /var/log/php-fpm-$domain.log
   rm -f /var/log/nginx/$domain*.log 2>/dev/null
   rm -f /var/log/httpd/$domain*.log 2>/dev/null
+  # ==== Redis ====
+  systemctl stop redis-${domain}
+  rm -f /etc/systemd/system/redis-${domain}.service
   # ==== SSL ====
   rm -rf "/etc/letsencrypt/live/$domain"
   rm -rf "/etc/letsencrypt/archive/$domain"
@@ -3516,7 +3519,7 @@ delete_site() {
   set +o pipefail
   info "Removing system user $site_user"
   if id "$site_user" &>/dev/null; then
-    gpasswd -d nginx "$site_user" 2>/dev/null
+    gpasswd -d "$webserver" "$site_user" 2>/dev/null
     userdel "$site_user"
   fi
   set -o pipefail
