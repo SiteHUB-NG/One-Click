@@ -15,7 +15,8 @@
 # ==== Network Repair ====
 network_select_option() {
   mkdir -p "$backup_dir"
-  info "Network repair is a tool that will attempt to fix and resolve network connectivity issues" \
+  printf "${magenta}[NET REPAIR]${reset} %s\n" \
+    "Network repair is a tool that will attempt to fix and resolve network connectivity issues" \
     "If it has had the opportunity to assess your environment before disaster, it will create snapshots and backups of your current configuration." \
     " " "Outside of snapshots, it can only make intelligent guesses to fix a connectivity issue." \
     " " "This tool ${red}DOES NOT${reset} guarantee that it will be able to fix your issue." " "
@@ -27,7 +28,7 @@ network_select_option() {
     "[5]. Display Snapshot Contents" \
     "[6]. Restore Network Configs" \
     "[7]. Configure cron for snapshots" \
-    "[8]. Exit"
+    "[0]. Exit"
   read -rp "${cyan}[USER]${reset} Please select an option to proceed with: " repair_select
 }
 timestamp() { date +%Y%m%d-%H%M%S; }
@@ -292,6 +293,12 @@ restore_backup() {
       info "You have chosen not to proceed with the restore"
       return 0
     }
+  fi
+  echo "${red}[${cyan}[USER]${red}]${reset} The following option will change your current network configuration!"
+  read -rp "${cyan}[USER]${reset} Please confirm you would like to proceed with restoring the last known working network configuration [y|n]: " conf_restore
+  if [[ "$conf_restore" != "y" && "$conf_restore" != "Y" ]]; then
+    error "Restore Cancelled"
+    return
   fi
   info "Restoring backup configs and snapshots..."
   local found_backups=0
@@ -652,7 +659,7 @@ fix_network() {
         ;;
       6)restore_backup                                             ;;
       7)install_cron "-x" "One-Click Network Repair Tool" "v"      ;;
-      8)( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      0)( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
       *)warn "Invalid selection"                                   ;;
     esac
     echo
