@@ -27,7 +27,7 @@ mount_esp() {
   esp="$1"
   mnt="/tmp/esp_mount"
   mkdir -p "$mnt"
-  mount "$esp" "$mnt" || die "Failed to mount ESP $esp"
+  mount "$esp" "$mnt" || (error "Failed to mount ESP $esp"; return)
   echo "$mnt"
 }
 mount_root() {
@@ -36,7 +36,7 @@ mount_root() {
     || die "Root partition not found by UUID"
 
   mkdir -p /mnt
-  mount "$root_dev" /mnt || die "Failed to mount root filesystem"
+  mount "$root_dev" /mnt || (error "Failed to mount root filesystem"; true)
 }
 reinstall_grub() {
   info "Reinstalling GRUB bootloader"
@@ -57,13 +57,34 @@ reinstall_grub() {
       --recheck \
       || die "UEFI grub-install failed"
   else
+    if ! parted -s "$boot_disk" print | grep -q "bios_grub"; then
+      free_space=$(parted -s "$boot_disk" unit MiB print free | grep "Free Space" | head -n 1)
+      if [[ -z "$free_space" ]]; then
+        error "No free space available to create BIOS Boot Partition"
+        return 1
+      fi
+      start=$(awk '{print $1}' <<< "$free_space" | sed 's/[MK]iB//')
+      end=$(awk '{print $2}' <<< "$free_space" | sed 's/[MK]iB//')
+      size=$(awk -v end="$end" -v start="$start" "BEGIN {print int(end - start)}")
+      if ((size < 2048)); then
+        error "Not enough free space (<2MiB) for BIOS GRUB partition"
+      else
+        info "[*] Found free space: ${start}MiB → ${end}MiB"
+        new_end=$(awk -v start="$start" "BEGIN {print start + 2048}")
+        info "[*] Creating BIOS Boot Partition (${start}KiB → ${new_end}KiB)"
+        parted -s "$boot_disk" mkpart primary "${start}KiB" "${new_end}KiB"
+        part_num=$(parted -s "$boot_disk" print | tail -n 1 | awk '{print $1}')
+        parted -s "$boot_disk" set "$part_num" bios_grub on
+        success "BIOS Boot Partition created (partition $PART_NUM)"
+      fi
+    fi
     chroot /mnt "${grub}"-install \
       --target=i386-pc \
-      "$boot_disk" \
+      --force "$boot_disk" \
       || die "BIOS grub-install failed"
   fi
   chroot /mnt "${grub}"-mkconfig -o "/boot/${grub_dir}/grub.cfg"
-  umount -R /mnt/dev /mnt/proc /mnt/sys || true
+  umount -l -R /mnt/dev /mnt/proc /mnt/sys || true
 }
 restore_esp() {
   local esp src mnt
@@ -86,7 +107,7 @@ recovery_backup() {
   mkdir -p "$out_path"
   warn "This will carry out a backup of critical boot recovery components"
   if (( ! non_interactive )); then
-    read -rp "${cyan}[USER]${reset} Proceed [y/n]: " cont
+    read -rp "${cyan}[USER]${reset} Proceed [y|n]: " cont
     cont="${cont,,}"
     if [[ ! "$cont" == "y" && ! "$cont" == "yes" ]]; then
       error "Backup Aborted!"
@@ -267,10 +288,10 @@ recovery_menu() {
     printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
       "[1]. Backup" \
       "[2]. Restore" \
-      "[3]. Snapshot Directory" \
+      "[3]. Display Snapshot Directory" \
       "[4]. Configure Cron" \
-      "[5]. Exit"
-    read -rp "${cyan}[USER]${reset} Select an option [1-5]: " backup_run
+      "[0]. Exit"
+    read -rp "${cyan}[USER]${reset} Select an option [0-4]: " backup_run
     case "$backup_run" in
       1) recovery_backup  ;;
       2) recovery_restore ;;
@@ -282,7 +303,7 @@ recovery_menu() {
         fi
         ;;
       4) install_cron "-y" "Boot Recovery Tool" "r"                 ;;
-      5) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
+      0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
       *) echo "[ERROR] Invalid selection"                           ;;
     esac
     read -rp "${cyan}[USER]${reset} Press enter to continue"
