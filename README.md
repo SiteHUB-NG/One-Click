@@ -183,8 +183,20 @@ It is designed to operate safely in production environments with caching, fallba
 
 ## WordPress Automation Module
 
-One-Click includes a dedicated **WordPress automation installer**.  
-It allows rapid WordPress deployment and SSL setup on a server using simple commands.
+The One-Click WordPress module is a **full-stack site provisioning engine**, not just an installer. It automates the creation of complete, isolated web application environments per domain, including web server configuration, database provisioning, PHP runtime isolation, SSL management, and backup lifecycle handling.
+
+Each WordPress deployment is treated as a **standalone system service** with dedicated resources and strict isolation boundaries.
+
+### Key Capabilities
+- Fully automated WordPress deployment via WP-CLI
+- Per-site isolation using Linux system users and PHP-FPM pools
+- Independent webserver virtual host generation (Nginx or Apache)
+- Automatic database creation with unique credentials per site
+- Systemd-based CPU and memory isolation per domain
+- SSL provisioning and renewal via Let's Encrypt (Certbot)
+- Structured backup system per domain
+- Deterministic filesystem layout under /etc/one-click
+- Optional caching integration (e.g., Redis plugin support)
 
 ### Commands
 
@@ -200,50 +212,124 @@ It allows rapid WordPress deployment and SSL setup on a server using simple comm
 ```
 one-click --wp-create
 ```
+**Wordpress Management**
+```
+one-click --wp
+one-click --wp-admin
+```
 **Install SSL for an existing WordPress site:**
 ```
-one-click --wp-ssl
-```
-**Configure profiles, backups and restores:**
-```
-one-click --wp-backup
+one-click --ssl
 ```
 
+### System Layout
+Each deployment follows a strict structure:
+```
+/etc/one-click/wordpress/<domain>/www
+```
+Backups:
+```
+/etc/one-click/wordpress/backups/<domain>
+```
+SSL certificates:
+```
+/etc/letsencrypt/live/<domain>
+```
 ### Notes
 
-- The WordPress module is designed to run with **non-root users where possible** to avoid permission conflicts.  
-- Ensure DNS A records (www and non-www) point to your server before deployment.  
-- Admin credentials and database passwords must meet minimum complexity requirements.  
+- Each WordPress site runs under its own system user and PHP-FPM pool
+- Resource usage is controlled via systemd slices per domain
+- DNS A records for both root and www must point to the server before SSL issuance
+- SSL provisioning depends on successful domain validation and port 80 availability
+- Failures in SSL do not block site provisioning; HTTP deployment continues safely
+- All credentials (database and admin) are generated or validated with enforced complexity rules
 
 ## OS Reinstall
 
-- Network-based OS deployment
-- Modular loader architecture
-- Primary + fallback mirror support
-- 24-hour module caching (TTL)
-- Atomic temporary file replacement
-- Automatic fallback to cached module if network fails
+The One-Click OS Reinstall module is a network-based server provisioning and recovery system that wraps an external reinstall engine (reinstall.sh) with a guided, fault-tolerant, and interactive selection layer.
+
+It is designed for bare-metal recovery, VPS redeployment, and remote OS imaging, with built-in resilience for unstable network conditions.
+
+Unlike traditional reinstall tools, this module adds:
+
+- Mirror redundancy
+- Interactive OS selection
+- Secure credential handling
+- Optional SSH key provisioning
+- Structured OS/image mapping
+- Safe confirmation flow before destructive actions
 
 Designed for remote or recovery-only environments.
 
+### Image Mapping System
+
+OS options are dynamically parsed from the upstream reinstall engine and normalized into a structured selection list.
+
+Supported OS families include:
+
+Debian / Ubuntu
+CentOS / Rocky / AlmaLinux / RHEL
+Fedora / OpenSUSE / Alpine
+Windows Server variants
+Other netboot-compatible images
+
+Each OS may include multiple version mappings resolved at runtime.
+
 ## Migration & Backup Modes
 
-- `dd` block-level disk migration
-- `rsync` incremental backups
-- Profile-based configuration
-- Dry-run support
-- `rclone` integration
-- Snapshot-aware workflows
-- Non-interactive automation flags
+One-Click Migrator enables safe, automated, and reproducible server migrations across physical machines, virtual machines, and cloud environments.
 
-Suitable for:
+It supports both full-disk cloning and incremental file synchronization, with built-in recovery tooling and automated post-migration repair workflows.
+
+The tool is designed for reliability in production environments where downtime, consistency, and recoverability are critical.
+
+- Block-level disk cloning using dd
+- Incremental file synchronization via rsync
+- Profile-driven configuration management
+- Safe execution with dry-run validation
+- Cloud storage support via rclone
+- Snapshot-aware migration workflows
+- Fully automated non-interactive mode
+
+### Core Features
+#### Migration Modes:
+
+##### Block Level Cloning (dd)
+
+- Bit-for-bit disk replication
+- Preserves bootloader, partitions, and filesystem structure
+- Suitable for full system duplication
+
+##### File Level Synchronization (rsync)
+
+- Incremental, bandwidth-efficient transfers
+- Supports resume and partial sync
+- Ideal for live or staged migrations
+
+### Backup & Safety Mechanisms
+
+- Dry-run mode for validation before execution
+- Snapshot-aware workflows (where supported)
+- Pre-migration system state capture
+- Automatic backup of critical configuration files
+- Service state tracking and restoration
+
+### Recovery System
+
+- Embedded recovery environment generation
+- Custom initramfs-based rescue mode
+- Automated GRUB repair utilities
+- Post-migration filesystem repair scripts
+- Emergency SSH access via Dropbear in recovery mode
+
+### Designed For:
 
 - Hardware replacement
 - RAID rebuild workflows
 - VPS migrations
 - Provider transitions
 
-## Boot & Recovery Tooling
+### Boot & Recovery Tooling
 
 - EFI remount automation
 - GRUB reinstall assistance
@@ -255,12 +341,25 @@ Designed for systems that **fail to boot after disk or migration operations**.
 
 ## Network Repair Module
 
-- Network configuration snapshot
-- Automated repair routines
-- Fallback restoration logic
-- Safe rollback model
+A resilient network recovery utility designed for unstable or remote environments.
 
-Built for remote recovery scenarios where SSH access may be unstable.
+### Core Features
+
+- **Configuration Snapshots** – Capture the current network state for safe recovery points
+- **Automated Repair Routines** – Attempt intelligent fixes for common connectivity failures
+- **Fallback Restoration Logic** – Reapply known working configurations when issues persist
+- **Safe Rollback Model** – Restore previous states without risking further disruption
+
+### Purpose
+
+Built specifically for remote systems where SSH access may be unreliable or degraded.
+
+When prior snapshots exist, the module can reliably restore a known-good network state.
+Without them, it switches to adaptive repair logic—making calculated attempts to recover connectivity.
+
+### Notice
+
+This tool improves recovery chances but does **not guarantee** a successful fix in all scenarios.
 
 ## RuleEngine – Human-Readable Firewall Management
 
@@ -475,7 +574,7 @@ Improper spacing may cause the parser to interpret the command as natural langua
 
 Use `raw:` when you need full control over advanced match extensions.
 
-## Security Considerations
+### Security Considerations
 
 - Root privileges are required to modify firewall rules.
 - Always review generated commands, especially when opening sensitive ports (22, 80, 443, 3389).
