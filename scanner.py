@@ -20,6 +20,7 @@ backup_dir = "/etc/one-click/backup/guard"
 binaries_dir = os.path.join(backup_dir, "binaries")
 baseline_file = os.path.join(backup_dir, "system_baseline.json")
 quarantine_dir = os.path.join(backup_dir, "quarantine")
+quarantine_path = os.path.join(backup_dir, "quarantine")
 log_file = "/var/log/one-click/system_scans.log"
 event_log = "/var/log/one-click/system_events.log"
 hash_lock = threading.Lock()
@@ -37,9 +38,12 @@ reset, blue, yellow, green, red = "\033[0m", "\033[94m", "\033[93m", "\033[92m",
 def display(msg, level="INFO"):
     colors = {"ERROR": red, "INFO": blue, "WARN": yellow, "SUCCESS": green, "ALERT": red, "CRITICAL": red}
     print(f"{colors.get(level, blue)}[{level}]{reset} {msg}")
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    log_dir = os.path.dirname(log_file)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
     with open(log_file, "a") as f:
         f.write(f"[{datetime.now()}] [{level}] {msg}\n")
+    secure_log_permissions(log_file)
 def emit_event(event_type, data):
     event = {
         "timestamp": int(time.time()), 
@@ -48,9 +52,12 @@ def emit_event(event_type, data):
         "data": data
     }
     print(json.dumps(event))
-    os.makedirs(os.path.dirname(event_log), exist_ok=True)
+    log_dir = os.path.dirname(event_log)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
     with open(event_log, "a") as f:
         f.write(json.dumps(event) + "\n")
+    secure_log_permissions(event_log)
 # ==== Confirmation ====
 def confirm_action(prompt_text):
     prompt = f"{yellow}[CONFIRM]{reset} {prompt_text} (y|n): "
@@ -72,8 +79,30 @@ def sha256_file(path):
             for chunk in iter(lambda: f.read(4096), b""):
                 h.update(chunk)
         return h.hexdigest()
-    except:
+    except Exception as e:
+        display(f"Access denied or error hashing {path}: {e}", "CRITICAL")
         return None
+
+def compare_with_fresh_package(path):
+    try:
+        if shutil.which("apt-get"):
+            pkg = subprocess.check_output(["dpkg", "-S", path]).decode().split(":")[0]
+            subprocess.call(["apt-get", "download", pkg], stdout=subprocess.DEVNULL)
+            deb = [f for f in os.listdir(".") if f.startswith(pkg) and f.endswith(".deb")][0]
+            import tempfile
+            tmpdir = tempfile.mkdtemp(prefix="pkgcheck_")
+            subprocess.run(
+                ["dpkg-deb", "-x", deb, tmpdir],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15
+            )
+            clean_path = os.path.join(tmpdir, path.lstrip("/"))
+            return sha256_file(path) == sha256_file(clean_path)
+    except:
+        return False
+    return False
+    shutil.rmtree(tmpdir, ignore_errors=True)
 # ==== Permissions Check =====
 def check_permissions(path):
     try:
@@ -84,6 +113,14 @@ def check_permissions(path):
             display(f"{path} world writable", "CRITICAL")
     except Exception as e:
         display(f"Permission check failed for {path}: {e}", "WARN")
+# ==== Secure Logs ====
+def secure_log_permissions(path):
+    try:
+        if os.path.exists(path):
+            os.chown(path, 0, 0)
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception as e:
+        print(f"{red}[ERROR]{reset} Failed to secure log {path}: {e}")
 # ==== Active Sessions ====
 def active_ssh_sessions():
     for proc in psutil.process_iter(['name', 'uids']):
@@ -126,27 +163,70 @@ def reinstall_from_package(path):
         display(f"Package reinstall failed for {path}: {e}", "CRITICAL")
         return False
 # ==== Sanitize ====
-def sanitize_file(file_path, stored_hash):
+def quarantine_file(file_path):
+    try:
+        if not os.path.exists(file_path):
+            return
+        os.makedirs(quarantine_path, exist_ok=True)
+        clean_name = file_path.lstrip("/").replace("/", "_")
+        dest = os.path.join(quarantine_path, f"{clean_name}.{int(time.time())}")
+        shutil.move(file_path, dest)
+        os.chown(dest, 0, 0)
+        os.chmod(dest, 0o600)
+        display(f"Quarantined {file_path} -> {dest}", "ALERT")
+    except Exception as e:
+        display(f"Failed to quarantine {file_path}: {e}", "ERROR")
+        
+def sanitize_file(file_path, stored_hash, current_hash):
+    display(f"Attempting remediation for {file_path}", "WARN")
+    display(f"Stored hash: {stored_hash}", "INFO")
+    display(f"Current hash: {current_hash}", "INFO")
     if file_path in critical_auth and active_ssh_sessions_full():
-        display(f"Skipping auto-restoration of {file_path} due to active session", "WARN")
+        display(f"Skipping {file_path} (active SSH session detected)", "CRITICAL")
+        emit_event("remediation_skipped_active_session", {"file": file_path})
         return False
-    if os.path.exists(file_path):
-        quarantine(file_path)
+    pkg_clean = verify_binary_with_package_manager(file_path)
+    if pkg_clean:
+        display(f"{file_path} verified via package manager", "SUCCESS")
+        update_baseline_hash(file_path, current_hash)
+        return True
+    if compare_with_fresh_package(file_path):
+        display(f"{file_path} matches official package binary", "SUCCESS")
+        update_baseline_hash(file_path, current_hash)
+        return True
+    if not active_ssh_sessions_full():
+        quarantine_file(file_path)
+    else:
+        display(f"Skipping quarantine due to active SSH session", "WARN")
     clean_name = file_path.lstrip("/").replace("/", "_")
     backup_path = os.path.join(binaries_dir, clean_name)
-    if not stored_hash:
-        display(f"No stored hash for {file_path}, skipping restore", "WARN")
-        return False
-    if os.path.exists(backup_path) and sha256_file(backup_path) == stored_hash:
-        try:
-            shutil.copy2(backup_path, file_path)
-            display(f"Restored {file_path} from local backup", "SUCCESS")
-            return True
-        except Exception as e:
-            display(f"Local restore failed: {e}", "WARN")
+    if stored_hash and os.path.exists(backup_path):
+        if sha256_file(backup_path) == stored_hash:
+            try:
+                shutil.copy2(backup_path, file_path)
+                display(f"Restored {file_path} from backup", "SUCCESS")
+                emit_event("restored_from_backup", {"file": file_path})
+                return True
+            except Exception as e:
+                display(f"Backup restore failed: {e}", "ERROR")
     if not active_ssh_sessions_full():
-        return reinstall_from_package(file_path)
-    display(f"Could not safely restore {file_path}", "CRITICAL")
+        if reinstall_from_package(file_path):
+            new_hash = sha256_file(file_path)
+            update_baseline_hash(file_path, new_hash)
+            emit_event("reinstalled_package", {"file": file_path})
+            return True
+    display(f"No clean source found for {file_path}", "WARN")
+    if os.environ.get("IDS_AUTO_TRUST") == "1":
+        display(f"Auto-trusting new hash for {file_path}", "WARN")
+        update_baseline_hash(file_path, current_hash)
+        emit_event("baseline_auto_trust", {"file": file_path})
+        return True
+    if confirm_action(f"Trust this new version of {file_path}?"):
+        update_baseline_hash(file_path, current_hash)
+        emit_event("baseline_manual_trust", {"file": file_path})
+        return True
+    display(f"Remediation failed for {file_path}", "CRITICAL")
+    emit_event("remediation_failed", {"file": file_path})
     return False
 # ==== Cleanup ====
 def cleanup_quarantine():
@@ -161,6 +241,20 @@ def cleanup_quarantine():
                 display(f"Purged old quarantine file: {f}", "INFO")
         except:
             pass
+# ==== New Trust ====
+def update_baseline_hash(file_path, new_hash):
+    try:
+        with open(baseline_file) as f:
+            baseline = json.load(f)
+        baseline["hashes"][file_path] = new_hash
+        subprocess.call(["chattr", "-i", baseline_file], stderr=subprocess.DEVNULL)
+        with open(baseline_file, "w") as f:
+            json.dump(baseline, f, indent=4)
+        subprocess.call(["chattr", "+i", baseline_file], stderr=subprocess.DEVNULL)
+        display(f"Baseline updated for {file_path}", "SUCCESS")
+        emit_event("baseline_updated", {"file": file_path})
+    except Exception as e:
+        display(f"Failed to update baseline: {e}", "ERROR")
 # ==== Log Rotate ====
 def rotate_logs(target_file, max_backups=5):
     if not os.path.exists(target_file) or os.path.getsize(target_file) < 10 * 1024 * 1024:
@@ -172,9 +266,29 @@ def rotate_logs(target_file, max_backups=5):
         if os.path.exists(s):
             os.rename(s, d)
     with open(target_file, 'rb') as f_in:
-        with gzip.open(f"{target_file}.1.gz", 'wb') as f_out:
+        gz_file = f"{target_file}.1.gz"
+        with gzip.open(gz_file, 'wb') as f_out:
             shutil.copyfileobj(f_in, f_out)
-    open(target_file, 'w').close()
+        secure_log_permissions(gz_file) # Secure the compressed backup
+    with open(target_file, 'w') as f:
+        f.close()
+    secure_log_permissions(target_file)
+# ==== Verify Proceed ====
+def verify_binary_with_package_manager(path):
+    try:
+        if shutil.which("dpkg"):
+            result = subprocess.run(["dpkg", "-V"], capture_output=True, text=True)
+            return path not in result.stdout
+        elif shutil.which("rpm"):
+            result = subprocess.run(["rpm", "-V", subprocess.check_output(["rpm", "-qf", path]).decode().strip()],
+                                    capture_output=True, text=True)
+            for line in result.stdout.splitlines():
+                if path in line:
+                    return False
+            return True
+    except:
+        return False
+    return False
 # ==== Discovery ====
 def scan_temp():
     display("Performing deep temp folder scan...", "SUCCESS")
@@ -218,7 +332,8 @@ def rootkit_checks():
 def check_path():
     path_env = os.environ.get("PATH", "")
     for p in path_env.split(":"):
-        if p in ["/tmp", "/dev/shm", "/var/tmp"]:
+        risky = ["/tmp", "/dev/shm", "/var/tmp"]
+        if not p.startswith("/") or any(p.startswith(r) for r in risky):
             display(f"Unsafe PATH detected: {p}", "CRITICAL")
 # ==== Cron Checks ====
 def check_cron_systemd():
@@ -281,7 +396,7 @@ def check_integrity(baseline):
         if current_hash != stored_hash:
             display(f"Integrity failure: {f}", "CRITICAL")
             emit_event("binary_integrity_failure", {"file": f})
-            sanitize_file(f, stored_hash)
+            sanitize_file(f, stored_hash, current_hash)
         else:
             display(f"Verified {f}", "SUCCESS")
 # ==== Uninstall ====
@@ -323,7 +438,7 @@ def create_baseline():
             h = sha256_file(p)
             if h:
                 with hash_lock:
-                    hashes[p] = h  # thread-safe update
+                    hashes[p] = h  
                 if os.path.dirname(p) in ["/bin","/usr/bin","/usr/sbin"]:
                     clean_name = p.lstrip("/").replace("/", "_")
                     backup_path = os.path.join(binaries_dir, clean_name)
@@ -336,8 +451,11 @@ def create_baseline():
             if os.path.abspath(root).startswith(os.path.abspath(backup_dir)):
                 continue
             file_paths = [os.path.join(root, f) for f in files]
-            with ThreadPoolExecutor(max_workers=12) as executor:
-                executor.map(process_file, file_paths)
+            cpu_count = os.cpu_count() or 2
+            max_workers = cpu_count * 2 
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            executor.map(process_file, file_paths)
+    executor.shutdown(wait=True)
     users = {u.pw_name: u.pw_uid for u in pwd.getpwall()}
     with open(baseline_file, "w") as f:
         json.dump({"hashes": hashes, "users": users}, f, indent=4)
@@ -347,6 +465,20 @@ def create_baseline():
         display("Baseline file locked with chattr +i", "INFO")
     except Exception as e:
         display(f"Failed to lock baseline file: {e}", "WARN")
+# ==== Running Del Bnaries ====
+def check_deleted_binaries():
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        ).stdout
+        for line in out.splitlines():
+            if "deleted" in line:
+                display(f"Running deleted binary detected: {line}", "CRITICAL")
+    except:
+        pass
 # ==== Logical Scan ====
 def scan(deep=False):
     rotate_logs(log_file)
@@ -354,8 +486,12 @@ def scan(deep=False):
     if not os.path.exists(baseline_file):
         display("Baseline missing. Run with --init first", "CRITICAL")
         return
-    with open(baseline_file) as f:
-        baseline = json.load(f)
+    try:
+        with open(baseline_file) as f:
+            baseline = json.load(f)
+    except Exception as e:
+        display(f"Baseline corrupted: {e}", "CRITICAL")
+        return
     display("--- Scan Initiated ---", "INFO")
     cleanup_quarantine()
     check_path()
@@ -367,6 +503,7 @@ def scan(deep=False):
     check_integrity(baseline)
     if deep:
         scan_temp()
+        check_deleted_binaries()
 # ==== Main Scan ====
 if __name__=="__main__":
     if os.getuid()!=0:
