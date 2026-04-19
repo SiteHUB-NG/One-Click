@@ -32,52 +32,6 @@ The toolkit is suitable for VPS, dedicated servers, and bare-metal systems. Oper
 .PP
 All commands are explicit and user-initiated. Destructive operations require confirmation to protect system integrity.
 
-.SH SECURITY & AUDITING
-
-.SS IDS (Intrusion Detection System)
-The built-in IDS monitors integrity of system binaries and critical directories (e.g., /bin, /sbin, /etc). 
-.IP \(bu 2
-.B Baseline:
-Creates a cryptographically signed snapshot of the "clean" system state on first execution.
-.IP \(bu 2
-.B Monitoring:
-Subsequent scans compare the live system against the baseline to detect unauthorized modifications, file replacements, or malware persistence.
-
-.SS Security Audits
-Provides deep inspection of the server, including active socket analysis, process tree validation, and reputation lookups for active connections via external intelligence APIs.
-
-.SH RULE-ENGINE (Firewall Management)
-The 
-.B rule-engine
-is a human-parsable wrapper for 
-.B iptables 
-and 
-.B nftables.
-It allows administrators to manage firewalls in natural language while maintaining extreme safety.
-
-.SS Triple-Layer Lockout Protection
-Prevents accidental remote lockout using three layers:
-.IP "1. Visual Guard:"
-Displays a clear summary of translated commands and affected ports before execution.
-.IP "2. Namespace Dry-Run:"
-Spawns an isolated network namespace, clones the current firewall state, and tests new rules against simulated critical services (SSH, DNS, Web) before modifying production.
-.IP "3. Auto-Rollback (Transactional Commit):"
-After applying live rules, the system enters a "Pending" state. The user has 
-.B 15 seconds
-to confirm connectivity. If no confirmation occurs, the previous configuration is automatically restored.
-
-.SH WORDPRESS & WEB INSTALLER
-The WordPress module implements a "Site-as-a-Container" approach without Docker overhead.
-.IP \(bu 2
-.B Resource Isolation:
-Each site runs under its own Linux user and PHP-FPM pool.
-.IP \(bu 2
-.B Systemd Slices:
-CPU and RAM limits are enforced per site via systemd slices.
-.IP \(bu 2
-.B Automated Backups:
-Supports local snapshots and remote off-site rsync/rclone scheduling per domain.
-
 .SH COMMANDS
 .TS
 tab(|) box;
@@ -103,25 +57,6 @@ cron | Configure scheduled automation tasks.
 --version | Display version information.
 uninstall | Remove One-Click and all associated files.
 help | Display the interactive help menu.
-.TE
-
-.SH RULE-ENGINE SUBCOMMANDS
-Usage:
-.B one-click rule-engine "<natural language command>"
-
-.TS
-tab(|) box;
-l l.
-Subcommand | Description
-_
-allow/drop/reject | Traffic actions (accept, discard silently, or notify).
-from/to | Specify source or destination (IP, CIDR, or Alias).
-multiport/range | Handle multiple ports or contiguous ranges.
-alias-create | Define a named group of IPs (e.g., "office").
-audit ssh | Display unique IPs and usernames from brute-force attempts.
-audit lookup | Query IP reputation via AbuseIPDB.
-audit scan | Trigger IDS integrity/malware scan.
---dry-run | Force namespace testing of the provided command.
 .TE
 
 .SH EXAMPLES
@@ -181,391 +116,841 @@ one-click cron
 one-click uninstall
 .RE
 
-.SH WORDPRESS
+.SH WORDPRESS & WEB PROVISIONING ENGINE
+
 The
-.B one-click
-tool includes a built-in WordPress automation module for unattended or guided site deployment. This module handles webserver configuration, database setup, optional caching, and SSL certificate provisioning.
+.B One-Click WordPress module
+is a system-level site provisioning engine that deploys fully isolated web applications with automated webserver, database, SSL, and runtime configuration.
+
+It does not function as a simple WordPress installer. Instead, it orchestrates full-stack environment creation for each domain, treating every site as an independent system service.
+
+.SS CORE FUNCTIONAL MODEL
+
+Each deployment is treated as a fully isolated application unit:
+
+.IP \(bu 2
+Dedicated Linux system user per site
+.IP \(bu 2
+Dedicated PHP-FPM pool per domain
+.IP \(bu 2
+Independent webserver virtual host (Nginx or Apache)
+.IP \(bu 2
+Dedicated database per site with unique credentials
+.IP \(bu 2
+Filesystem isolation under /etc/one-click
+.IP \(bu 2
+Systemd-based resource control per site
 
 .PP
-Before using these commands, ensure DNS A records for both the root domain and the www subdomain point to this server’s IP.
+This design avoids containerization while still enforcing strong multi-site isolation.
 
-.PP
-WordPress sites installed via
-.B one-click
-are located under:
+.SS WHAT THE SYSTEM ACTUALLY DOES
+
+The WordPress module is responsible for:
+
+.IP \(bu 2
+Provisioning webserver configurations (vhosts, document roots)
+.IP \(bu 2
+Creating and configuring databases dynamically
+.IP \(bu 2
+Installing WordPress via WP-CLI automation
+.IP \(bu 2
+Generating secure admin credentials
+.IP \(bu 2
+Applying PHP-FPM pool isolation per domain
+.IP \(bu 2
+Managing SSL certificates via Certbot
+.IP \(bu 2
+Applying system-level resource constraints (systemd slices)
+.IP \(bu 2
+Handling backup lifecycle per site
+.IP \(bu 2
+Maintaining deterministic directory structure
+
+.SS FILESYSTEM STRUCTURE
+
+All sites are deployed under:
+
 .RS
 /etc/one-click/wordpress/<domain>/www
 .RE
-Databases are dynamically named based on the site and user.
-
-.SH WORDPRESS COMMANDS
-Usage:
-
-.RS
-.B one-click --wp-create
-.RE
-
-Installs a new WordPress site interactively. Prompts for:
-
-.IP \(bu 2
-Domain name (validated with regex)
-
-.IP \(bu 2
-Site title
-
-.IP \(bu 2
-Admin username and password (enforced minimum complexity)
-
-.IP \(bu 2
-Admin email
-
-.IP \(bu 2
-Database username and password
-
-.IP \(bu 2
-Webserver choice (Nginx or Apache)
-
-.IP \(bu 2
-Optional Redis plugin activation
-
-.PP
-Installer actions:
-
-.IP \(bu 2
-Install required packages (webserver, PHP, MariaDB, certbot, etc.)
-
-.IP \(bu 2
-Configure selected webserver with document root and virtual host
-
-.IP \(bu 2
-Create database and user (or reuse existing)
-
-.IP \(bu 2
-Download and configure WordPress via WP‑CLI
-
-.IP \(bu 2
-Optionally install plugins including caching and security tools
-
-.IP \(bu 2
-Attempt Let's Encrypt SSL provisioning and update WordPress URLs
-
-.PP
-If SSL provisioning fails, users can retry, skip, or modify options.
-
-.RS
-.B one-click --wp-ssl <domain>
-.RE
-
-Ensures SSL is provisioned for an existing WordPress site:
-
-.IP \(bu 2
-Validates DNS for domain and www subdomain
-
-.IP \(bu 2
-Invokes Certbot to issue or renew certificate
-
-.IP \(bu 2
-Reloads configured webserver
-
-.IP \(bu 2
-Updates WordPress URLs to HTTPS if successful
-
-.PP
-If DNS or Certbot fails, options are provided to retry, change contact email, view logs, or skip.
-
-.SH EXAMPLES
-Install a new WordPress site:
-.RS
-.B one-click --wp-create
-.RE
-
-Provision SSL for existing site:
-.RS
-.B one-click --wp-ssl example.com
-.RE
-
-.SH NOTES
-WordPress site files:
-.RS
-/etc/one-click/wordpress/www/<domain>
-.RE
 
 Backups:
+
 .RS
 /etc/one-click/wordpress/backups/<domain>
 .RE
 
-SSL certificates managed by Certbot:
+SSL certificates:
+
 .RS
 /etc/letsencrypt/live/<domain>
 .RE
 
+.SS INSTALLATION BEHAVIOR
+
+The installer performs a deterministic provisioning pipeline:
+
+.IP "1."
+Validates domain format and checks DNS resolution (root + www expected)
+
+.IP "2."
+Installs or verifies required dependencies (web server, PHP, MariaDB, certbot, WP-CLI)
+
+.IP "3."
+Creates isolated system user and directory structure for the domain
+
+.IP "4."
+Configures selected webserver (Nginx or Apache virtual host)
+
+.IP "5."
+Creates dedicated database and credentials per site
+
+.IP "6."
+Downloads and installs WordPress using WP-CLI
+
+.IP "7."
+Generates wp-config.php with secure salts and DB bindings
+
+.IP "8."
+Creates WordPress admin user with enforced password policy
+
+.IP "9."
+Optionally installs performance/security plugins (e.g. caching)
+
+.IP "10."
+Attempts automatic SSL provisioning via Certbot
+
+.IP "11."
+Rewrites WordPress URLs to HTTPS if SSL succeeds
+
 .PP
-Domains must resolve to this server before SSL issuance.
+If SSL fails, the site remains operational over HTTP with retry options available or the ability to issue a self signed certificate.
 
-.SH RULE-ENGINE
-The
-.B rule-engine
-module provides natural-language firewall management within
-.B one-click.
+.SS COMMAND INTERFACE
 
-.PP
-It allows administrators to construct human-readable firewall rules, which are automatically translated into valid commands for the active firewall backend (supported: iptables/ip6tables, nftables).
+.RS
+.B one-click --wp-create
+.RE
 
-.PP
-Firewall changes use a staged commit process with automatic rollback. A
-.B 10-second verification timer
-ensures that changes are reverted if confirmation is not received.
+Creates a new fully isolated WordPress site.
 
-.SH RULE-ENGINE FEATURES
-.IP \(bu 2
-Human-readable firewall parsing
+.RS
+.B one-click --ssl <domain>
+.RE
 
-.IP \(bu 2
-Support for TCP, UDP, ICMP, and multiport rules
+Provisions or renews SSL certificates for an existing site.
+
+.SS ISOLATION MODEL
+
+Each site is isolated at multiple layers:
 
 .IP \(bu 2
-Source and destination filtering via IPv4, IPv6, and CIDR ranges
+Process isolation via PHP-FPM pools
+.IP \(bu 2
+User-level isolation via Linux system users
+.IP \(bu 2
+Network exposure controlled via webserver virtual hosts
+.IP \(bu 2
+Resource isolation via systemd slices
+.IP \(bu 2
+Credential isolation via per-site database users
+
+.SS BACKUP SYSTEM
+
+Each site includes automated backup capability:
 
 .IP \(bu 2
-Service-name to port mapping (e.g., ssh → 22)
+Filesystem snapshot of WordPress installation
+.IP \(bu 2
+Database export per domain
+.IP \(bu 2
+Configuration metadata preservation
+.IP \(bu 2
+Timestamped backup rotation per domain
+
+.SS SSL MANAGEMENT
+
+SSL provisioning is handled through Certbot automation:
 
 .IP \(bu 2
-Automatic firewall backend detection
+Domain validation via DNS resolution
+.IP \(bu 2
+Certificate issuance or renewal
+.IP \(bu 2
+Webserver reload after certificate install
+.IP \(bu 2
+Automatic HTTPS URL migration inside WordPress
+
+.SS DESIGN CHARACTERISTICS
+
+This system differs from typical WordPress installers:
 
 .IP \(bu 2
-Natural language and raw command chaining
+Not shared-hosting based
+.IP \(bu 2
+Not container-based (no Docker dependency)
+.IP \(bu 2
+Not single-directory deployment model
+.IP \(bu 2
+Not manual webserver configuration
+.IP \(bu 2
+Fully automated system-level provisioning engine
+
+.SS EXAMPLES
+
+Create a new site:
+
+.RS
+.B one-click --wp-create
+.RE
+
+Provision SSL:
+
+.RS
+.B one-click --wp-ssl example.com
+.RE
+
+.SS FAILURE HANDLING
+
+The system includes recovery behavior:
 
 .IP \(bu 2
-Firewall rule alias system for IP groups
+Partial installs are handled safely
+.IP \(bu 2
+Database creation rollback where possible
+.IP \(bu 2
+Installation logs preserved for debugging
+.IP \(bu 2
+SSL failure does not block site deployment
+.SH RULE-ENGINE (Firewall Management)
+
+.B Rule-engine
+is a high-level firewall orchestration layer that translates human-readable intent into safe, backend-specific firewall rules.
+
+It supports multiple firewall backends including
+.B iptables
+and
+.B nftables,
+while maintaining a unified interface and enforcing strict safety guarantees.
+
+Unlike traditional firewall tools, rule-engine focuses on:
 
 .IP \(bu 2
-Sensitive port protection
+Human-readable rule definitions
+.IP \(bu 2
+Automatic validation and duplicate prevention
+.IP \(bu 2
+Built-in intrusion detection and mitigation
+.IP \(bu 2
+Transactional rule application with rollback protection
+.IP \(bu 2
+Full audit logging and traceability
+
+.SS RULE PARSING
+
+User input is parsed into structured components:
 
 .IP \(bu 2
-Dry-run preview mode (--dry-run)
+Source (IP address or alias)
+.IP \(bu 2
+Protocol (tcp, udp, icmp, any)
+.IP \(bu 2
+Port or port range
+.IP \(bu 2
+Action (ACCEPT, DROP, REJECT, LOG)
+
+The engine translates these into backend-specific firewall commands and stages them for validation prior to execution.
+
+Before any rule is applied:
+
+.IP "1."
+Syntax validation and duplicate detection are performed
+.IP "2."
+Sensitive services (e.g., SSH, DNS, HTTP) are checked for risk impact
+.IP "3."
+A preview of the generated firewall commands is displayed to the user
+
+No rule is executed without explicit confirmation.
+
+.SS TRANSACTIONAL RULE APPLICATION
+
+Firewall changes are executed using a transactional model designed to prevent lockout.
+
+.IP "1. Dry Run"
+Rules are simulated without modifying the active firewall. Critical services are validated.
+
+.IP "2. Pending Apply"
+Rules are applied to the live firewall in a temporary state.
+
+.IP "3. Confirmation Window"
+The user has
+.B 15 seconds
+to confirm connectivity after application.
+
+.IP "4. Auto-Rollback"
+If confirmation is not received, all changes are automatically reverted.
+
+This ensures remote access cannot be permanently disrupted by misconfiguration.
+
+.SS AUTOMATED MITIGATION (GUARD MODE)
+
+Rule-engine includes a real-time intrusion detection and response system.
+
+.TP
+.B Passive Mode
+Events are logged only. No blocking is performed.
+
+.TP
+.B Automatic Mode
+Detected threats trigger immediate firewall enforcement.
+
+Detected behaviors include:
 
 .IP \(bu 2
-Audit mode for rule inspection
+SSH brute-force attempts (via system logs)
+.IP \(bu 2
+Abnormal connection spikes (DDoS pattern detection)
+
+When thresholds are exceeded:
 
 .IP \(bu 2
-Full firewall backup and restore
+The source IP is blocked using firewall rules
+.IP \(bu 2
+A temporary timeout is applied
+.IP \(bu 2
+The event is logged for audit purposes
+
+Example:
+.IP \(bu 2
+5 failed SSH logins → IP blocked for 300 seconds
+
+.SS TEMPORARY BLOCKING
+
+The engine supports time-based firewall rules.
+
+When a block is applied:
 
 .IP \(bu 2
-Transactional commit with rollback protection
+The rule is inserted immediately into the firewall
+.IP \(bu 2
+A background process tracks expiration time
+.IP \(bu 2
+The rule is automatically removed when the timeout expires
 
-.SH RULE-ENGINE COMMANDS
+All actions are recorded in the mitigation history log.
+
+.SS REAL-TIME MONITORING
+
+The system continuously monitors:
+
+.IP \(bu 2
+System authentication logs (SSH failures, auth errors)
+.IP \(bu 2
+Active network connections (via ss/netstat)
+
+Monitoring daemons run in the background and feed events into the mitigation engine.
+
+.SS AUDITING AND VISIBILITY
+
+Rule-engine provides multiple audit views:
+
+.TP
+.B Rule Traversal
+Displays active firewall rules across all tables and chains, including packet counters and blocked traffic totals.
+
+.TP
+.B Mitigation Logs
+Shows recent automated actions, including:
+.IP \(bu 2
+Timestamp
+.IP \(bu 2
+Source IP
+.IP \(bu 2
+Action taken
+.IP \(bu 2
+Duration or reason
+
+.TP
+.B Attack Statistics
+Aggregates repeated offenders, showing:
+.IP \(bu 2
+Attempt counts
+.IP \(bu 2
+Targeted services or users
+.IP \(bu 2
+Last-seen timestamps
+
+.TP
+.B Global Banlist
+Combines RuleEngine bans with external systems such as Fail2Ban.
+
+.SS BACKUP AND RESTORE
+
+Firewall configurations can be exported and restored.
+
+.IP \(bu 2
+Backups capture full firewall state of the active backend
+.IP \(bu 2
+Restore operations flush existing rules before applying backup
+.IP \(bu 2
+Backend type is automatically detected from backup metadata
+
+.SS ALIAS MANAGEMENT
+
+Aliases allow multiple IP addresses to be grouped under a single identifier.
+
+Example:
+.IP \(bu 2
+"office" → 192.168.1.10, 192.168.1.11
+
+Aliases can be used in place of raw IP addresses in firewall rules.
+
+Features:
+
+.IP \(bu 2
+Create and delete aliases
+.IP \(bu 2
+Add or remove IPs from existing aliases
+.IP \(bu 2
+Persistent storage via configuration files
+
+.SS SAFETY FEATURES
+
+The rule-engine enforces multiple safety layers:
+
+.TP
+.B Duplicate Prevention
+Prevents redundant rule insertion.
+
+.TP
+.B Sensitive Port Protection
+Warns before modifying critical services (e.g., SSH).
+
+.TP
+.B Lockout Protection
+Uses simulation and rollback to prevent loss of connectivity.
+
+.TP
+.B Rule Deduplication
+Detects and optionally removes duplicate firewall entries.
+
+.SS INTEGRATION
+
+Rule-engine integrates with:
+
+.IP \(bu 2
+Fail2Ban (jail creation and ban visibility)
+.IP \(bu 2
+AbuseIPDB (IP reputation lookup and reporting)
+.IP \(bu 2
+System logging via journalctl
+
+.SS EXAMPLES
+
+Block SSH access from an IP:
+.IP
+.B one-click rule-engine "drop ssh from 1.2.3.4"
+
+Allow HTTP traffic:
+.IP
+.B one-click rule-engine "allow http"
+
+View firewall rules:
+.IP
+.B one-click rule-engine show
+
+View security audit logs:
+.IP
+.B one-click rule-engine audit
+
+.SS SUMMARY
+
+The rule-engine combines firewall management, intrusion detection, and automated mitigation into a unified system.
+
+It is designed to:
+
+.IP \(bu 2
+Simplify firewall administration
+.IP \(bu 2
+Prevent misconfiguration and lockouts
+.IP \(bu 2
+Provide real-time threat response
+.IP \(bu 2
+Ensure full auditability of all actions
+
+.SH RULE-ENGINE SUBCOMMANDS
+
 Usage:
+.B one-click rule-engine "<natural language command>"
 
-.RS
-.B one-click rule-engine <subcommand> [options]
-.RE
+.SS CORE TRAFFIC RULES
 
 .TS
 tab(|) box;
 l l.
-Subcommand | Description
+Command | Description
 _
---dry-run | Preview rules without applying them
-open [table|all] | Display current firewall rules
-flush <table> | Remove all rules from a specific table
-flush all | Remove all rules from all tables
-backup | save | Create firewall configuration backup
-restore | Restore firewall rules from a backup
-raw <iptables cmd> | Execute raw iptables command
-allow <arg> | Accept incoming traffic (port or service)
-deny | drop <arg> | Silently drop matching packets
-reject | decline <arg> | Reject packets with notification
-delete | remove <arg> | Delete rules, backups, or aliases
-mask | hide | Enable NAT masquerading for source/destination IPs
-enable icmp | echo | Allow ICMP ping responses
-disable icmp | echo | Disable ICMP ping responses
-tcp | Apply rule to TCP traffic (default)
-udp | Apply rule to UDP traffic
-multiport <ports...> | Apply rule to multiple ports
+allow <arg> | Allow traffic (service, port, or rule)
+drop <arg> | Silently block traffic
+deny <arg> | Alias for drop
+reject <arg> | Block traffic and notify sender
+.TE
+
+.SS SOURCE / DESTINATION FILTERING
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+from <IP|CIDR|alias> | Specify source
+to <IP|CIDR|alias> | Specify destination
+.TE
+
+.SS PROTOCOL CONTROL
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+tcp | Apply rule to TCP (default)
+udp | Apply rule to UDP
+icmp | Enable/disable ping handling
+.TE
+
+.SS PORT CONTROL
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+multiport <p1 p2 ...> | Apply rule to multiple ports
 range <start-end> | Apply rule to port range
-alias-create | Create named IP groups
-alias-append | Add IPs to existing alias
-alias-prune | Remove IPs from alias
-sensitive <ports...> | Mark ports as sensitive (requires confirmation)
-sensitive-list | Show all sensitive ports
-sensitive-remove | Remove ports from sensitive list
-from <IP|alias> | Specify source IP/alias
-to <IP|alias> | Specify destination IP/alias
-audit | Inspect rules, drops, and intrusions
+.TE
+
+.SS ALIAS MANAGEMENT
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+alias-create <name> <ips...> | Create IP group alias
+alias-append <name> <ip> | Add IP to alias
+alias-prune <name> <ip> | Remove IP from alias
+delete alias <name> | Remove alias entirely
+.TE
+
+.SS SENSITIVE PORT CONTROL
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+sensitive <ports...> | Mark ports as high-risk
+sensitive-list | Show sensitive ports
+sensitive-remove <ports...> | Unmark ports
+.TE
+
+.SS AUDIT COMMANDS
+
+.TS
+tab(|) box;
+l l.
+Command | Description
+_
+audit | Show security events
 audit ssh | Show SSH brute-force attempts
-audit block <ID> [dur=N] | Temporarily block attacker (minutes)
-audit block <ID> perm | Permanently ban IP
-audit unblock <ID> | Remove previously applied block
-audit history | View attacker history
-audit banlist | Show combined RuleEngine and Fail2Ban ban list
-audit key <APIKEY> | Configure AbuseIPDB API key
-audit lookup <IP> | Check IP reputation via AbuseIPDB
-audit scan | Lightweight file/malware scan
-audit scan --deep | Deep scan filesystem and binaries
+audit history | Show mitigation history
+audit banlist | Show all banned IPs
+audit lookup <IP> | Check IP reputation (AbuseIPDB)
+audit scan | Run integrity scan
+audit scan --deep | Full system scan
 .TE
 
-.PP
-Subcommands may be chained using
-.B and
-or
-.B ,
-to execute multiple rules in a single command.
+.SS BLOCK CONTROL
 
-.RS
-.B Example:
-one-click rule-engine "allow ssh and allow https"
-.RE
-
-.RS
-.B Example with comma chaining:
-one-click rule-engine "allow 80,allow 443"
-.RE
-
-.SH RULE-ENGINE TRAFFIC RULES
 .TS
 tab(|) box;
 l l.
-Subcommand | Description
+Command | Description
 _
-allow <arg> | Accept incoming traffic (ports or service names)
-deny | drop <arg> | Silently discard matching packets
-reject | decline <arg> | Reject packets with a notification
-delete | remove <arg> | Remove rules, backups, or aliases
-mask | hide | Apply NAT masquerading
+audit block <ID> | Temporarily block attacker
+audit block <ID> perm | Permanently ban attacker
+audit unblock <ID> | Remove block
 .TE
 
-.SH RULE-ENGINE PROTOCOL CONTROL
+.SS SYSTEM CONTROL
+
 .TS
 tab(|) box;
 l l.
-Subcommand | Description
+Command | Description
 _
-enable icmp | echo | Enable ICMP echo requests (ping)
-disable icmp | echo | Disable ICMP echo requests
-tcp | udp | Specify protocol for rule application
+backup | Create firewall backup
+restore | Restore firewall backup
+flush <table> | Flush table rules
+flush all | Flush all rules
+show | Display firewall rules
+open [table|all] | Display ruleset view
+mask | Enable NAT masquerading
 .TE
 
-.SH RULE-ENGINE PORT HANDLING
+.SS SECURITY CONTROLS
+
 .TS
 tab(|) box;
 l l.
-Subcommand | Description
+Command | Description
 _
-multiport <ports...> | Apply rule to multiple ports simultaneously
-range <start-end> | Apply rule across a contiguous port range
+enable icmp | Allow ping responses
+disable icmp | Block ping responses
+--dry-run | Simulate rules without applying
 .TE
 
-.SH RULE-ENGINE IP ALIASES
-.TS
-tab(|) box;
-l l.
-Subcommand | Description
-_
-alias-create | Create a named IP group
-alias-append | Add IPs to an existing alias
-alias-prune | Remove IPs from an alias
-.TE
+.SS RULE-ENGINE FULL EXAMPLES
 
-.SH RULE-ENGINE SENSITIVE PORTS
-.TS
-tab(|) box;
-l l.
-Subcommand | Description
-_
-sensitive <ports...> | Mark ports as sensitive to require confirmation
-sensitive-list | Display all sensitive ports
-sensitive-remove | Remove ports from the sensitive list
-.TE
+These examples demonstrate real-world usage of the rule-engine across firewall control, auditing, intrusion response, and system management.
 
-.SH RULE-ENGINE SOURCE/DESTINATION FILTERING
-.TS
-tab(|) box;
-l l.
-Subcommand | Description
-_
-from <IP/CIDR> | Specify source IP or subnet for the rule
-to <IP/CIDR> | Specify destination IP or subnet for the rule
-.TE
+.SS BASIC TRAFFIC CONTROL
 
-.SH RULE-ENGINE AUDIT AND SECURITY
-.TS
-tab(|) box;
-l l.
-Subcommand | Description
-_
-audit | Inspect firewall activity and events
-audit ssh | Show SSH brute-force attempts with IPs and usernames
-audit block <ID> [dur=N|perm] | Temporarily (minutes) or permanently block a detected IP
-audit unblock <ID> | Remove a previously applied block
-audit history | View historical attacker or rule actions
-audit banlist | Show combined RuleEngine and Fail2Ban ban lists
-audit key <APIKEY> | Configure AbuseIPDB API key
-audit lookup <IP> | Check IP reputation via AbuseIPDB
-audit scan [--deep] | Run file integrity and malware scan; use --deep for full scan
-.TE
-
-.SH RULE-ENGINE EXAMPLES
-Allow SSH:
-.RS
+.IP
 .B one-click rule-engine "allow ssh"
-.RE
+Allow SSH access (port 22)
 
-Block SMTP traffic:
-.RS
+.IP
+.B one-click rule-engine "allow http"
+Allow HTTP traffic (port 80)
+
+.IP
+.B one-click rule-engine "allow https"
+Allow HTTPS traffic (port 443)
+
+.IP
 .B one-click rule-engine "drop smtp"
-.RE
+Block SMTP traffic silently
 
-Allow HTTP and HTTPS together:
-.RS
+.IP
+.B one-click rule-engine "reject ftp"
+Reject FTP traffic with notification
+
+.SS MULTIPLE RULES / CHAINING
+
+.IP
 .B one-click rule-engine "allow http and allow https"
-.RE
+Allow multiple services in one command
 
-Enable ICMP (ping) responses:
-.RS
-.B one-click rule-engine "enable icmp"
-.RE
+.IP
+.B one-click rule-engine "allow 80, allow 443"
+Comma-separated rule chaining
 
-Preview rules without applying:
-.RS
-.B one-click rule-engine --dry-run "allow 443"
-.RE
+.IP
+.B one-click rule-engine "allow ssh and drop smtp"
+Mixed allow and block rules in one execution
 
-Create an alias and use it:
-.RS
-.B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
-.RE
+.SS SOURCE-BASED RULES
 
-.RS
+.IP
+.B one-click rule-engine "drop ssh from 1.2.3.4"
+Block SSH access from a specific IP
+
+.IP
+.B one-click rule-engine "allow http from 10.0.0.5"
+Allow HTTP only from a specific host
+
+.IP
 .B one-click rule-engine "allow ssh from office"
-.RE
+Allow SSH from alias group
 
-Perform a deep audit scan:
-.RS
-.B one-click rule-engine "audit scan --deep"
-.RE
+.IP
+.B one-click rule-engine "drop all from 192.168.1.0/24"
+Block entire subnet
 
-Backup firewall configuration:
-.RS
-.B one-click rule-engine "backup firewall"
-.RE
+.SS ALIAS MANAGEMENT
 
-Restore firewall configuration:
-.RS
-.B one-click rule-engine "restore firewall"
-.RE
-
-.SH RULE-ENGINE ALIAS MANAGEMENT
-
-Create a new IP alias:
-.RS
+.IP
 .B one-click rule-engine "alias-create office 192.168.1.10 192.168.1.11"
-.RE
+Create IP group named "office"
 
-Add IP addresses to an existing alias:
-.RS
+.IP
 .B one-click rule-engine "alias-append office 192.168.1.12"
-.RE
+Add IP to existing alias
+
+.IP
+.B one-click rule-engine "alias-prune office 192.168.1.10"
+Remove IP from alias
+
+.IP
+.B one-click rule-engine "allow ssh from office"
+Use alias in firewall rule
+
+.SS PORT AND RANGE CONTROL
+
+.IP
+.B one-click rule-engine "allow multiport 80 443 8080"
+Allow multiple ports at once
+
+.IP
+.B one-click rule-engine "allow range 1000-2000"
+Allow port range
+
+.IP
+.B one-click rule-engine "drop range 21-23"
+Block service range (FTP/SSH/Telnet)
+
+.SS PROTOCOL-SPECIFIC RULES
+
+.IP
+.B one-click rule-engine "allow dns udp"
+Allow DNS over UDP
+
+.IP
+.B one-click rule-engine "allow ssh tcp"
+Force TCP-only rule
+
+.IP
+.B one-click rule-engine "drop icmp"
+Block ping requests
+
+.IP
+.B one-click rule-engine "enable icmp"
+Allow ping responses
+
+.SS SECURITY AUDIT COMMANDS
+
+.IP
+.B one-click rule-engine "audit"
+Show general security activity
+
+.IP
+.B one-click rule-engine "audit ssh"
+Show SSH brute-force attempts
+
+.IP
+.B one-click rule-engine "audit history"
+Show mitigation and block history
+
+.IP
+.B one-click rule-engine "audit banlist"
+Show all banned IPs (RuleEngine + Fail2Ban)
+
+.IP
+.B one-click rule-engine "audit lookup 8.8.8.8"
+Check IP reputation via AbuseIPDB
+
+.IP
+.B one-click rule-engine "audit scan"
+Run system integrity scan
+
+.IP
+.B one-click rule-engine "audit scan --deep"
+Full filesystem and binary scan
+
+.SS ATTACK MITIGATION
+
+.IP
+.B one-click rule-engine "audit block 12"
+Temporarily block attacker ID 12
+
+.IP
+.B one-click rule-engine "audit block 12 perm"
+Permanently ban attacker
+
+.IP
+.B one-click rule-engine "audit unblock 12"
+Remove block from attacker
+
+.IP
+.B one-click rule-engine "audit block 5 dur=300"
+Block attacker for 5 minutes
+
+.SS SYSTEM MANAGEMENT
+
+.IP
+.B one-click rule-engine "show"
+Display current firewall rules
+
+.IP
+.B one-click rule-engine "open all"
+Show full ruleset across tables
+
+.IP
+.B one-click rule-engine "flush all"
+Clear entire firewall configuration
+
+.IP
+.B one-click rule-engine "flush filter"
+Clear specific table
+
+.IP
+.B one-click rule-engine "backup"
+Save current firewall configuration
+
+.IP
+.B one-click rule-engine "restore"
+Restore previous firewall state
+
+.IP
+.B one-click rule-engine "mask"
+Enable NAT masquerading
+
+.SS SAFETY AND TESTING
+
+.IP
+.B one-click rule-engine --dry-run "allow 443"
+Simulate HTTPS rule without applying
+
+.IP
+.B one-click rule-engine --dry-run "drop ssh from 10.0.0.5"
+Test firewall impact safely
+
+.IP
+.B one-click rule-engine "sensitive 22 3306"
+Mark SSH and MySQL as critical ports
+
+.SS COMPLEX REAL-WORLD EXAMPLES
+
+.IP
+.B one-click rule-engine "allow ssh from office and allow https"
+Allow secure admin + web traffic
+
+.IP
+.B one-click rule-engine "allow http from office and drop all from 1.2.3.4"
+Mixed whitelist + blacklist rule
+
+.IP
+.B one-click rule-engine "alias-create trusted 10.0.0.1 10.0.0.2 and allow ssh from trusted"
+Create trusted network and allow access
+
+.IP
+.B one-click rule-engine "audit ssh and audit block 7 perm"
+Inspect attack and permanently ban
+
+.IP
+.B one-click rule-engine "audit scan --deep and backup"
+Run security scan and backup firewall
+
+.IP
+.B one-click rule-engine "allow range 1000-2000 and drop smtp"
+Open app range but block mail
+
+.SS CHAINED NATURAL LANGUAGE COMMANDS
+
+.IP
+.B one-click rule-engine "allow ssh and drop smtp and allow https"
+Multiple independent actions in one request
+
+.IP
+.B one-click rule-engine "allow 80, allow 443, allow 22"
+Comma-separated batch rules
+
+.IP
+.B one-click rule-engine "drop ssh from 1.2.3.4 and audit block 1 perm"
+Block attacker and permanently ban
 
 .SH REINSTALL
 
