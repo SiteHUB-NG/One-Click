@@ -28,6 +28,9 @@ x_site_gwd="$x_site_gw"
 x_site_ipd="$x_site_ip"
 st=$(date +%s)
 virt=$(systemd-detect-virt || true)
+if ! vnstat -i "$nic" 2>&1 /dev/null; then 
+  install_dep "vnstat" "command -v vnstat" "vnstat" "$pkg_mgr" true
+fi
 sys_info() {
   strip_ansi() {
     sed -E 's/\x1B\[[0-9;]*[mK]//g'
@@ -103,7 +106,17 @@ sys_info() {
       "├───┴────────┼──────────┐" \
       "│${key_col}System Time ${blue}│${desc_col} $(date +'%T')${blue} │" \
       "│${key_col}Time Elapsed${blue}│${desc_col} ${timer}${blue} │" \
-      "└────────────┴──────────┘${reset}"
+      "├────────────┴──────────┼───────────────────────────────────────────────────────────────────┐${reset}" \
+      "│${key_col}Bandwidth Used Today${blue}   │${desc_col}$(awk  '/today/{print "RX: " $2$3 " | TX: " $5$6 " | Total: " $8$9 " | Rate: " $11$12}' <(vnstat -i "$nic" 2> /dev/null)) ${blue}    " \
+      "│${key_col}Bandwidth Used Monthly${blue} │${desc_col}$(awk  -v date="$(date +'%Y-%m')" '$1==date{print "RX: " $2$3 " | TX: " $5$6 " | Total: " $8$9 " | Rate: " $11$12}' <(vnstat -i "$nic" -m 2> /dev/null)) ${blue}    " \
+      "└───────────────────────┴───────────────────────────────────────────────────────────────────┘${reset}" " " " "
+      if [[ "$hide_mode" == true ]]; then
+        printf "\nHidden: ON %s" "$spinner2"
+        printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
+      else
+        printf "\nHidden: OFF %s" "$spinner2"
+        printf '\n%s\n' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
+      fi
   }
   # ==== Info Table ====
   print_table() {
@@ -171,13 +184,6 @@ sys_info() {
       spinner="${spinner_frames[i]}"
       spinner2="${spinner_framess[i]}"
       printf "\rRefresh: ON %s" "$spinner"
-      if [[ "$hide_mode" == true ]]; then
-        printf "\nHidden: ON %s" "$spinner2"
-        printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
-      else
-        printf "\nHidden: OFF %s" "$spinner2"
-        printf '\n%s\n' "Press $(tput setaf 217)h$(tput sgr 0) to hide: "
-      fi
     fi
     if read -s -t 0.5 -n 1 key; then
       case "$key" in
