@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== One-Click Backup ==== #
 profiles_dir="/etc/one-click/backup-tool/profiles"
@@ -834,9 +834,7 @@ restore_menu() {
   restore_path="${restore_path:-/tmp/restore-preview}"
   mkdir -p "$restore_path"
   case "$restore_from" in
-    #################################################################
-    # LOCAL RESTORE
-    #################################################################
+    # ==== LOCAL RESTORE ====
     l)
       mapfile -t local_snaps < <(
         find "$dst_dir" -maxdepth 1 -mindepth 1 -type d \
@@ -860,7 +858,6 @@ restore_menu() {
         "$src_snap/"
         "$restore_path/"
       )
-
       wait_for_network
       create_service "${rsync_cmd_run[*]}" "Local Snapshot Restore"
       if "${rsync_cmd_run[@]}"; then
@@ -874,9 +871,7 @@ restore_menu() {
         restore_databases
       fi
       ;;
-    #################################################################
-    # REMOTE RESTORE (FIXED FOR TAR.GZ BACKUPS)
-    #################################################################
+    # ==== REMOTE RESTORE ====
     r)
       remote_base="${dst_dir}/rsync"
       if [[ "$req" == "y" || "$req" == "yes" ]]; then
@@ -934,9 +929,7 @@ restore_menu() {
         restore_databases
       fi
       ;;
-    #################################################################
-    # RCLONE RESTORE
-    #################################################################
+    # ==== RCLONE RESTORE ====
     c)
       rclone_check
       mapfile -t rclone_snaps < <(
@@ -969,7 +962,6 @@ restore_menu() {
         restore_databases
       fi
       ;;
-    #################################################################
     *)
       error "Invalid restore option selected"
       return
