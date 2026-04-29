@@ -1795,6 +1795,7 @@ apply_block() {
 # ==== Dispatcher ====
 start_journal_dispatcher() {
   local pid_file="/var/run/one_click_journal.pid"
+  touch "$monitor_ssh_file"
   if [[ -f "$pid_file" ]]; then
     local old_pid=$(cat "$pid_file")
 	local service_name=$(awk 'NR==2{print $NF}' <(ps -p "$old_pid"))
@@ -2007,7 +2008,7 @@ show_rules() {
 		  fi
           if [[ "$line" == *"@addr-set"* ]]; then
             local set_name=$(echo "$line" | grep -oP '@\K[a-zA-Z0-9_-]+')
-             ips=$(nft list set "$family" "$table_name" "$set_name" 2>/dev/null | grep -oP '(\d{1,3}\.){3}\d{1,3}')
+             ips=$((nft list set "$family" "$table_name" "$set_name" 2>/dev/null | grep -oP '(\d{1,3}\.){3}\d{1,3}') || true)
              for ip in $ips; do
                printf "          │    └── [${cnt}] $current_pkts pkts ▶ ${red}Banned IP:${reset} %s\n" "$ip"
 			   ((cnt++))
@@ -2073,7 +2074,9 @@ show_rules() {
       fi
     fi
 	printf "${blue}╚%s╝${reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
-    command -v start_monitors >/dev/null && start_monitors
+    if command -v start_monitors >/dev/null; then
+	  start_monitors
+	fi
 	set -o pipefail
 	return
   }
@@ -2439,6 +2442,7 @@ parse_firewall_command() {
   load_config() {
     [[ -f "$guard_file" ]] && source "$guard_file"
   }
+  start_monitors
   # ==== Collect AbuseIPDB Key ====
   if [[ "$rule_lower" =~ ^audit[[:space:]]+(set|key|set-abuse-key)[[:space:]]+([a-zA-Z0-9]+) ]]; then
     echo "${BASH_REMATCH[2]}" > "$abuse_conf"
@@ -2781,8 +2785,8 @@ parse_firewall_command() {
   # ==== Detect Audit ====
   if [[ "$rule_lower" =~ ^audit$ ]]; then
     guard_dir="/etc/one-click/rule-engine/guard/"
-    #monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
-    #monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
+    monitor_ddos_file="/etc/one-click/rule-engine/guard/ddos"
+    monitor_ssh_file="/etc/one-click/rule-engine/guard/ssh"
     auto_mitigate=0  # Flag: 0 = passive, 1 = auto mitigation
     mkdir -p "$guard_dir"
 	touch "$monitor_ssh_file" "$monitor_ddos_file"
