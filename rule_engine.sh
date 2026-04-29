@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 rule_engine() {
@@ -39,7 +39,7 @@ rule_engine() {
     fi
     install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
-    systemctl enable fail2ban --now
+    systemctl enable fail2ban --now &> /dev/null
   fi
   declare -gA alerted_ports=()
   engine_dir="/etc/one-click/rule-engine/"
