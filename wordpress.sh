@@ -1314,14 +1314,21 @@ install_letsencrypt() {
         3) warn "Skipping SSL setup."; return        ;;
         4)
           info "Installing self signed certificate"
+          if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
+            site="/etc/one-click/wordpress/${domain}/www"
+          elif [[ -d "/etc/one-click/sites/${domain}" ]]; then
+            site="/etc/one-click/sites/$domain/www"
+          fi
+          web_user=$(awk '/www/{print $3}' <(ls -l "$site"))
+          webserver_user=$(awk '/www/{print $4}' <(ls -l "$site"))
           openssl req -x509 -nodes -days 365 \
             -newkey rsa:4096 \
-            -keyout ${site}-oneclick_selfsigned-privkey.pem \
+            -keyout ${site}-oneclick_selfsigned-privkey.key \
             -out ${site}-oneclick_selfsigned-fullchain.pem \
             -subj "/C=NG/ST=Lagos/L=Lagos/O=Site/CN=$domain"
-          chmod 640 ${site}-oneclick_selfsigned-privkey.pem
-          chmod 644 ${site}-oneclick_selfsigned-fullchain.pem
-          chown "$web_user":"$webserver_user" "${site}-oneclick_selfsigned-fullchain.pem" "${site}-oneclick_selfsigned-privkey.pem"
+          chmod 640 ${domain}-oneclick_selfsigned-privkey.pem
+          chmod 644 ${domain}-oneclick_selfsigned-fullchain.pem
+          chown "$web_user":"$webserver_user" "${site}-oneclick_selfsigned-fullchain.pem" "${site}-oneclick_selfsigned-privkey.key"
           if [[ "$webserver" == "nginx" ]]; then
             if [[ "$pkg_mgr" == "apt" ]]; then
               nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
@@ -1334,7 +1341,8 @@ install_letsencrypt() {
                 h;
                 n;
                 G;
-                s,se.*,return 301 https://\$host\$request_uri;\n}\n\nserver {\n    listen 443 ssl; #Managed By One-Click\n    server_name $domain\n,}
+                s,se.*,return 301 https://\$host\$request_uri;\n}\n\nserver {\n    listen 443 ssl; #Managed By One-Click\n    server_name $domain www.${domain};\n\n    ssl_certificate ${site}-oneclick_selfsigned-fullchain.pem;\n    ssl_certificate_key ${site}-oneclick_selfsigned-privkey.key;\n,
+              };
             "  "$nginx_conf_file"
           else
             if [[ "$pkg_mgr" == "apt" ]]; then
@@ -1349,13 +1357,14 @@ install_letsencrypt() {
                 h;
                 n;
                 G;
-                s,D.*,SSLEngine on\n    SSLCertificateFile ${site}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${site}-oneclick_selfsigned-privkey.pem\n,
+                s,D.*,SSLEngine on\n    SSLCertificateFile ${site}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${site}-oneclick_selfsigned-privkey.key\n,
               }
             " "$ssl_apache_conf"
           fi
           if systemctl reload "$apachehttpd" 2> /dev/null; then
             success "Self signed certificate installed"
           fi
+          read -p "Click Enter to exit: "
           return
           ;;
         5) less /var/log/letsencrypt/letsencrypt.log ;;
@@ -1809,7 +1818,16 @@ create_static_site() {
   case "$webserver_choice" in
     1) 
       webserver="nginx"
-      webserver_user="$webserver"
+      if id nginx &> /dev/null; then
+        webserver_user="nginx"
+      elif id www-data &> /dev/null; then
+        webserver_user="www-data"
+      fi
+      if (systemctl is-active apache2 || systemctl is-active httpd) &> /dev/null; then
+        error "Apache is already installed"
+        warn "Either continue using Apache or disable/remove it"
+        return 1
+      fi
       ;;
     2) 
       webserver="apache"
@@ -1817,6 +1835,11 @@ create_static_site() {
         webserver_user=www-data
       else
         webserver_user="apache"
+      fi
+      if systemctl is-active nginx 2> /dev/null; then
+        error "Nginx is already installed"
+        warn "Either continue using Nginx or disable/remove it"
+        return 1
       fi
       ;;
     *) echo "Invalid selection"; return 1 ;;
@@ -1826,7 +1849,6 @@ create_static_site() {
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   site_dir="/etc/one-click/sites/$domain/www"
   mkdir -p "$site_dir"
-  chown "$web_user":"$webserver_user" "$site_dir"
   touch /etc/one-click/sites/$domain/meta.conf
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
   while true; do
@@ -1839,6 +1861,7 @@ EOF
   success "New site prepared at $site_dir"
   install_webserver static "$domain" "$site_dir"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "sites"
+  chown "$web_user":"$webserver_user" "$site_dir"
   dns_check
   one-click engine "allow $webserver"
   install_letsencrypt static
@@ -2294,8 +2317,10 @@ install_php() {
   setup_repos
   info "Installing PHP $ver and common extensions..."
   if [[ "${os_family:-}" == "debian" ]]; then
-    $pkg_mgr install -y "php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" || return 1
+    $pkg_mgr install -y "php-fpm php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" || return 1
     fpm_service="php$ver-fpm"
+    v=$(sed -En '/PHP/s/^[^0-9]*([0-9]\.).*/\1/p' <(php -v))
+    cp /usr/sbin/php-fpm${v}* /usr/sbin/php-fpm
   else
     $pkg_mgr module reset php -y
     $pkg_mgr module enable "php:remi-$ver" -y
