@@ -756,6 +756,7 @@ staging_vhost_nginx() {
   cat > "/etc/nginx/conf.d/staging.$domain.conf" <<EOF
 server {
     listen 80;
+    listen [::]:80;
     server_name staging.$domain;
 
     access_log /var/log/nginx/${domain}_staging/access.log oneclick;
@@ -1035,6 +1036,7 @@ nginx_conf() {
   cat << EOF > "$nginx_conf_file"
 server {
     listen 80;
+    listen [::]:80;
     server_name $domain www.$domain;
 
     root /etc/one-click/wordpress/$domain/www;
@@ -1146,9 +1148,10 @@ webroot_nginx_template() {
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
     nginx_log_dir="/var/log/nginx"
   fi
-  sed -Ei '/listen 80;|^\}/d;' "$nginx_conf_file"
+  sed -Ei '/listen (\[::\]:)?80;|^\}/d;' "$nginx_conf_file"
   cat << EOF >> "$nginx_conf_file"
     listen 443 ssl; # Managed By One-Click
+    listen [::]:443 ssl; # Managed By One-Click
     ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem; # Managed By One-Click
     ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem; # Managed By One-Click
 
@@ -1165,6 +1168,7 @@ server {
 
 
     listen 80;
+    listen [::]:80;
     server_name $domain www.$domain;
     return 404; # Managed By One-Click
 }
@@ -1299,6 +1303,11 @@ install_letsencrypt() {
       read -rp "${cyan}[USER]${reset} Choose an option: " choice
       case "$choice" in
         1)
+          if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
+            site="/etc/one-click/wordpress/${domain}/www"
+          elif [[ -d "/etc/one-click/sites/${domain}" ]]; then
+            site="/etc/one-click/sites/$domain/www"
+          fi
           if certbot certonly --webroot -w "${site:-${site_dir:-}}" -d "$domain" -d "www.$domain" --non-interactive --agree-tos -m "$email"; then
             bot_installed=0
             manual_install=1
@@ -1883,6 +1892,7 @@ nginx_static_conf() {
   cat << EOF > "$nginx_conf_file"
 server {
     listen 80;
+    listen [::]:80;
     server_name $domain www.$domain;
 
     root $site_dir;
