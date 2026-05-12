@@ -314,7 +314,7 @@ main_board() {
   while true; do
     paste <(printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
-      "║                ${yellow}ONE-CLICK WEB BACKUP MANAGER${blue}                ║" \
+      "║                ${yellow}ONE-CLICK WEB ADMIN         ${blue}                ║" \
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ ${magenta}1${blue}  ║ ${green}Backup Restores & Rollback  ${blue}                          ║" \
       "║ ${magenta}2${blue}  ║ ${green}Manage Profiles  ${blue}                                     ║" \
@@ -322,6 +322,7 @@ main_board() {
       "║ ${magenta}4${blue}  ║ ${green}Cron   ${blue}                                               ║" \
       "║ ${magenta}5${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
       "║ ${magenta}6${blue}  ║ ${green}Guard   ${blue}                                              ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Delete Site${blue}                                           ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
@@ -342,8 +343,26 @@ main_board() {
           install_wp_cron "-staticback" "One-Click Static Backup" "$domain"
         fi
         ;;
-      5) select_domain  ;;
+      5) select_domain           ;;
       6) view_security "$domain" ;;
+      7)
+        read -rp "This action will delete the domain $domain.
+        read -rp "Are you sure you want to continue (y|n): " del_domain
+        del_domain="${del_domain,,}"
+        if [[ "$del_domain" != "y" && "$del_domain" != "yes" ]]
+          error "Not progressing with domain deleteion of $domain"
+        else
+          if [[ -d /etc/one-click/wordpress/$domain ]]; then
+            rm -rf /etc/one-click/wordpress/$domain
+          else
+            rm -rf /etc/one-click/sites/$domain
+          fi
+          rm -f /etc/nginx/conf.d/${domain}.conf
+          rm -f /etc/nginx/sites-enabled/${domain}.conf
+          rm -f /etc/nginx/sites-available/${domain}.conf
+          rm -f /etc/httpd/conf.d/${domain}.conf
+        fi
+        ;;
       0)
         echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
@@ -937,6 +956,11 @@ wp_rollback_menu() {
 install_webserver() {
   local mode
   mode="$1"
+  if [[ "$mode" == "wordpress" ]]; then
+    mode_ver="$mode"
+  else
+    mode_ver="sites"
+  fi
   domain="${2:-}"
   site_dir="${3:-}"
   if [[ "$pkg_mgr" == "apt" ]]; then
@@ -1039,7 +1063,7 @@ server {
     listen [::]:80;
     server_name $domain www.$domain;
 
-    root /etc/one-click/wordpress/$domain/www;
+    root /etc/one-click/$mode_ver/$domain/www;
     index index.php index.html;
 
     access_log /var/log/nginx/${domain}/access.log oneclick;
@@ -1088,7 +1112,7 @@ apache_conf() {
     ServerAlias www.$domain
     #Redirect permanent / https://$domain/
 
-    DocumentRoot /etc/one-click/wordpress/$domain/www
+    DocumentRoot /etc/one-click/$mode_ver/$domain/www
 
     <Directory /etc/one-click/wordpress/$domain/www>
         AllowOverride All
@@ -1119,7 +1143,7 @@ apache_ssl_conf() {
     ServerName $domain
     ServerAlias www.$domain
 
-    DocumentRoot /etc/one-click/wordpress/$domain/www
+    DocumentRoot /etc/one-click/$mode_ver/$domain/www
 
     <Directory /etc/one-click/wordpress/$domain/www>
         AllowOverride All
