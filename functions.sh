@@ -1797,16 +1797,16 @@ start_journal_dispatcher() {
   local pid_file="/var/run/one_click_journal.pid"
   touch "$monitor_ssh_file"
   if [[ -f "$pid_file" ]]; then
-    local old_pid=$(cat "$pid_file")
+    local old_pid=($(cat "$pid_file"))
 	local service_name=$(awk 'NR==2{print $NF}' <(ps -p "$old_pid"))
-    if ps -p "$old_pid" > /dev/null 2>&1; then
+    if ps -p "${old_pid[@]}" > /dev/null 2>&1; then
 	  if [[ "$service_name" != "journalctl" ]]; then
 	    awk '{print $1}' <(pgrep -af journalctl) | while read line; do
 		  kill "$line"
 		  rm "$pid_file"
 		done
-	  else
-        return
+	  #else
+      # return
 	  fi
     else
       rm "$pid_file"
