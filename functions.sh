@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 mkdir -p "${log_dir:-}"
 touch "${log_error_file:-}" "${log_file:-}"
@@ -617,6 +617,26 @@ install_geekbench() {
   ) &    
   gb_pid="$!"
 }
+get_latest_gb() {
+  local arch_name arch_suffix major minor patch url
+  arch_name="${ARCH:-${arch:-$(uname -m)}}"
+  if [[ "$arch_name" =~ (aarch64|arm64|armv7|arm) ]]; then
+    arch_suffix="LinuxARMPreview"
+  else
+    arch_suffix="Linux"
+  fi
+  major="$1"
+  for ((minor=9; minor>=0; minor--)); do
+    for ((patch=9; patch>=0; patch--)); do
+      url="https://cdn.geekbench.com/Geekbench-${major}.${minor}.${patch}-${arch_suffix}.tar.gz"
+      if curl -fsI --connect-timeout 3 "$url" >/dev/null 2>&1; then
+        echo "$url"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
 geekbench_table() {
   local version gb_path url gb_url gb_run gb_cmd local_curl test_url scores single multi dl_cmd
   if command -v curl >/dev/null 2>&1; then
@@ -632,21 +652,14 @@ geekbench_table() {
   gb_url=""
   gb_cmd=""
   gb_run="False"
+  results_file="/etc/one-click/ocb/ocb_results.txt"
   # ==== Detect package ====
   if [[ $version == "6" ]]; then
-    if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
-      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz"
-    else
-      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-Linux.tar.gz"
-    fi
+    gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench6"
     gb_run="True"
   elif [[ $version == "5" ]]; then
-    if [[ "${arch:-}" == *aarch64* || "${arch:-}" == *arm* ]]; then
-      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
-    else
-      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
-    fi
+    gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench5"
     gb_run="True"
   else
@@ -681,7 +694,8 @@ geekbench_table() {
     return
   fi
   printf "${yellow}│ %-96s${reset}\r" "${green}Running GB$version benchmark...${yellow}"
-  test_url=$("$gb_path/$gb_cmd" --upload 2>/dev/null | grep -m1 https://browser | xargs)
+  output=$("$gb_path/$gb_cmd" 2>&1)
+  test_url=$(grep -Eom1 'https://browser\.geekbench\.com[^[:space:]]+' <<< "$output" || true)
   if [[ -z "$test_url" ]]; then
     printf "${blue}%-20s %-20s %-54s${reset}\n" \
       "│Geekbench" "GB${version}" "${red}Failed${blue}                                                    │"
@@ -697,14 +711,88 @@ geekbench_table() {
 	  s/[^>]*>([0-9]+).*/\1/p
 	}" <($dl_cmd "$test_url")
   )
-  single=$(head -1 <<< "$scores")
-  multi=$(tail -1 <<<  "$scores")
+  single=$(last=$(head -1 <<< "${scores}"); [[ "$last" == "" ]] && echo 0 || echo "$last")
+  multi=$(last=$(tail -1 <<< "${scores}"); [[ "$last" == "" ]] && echo 0 || echo "$last")
+  timestamp=$(date '+%F %T')
+  if [[ ! -f "$results_file" || ! -s "$results_file" ]]; then
+    first_run=1
+    echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
+    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Benchmark Status" "GB$version" "First benchmark run recorded"
+  else
+    first_run=0
+    last_line=$(tail -1 "$results_file")
+    IFS='|' read -r old_date old_single old_multi old_url <<< "$last_line"
+    single_diff=$((single - old_single))
+    multi_diff=$((multi - old_multi))
+	if [[ "$old_single" -ne 0 ]]; then
+      single_pct=$(awk -v single="$single" -v old="$old_single" "BEGIN {
+        if (old == 0)
+          print 0;
+        else
+          printf \"%.2f\", ((single - old) / old) * 100
+      }")
+	else
+	  single_pct=0
+	fi
+	if [[ "$old_multi" -ne 0 ]]; then
+      multi_pct=$(awk -v multi="$multi" -v old="$old_multi" "BEGIN {
+        if (old == 0)
+          print 0;
+        else
+          printf \"%.2f\", ((multi - old) / old) * 100
+      }")
+	else
+	  multi_pct=0
+	fi
+    if (( single_diff > 0 )); then
+      single_trend="Improved"
+      single_symbol="+"
+    elif (( single_diff < 0 )); then
+      single_trend="Degraded"
+      single_symbol=""
+    else
+      single_trend="No Change"
+      single_symbol=""
+    fi
+    if (( multi_diff > 0 )); then
+      multi_trend="Improved"
+      multi_symbol="+"
+    elif (( multi_diff < 0 )); then
+      multi_trend="Degraded"
+      multi_symbol=""
+    else
+      multi_trend="No Change"
+      multi_symbol=""
+    fi
+    echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
+  fi
+  if [[ "$single" -le 0 ]]; then
+    single="Results blocked by Cloudflare"
+  fi
+  if [[ "$multi" -le 0 ]]; then
+    multi="Results blocked by Cloudflare"
+  fi
   printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
     "Single Core" "GB$version" "$single"
   printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
     "Multi Core" "GB$version" "$multi"
   printf "${blue}│${cyan}%-20s %-20s %-56s${blue}│${reset}\n" \
     "Result URL" "GB$version" "$test_url"
+  if (( first_run == 0 )); then
+    printf "${blue}│${magenta}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Previous Test" "GB$version" "$old_date"
+    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Prev Single Core" "GB$version" "$old_single"
+    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Prev Multi Core" "GB$version" "$old_multi"
+    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Single Trend" "GB$version" \
+      "$single_trend (${single_symbol}${single_diff}, ${single_symbol}${single_pct}%)"
+    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Multi Trend" "GB$version" \
+      "$multi_trend (${multi_symbol}${multi_diff}, ${multi_symbol}${multi_pct}%)"
+  fi
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
