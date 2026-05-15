@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== Initialization ==== 
 export TERM="${TERM:-xterm}"
@@ -34,6 +34,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "────────────────────────────────────────────────────────────────────────────" \
     "  backup                  Backup or restore system data using rsync + rclone." \
     "  bench                   Run automated system benchmarks (CPU, disk, network)." \
+    "  bench-sys               Run only geekbench/sysbench benchmark." \
     "  cron                    Create or modify scheduled cron jobs." \
     "  engine | rule-engine    Natural-language firewall interface for iptables." \
     "  help                    Display this help menu." \
@@ -760,6 +761,7 @@ _one_click() {
     
     cmds["backup"]=""
     cmds["bench"]=""
+    cmds["bench-sys"]=""
     cmds["cron"]=""
     cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
     cmds["migrator"]=""
@@ -880,6 +882,7 @@ _one_click() {
     
     cmds["backup"]=""
     cmds["bench"]=""
+    cmds["bench-sys"]=""
     cmds["cron"]=""
     cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
     cmds["migrator"]=""
@@ -997,6 +1000,7 @@ map_one_click() {
     case "$i" in
       backup)           echo "--backup"      ;;
       bench)            echo "--bench"       ;;
+      bench-sys)        echo "-bench-cpu"    ;;
       engine)           echo "$i"            ;;
       migrator)         echo "--migrator"    ;;
       net-repair)       echo "--repair"      ;;
@@ -1097,7 +1101,12 @@ if [[ $# -gt 0 ]]; then
       ;;
     -c|--bench)
       load_ocb
-      run_ocb
+      run_ocb_pipe
+      shift
+      ;;
+    -bench-cpu)
+      load_ocb
+      cpu_sys
       shift
       ;;
     -d|--pv-drain)
@@ -1268,6 +1277,7 @@ if [[ $# -gt 0 ]]; then
         "  reinstall               OS reinstallation" \
         "  backup                  Backup with rsync + rclone" \
         "  bench                   Benchmarking tool automates the execution of tests" \
+        "  bench-sys               Run only geekbench/sysbench benchmark." \
         "  (engine|rule-engine)    Converts natural language into iptables commands" \
         "  menu                    Central menu with direct access to most tools." \
         "  migrator                System migration tool. Rsync + DD options." \
