@@ -10,13 +10,15 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== OCB Module ==== 
 collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
+if [[ "$pkg_mgr" == "apt" ]]; then
+  install_dep "chromium-headless-shell" "type sysbench" "sysbench" "$pkg_mgr" true
 # ==== Check System Resources ====
 clear
 no_gb=0
@@ -243,22 +245,17 @@ run_ocb() {
   version="${1:-6}"
   gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
   mkdir -p "$gb_path"
+  # ==== Detect package ====
   if [[ $version == "6" ]]; then
-    if [[ "${arch:-}" == *aarch64* || "${ARCH:-}" == *arm* ]]; then
-      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz"
-    else
-      gb_url="https://cdn.geekbench.com/Geekbench-6.5.0-Linux.tar.gz"
-    fi
+    gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench6"
     gb_run="True"
   elif [[ $version == "5" ]]; then
-    if [[ "${arch:-}" == *aarch64* || "${arch:-}" == *arm* ]]; then
-      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-LinuxARMPreview.tar.gz"
-    else
-      gb_url="https://cdn.geekbench.com/Geekbench-5.5.1-Linux.tar.gz"
-    fi
+    gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench5"
     gb_run="True"
+  else
+    return
   fi
   install_geekbench "$gb_url" "$gb_path" "$version"
   header_notice "$ocb_header" "$ocb_banner" "3" "62"
@@ -269,13 +266,49 @@ run_ocb() {
   fio_disk_benchmark
   ram_bench
   iperf_run
-  gb_check
   if (( no_gb == 1 )); then
-    run_sysbench
+    run_sysbench 
   else
-    geekbench_table "${version:-6}" "$gb_path"
+    geekbench_table "${version:-6}" "$gb_path" 
   fi
   end=$(date +%s)
   total_time "start" "end"
   exit 0
+}
+run_ocb_pipe() {
+  avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  mkdir -p /etc/one-click/ocb/benchmarks
+  gb_check
+  if (( no_gb == 1 )); then
+    run_ocb | tee -a /etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').sysbench
+  else
+    run_ocb | tee -a /etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-6}
+  fi
+}
+cpu_sys() {
+  avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  gb_check
+  if (( no_gb == 1 )); then
+    run_sysbench
+  else
+    version="${1:-6}"
+    gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+    mkdir -p "$gb_path"
+    # ==== Detect package ====
+    if [[ $version == "6" ]]; then
+      gb_url=$(get_latest_gb "$version") || return
+      gb_cmd="geekbench6"
+      gb_run="True"
+    elif [[ $version == "5" ]]; then
+      gb_url=$(get_latest_gb "$version") || return
+      gb_cmd="geekbench5"
+      gb_run="True"
+    else
+      return
+    fi
+    install_geekbench "$gb_url" "$gb_path" "$version"
+    geekbench_table "${version:-6}" "$gb_path"
+  fi
 }
