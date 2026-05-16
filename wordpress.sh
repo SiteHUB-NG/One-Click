@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ======================= # ======================== # ======================= #
-# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== WordPress ====
 if [[ "$pkg_mgr" == "apt" ]]; then
@@ -346,10 +346,10 @@ main_board() {
       5) select_domain           ;;
       6) view_security "$domain" ;;
       7)
-        read -rp "This action will delete the domain $domain.
+        read -rp "This action will delete the domain $domain."
         read -rp "Are you sure you want to continue (y|n): " del_domain
         del_domain="${del_domain,,}"
-        if [[ "$del_domain" != "y" && "$del_domain" != "yes" ]]
+        if [[ "$del_domain" != "y" && "$del_domain" != "yes" ]]; then
           error "Not progressing with domain deleteion of $domain"
         else
           if [[ -d /etc/one-click/wordpress/$domain ]]; then
