@@ -609,13 +609,21 @@ install_geekbench() {
   version="$3"
   gb_cmd="geekbench${version}"
   archive="/tmp/geekbench_${version}.tar.gz"
-  (
-    mkdir -p "$path"
-    curl -sL "$url" -o "$archive" || exit 1
-    tar -xzf "$archive" --strip-components=1 -C "$path" &> /dev/null || exit 1
-        chmod +x "$path/$gb_cmd"
-  ) &    
-  gb_pid="$!"
+  mkdir -p "$path" || exit 1
+  curl -fSL "$url" -o "$archive" &> /dev/null|| {
+    error "Download failed"
+    exit 1
+  }
+  tar -xzf "$archive" \
+    --strip-components=1 \
+    -C "$path" &> /dev/null || {
+    error "Extraction failed"
+    exit 1
+  }
+  chmod +x "$path/$gb_cmd" || {
+    echo "[GB] chmod failed"
+    exit 1
+  }
 }
 get_latest_gb() {
   local arch_name arch_suffix major minor patch url
@@ -676,16 +684,7 @@ geekbench_table() {
     "│ Geekbench Benchmark $version                                                                            │" \
     "├──────────────────────────────────────────────────────────────────────────────────────────────────┤"
   printf "${green}│ %-96s${reset}\r" "Preparing Geekbench $version..."
-  # ==== Check earlier download ====
-  if [[ -n "$gb_pid" ]]; then
-    if ! wait "$gb_pid"; then
-      printf "${red}%s${reset}\n" \
-        "│ Geekbench failed to install                                                                      │"
-      printf "${yellow}%s${reset}\n" \
-        "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
-      return
-    fi
-  fi
+  install_geekbench "$gb_url" "$gb_path" "$version"
   if [[ ! -x "$gb_path/$gb_cmd" ]]; then
     printf "${red}%s${reset}\n" \
       "│ Geekbench binary missing or not executable: $gb_path/$gb_cmd                                     │"
@@ -703,16 +702,23 @@ geekbench_table() {
       "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
     return
   fi
-  wait "$gb_pid"
   sleep 2
-  scores=$(sed -En \
-    "/<div class='score-container score-container-1 desktop'>|<div class='score-container desktop'>/ {
-	  n;
-	  s/[^>]*>([0-9]+).*/\1/p
-	}" <($dl_cmd "$test_url")
-  )
-  single=$(last=$(head -1 <<< "${scores}"); [[ "$last" == "" ]] && echo 0 || echo "$last")
-  multi=$(last=$(tail -1 <<< "${scores}"); [[ "$last" == "" ]] && echo 0 || echo "$last")
+  gb_id=$(sed 's/.*\///' <<< "$test_url")
+  api_response=$(curl -s \
+    -X POST http://api.oneclick.i.ng:3000/v1/geekbench/score \
+    -H "Content-Type: application/json" \
+    -d "{\"id\":\"$gb_id\",\"version\":$version}")
+  if [[ -z "$api_response" ]]; then
+    error "API error: empty response"
+    return 1
+  fi
+  single=$(jq -r '.benchmark.single' <<< "$api_response")
+  multi=$(jq -r '.benchmark.multi' <<< "$api_response")
+  # ==== Build Config File ====
+  printf '%s=%s\n' \
+    "single" "$single" \
+	"multi" "$multi" \
+	"gb_id" "$gb_id"  > /etc/one-click/ocb/temp.conf
   timestamp=$(date '+%F %T')
   if [[ ! -f "$results_file" || ! -s "$results_file" ]]; then
     first_run=1
@@ -1046,7 +1052,7 @@ fio_disk_benchmark() {
   rm -f "$fio_file"
 }
 iperf_locs=( \
-  "1500.mtu.he.net" "5201-5205" "HE Net" "San Jose, CA, US (10G)" "IPv4|IPv6" \
+  #"1500.mtu.he.net" "5201-5205" "HE Net" "San Jose, CA, US (10G)" "IPv4|IPv6" \
   "la.speedtest.clouvider.net" "5200-5209" "Clouvider" "Los Angeles, CA, US (10G)" "IPv4|IPv6" \
   "speedtest.nyc1.us.leaseweb.net" "5201-5210" "Leaseweb" "NYC, NY, US (10G)" "IPv4|IPv6" \
   "lon.speedtest.clouvider.net" "5200-5209" "Clouvider" "London, UK (10G)" "IPv4|IPv6" \
@@ -1146,20 +1152,29 @@ total_time() {
   val_width=78
   start_time=$1
   end_time=$2
+  result=$3
+  key=$4
   total_width=$((key_width + val_width + 7))
   inner_width=$((total_width - 2))
   border=$(printf '─%.0s' $(seq 1 "$inner_width"))
   time_taken=$(( end_time - start_time ))
   msg1="One-Click Bench completed in ${time_taken} sec"
+  msg2="Publish URL: $result"
   if (( ${time_taken} > 60 )); then
 	min=$(( time_taken / 60 ))
     sec=$(( time_taken % 60 ))
 	msg="One-Click Bench completed in ${min} min ${sec} sec"
 	printf "${blue}┌%s┐${reset}\n" "$border"
+	if [[ -n "$key" ]]; then
+      printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg2"
+	fi
     printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg"
     printf "${blue}└%s┘${reset}\n" "$border"
   else
     printf "${blue}┌%s┐${reset}\n" "$border"
+	if [[ -n "$key" ]]; then
+	  printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg2"
+	fi
     printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg1"
     printf "${blue}└%s┘${reset}\n" "$border"
   fi
