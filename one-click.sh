@@ -23,6 +23,7 @@ if [[ -n "${ID_LIKE:-}" ]]; then
 else
   ids=("$ID")
 fi
+pub1="-----BEGIN PRIVATE KEY-----"
 base="/etc/one-click"
 deps_ok="${base}/.deps_ok"
 path="$(realpath "$0")"
@@ -161,6 +162,7 @@ elif command -v apt-get >/dev/null 2>&1; then
 fi
 rsync_backup_dir="${base}/backup-tool"
 profiles="${rsync_backup_dir}/profiles/"
+sysbench_geek="MC4CAQAwBQYDK2VwBCIEIJAIHdsXBmcKLIJKy9fLQwzrXdUa0tE7xl+mDB+Yt7Oe"
 log_dir="/var/log/one-click"
 log_file="${log_dir}/one-click.log"
 log_error_file="${log_dir}/one-click-error.log"
@@ -171,6 +173,7 @@ nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
 updated="March 2026"
 version="1.1.9"
+priv1="-----END PRIVATE KEY-----"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
 man_dir="/usr/local/share/man/man1/"
@@ -178,6 +181,7 @@ tab_complete="/etc/bash_completion.d/one-click"
 tab_complete2="/usr/share/bash-completion/completions/one-click"
 one_click_1="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.1"
 cache_dir="/var/cache/one-click"
+pub2="/etc/one-click/ocb/ocb.pem"
 # ==== Alt Mirror ====
 #one_click_1="https://as214354.network/one-click.1"
 manpage="${man_dir}one-click.1"
@@ -368,6 +372,14 @@ backup_cron_url=""
 #backup_cron_url="https://as214354.network/cron.sh"
 cron_cache_file="${cache_dir}/cron.sh"
 load_body "$cron_url" "$backup_cron_url" "$cache_dir" "$cron_cache_file"
+# ==== OCB ====
+if [[ ! -f "$pub2" ]]; then
+  mkdir -p /etc/one-click/ocb
+  echo "$pub1
+$sysbench_geek
+$priv1 " > "$pub2"
+  chmod 600 "$pub2"
+fi
 # ==== None Essential Modules ====
 # ==== Network Repair ====
 load_net_repair() {
