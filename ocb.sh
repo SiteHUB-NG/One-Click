@@ -17,10 +17,26 @@ collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
-if [[ "$pkg_mgr" == "apt" ]]; then
-  install_dep "chromium-headless-shell" "type sysbench" "sysbench" "$pkg_mgr" true
+mkdir -p /etc/one-click/ocb/benchmarks
 # ==== Check System Resources ====
 clear
+if curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token -H "Content-Type: application/json" &> /dev/null; then
+  #key=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token -H "Content-Type: application/json" | jq -r .token)
+  challenge=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-challenge \
+    | jq -r .challenge)
+  echo -n "$challenge" > /tmp/ocb.txt
+  challenged=$(openssl pkeyutl -sign \
+    -inkey /etc/one-click/ocb/ocb.pem -rawin \
+    -in /tmp/ocb.txt | base64 -w0)
+  key=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"challenge\": \"$challenge\",
+      \"signature\": \"$challenged\"
+    }" | jq -r .token)
+else
+  warn "Token unavailable. Will not be able to publish results"
+fi
 no_gb=0
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
@@ -134,8 +150,8 @@ print_table() {
   print_row "$key_width" "$val_width" "VM-x/AMD-V" "$x_v"
   print_row "$key_width" "$val_width" "RAM" "$ram"
   print_row "$key_width" "$val_width" "Swap" "$swap"
-  lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}' | while read -r d; do
-    print_row "$key_width" "$val_width" "Disk$((++i))" "${yellow}${d}${blue} - $size"
+  lsblk -dno NAME,SIZE,TYPE | awk '$3=="disk"{print $1,$2}' | while read -r d s; do
+    print_row "$key_width" "$val_width" "Disk$((++i))" "${yellow}${d}${blue} - $s"
     if [[ -r /sys/block/$d/device/modalias ]]; then
       name=$(< /sys/block/$d/device/modalias)
     elif [[ -r /sys/block/$d/device/model ]]; then
@@ -223,6 +239,10 @@ run_sysbench() {
   min_time=$(awk -F: '/min:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
   avg_time=$(awk -F: '/avg:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
   max_time=$(awk -F: '/max:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  # ==== Config ====
+  printf '%s=%s\n' \
+    "avg_time" "$avg_time" \
+    "max_time" "$max_time" > /etc/one-click/ocb/temp.conf
   # ==== PRINT TABLE ====
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -257,7 +277,6 @@ run_ocb() {
   else
     return
   fi
-  install_geekbench "$gb_url" "$gb_path" "$version"
   header_notice "$ocb_header" "$ocb_banner" "3" "62"
   init
   expand_country "${country:-}"
@@ -271,30 +290,151 @@ run_ocb() {
   else
     geekbench_table "${version:-6}" "$gb_path" 
   fi
-  end=$(date +%s)
-  total_time "start" "end"
-  exit 0
 }
 run_ocb_pipe() {
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
-  mkdir -p /etc/one-click/ocb/benchmarks
   gb_check
   if (( no_gb == 1 )); then
-    run_ocb | tee -a /etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').sysbench
+    bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').sysbench"
+    run_ocb | tee -a "$bench_result"
+    sed -Ei '
+      s/^[^├└T┌│]*//g;
+      s/(.*[^├└T┌│]).*$/\1/
+      /Preparing Geekbench/d
+    ' "$bench_result"
+    end=$(date +%s)
+    source /etc/one-click/ocb/temp.conf
+    if [[ -n "$key" ]]; then
+      raw=$(base64 -w 0 "$bench_result")
+      response=$(
+        jq -n \
+          --arg id "$bench_ext" \
+          --arg version "1" \
+          --arg tool "One-Click Bench" \
+          --arg provider "One-Click Bench" \
+          --arg raw "$raw" \
+          --argjson single "$avg_time" \
+          --argjson multi "$max_time" \
+          '{
+            id: $id,
+            version: $version,
+            tool: $tool,
+            provider: $provider,
+            benchmark: {
+              single: $single,
+              multi: $multi
+            },
+            raw_output: $raw
+          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+            -H "Content-Type: application/json" \
+            -H "x-ocb-token: '"$key"'" \
+            --data-binary @-
+      )
+      url=$(echo "$response" | jq -r '.url')
+    fi
   else
-    run_ocb | tee -a /etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-6}
+    bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-6}"
+    run_ocb | tee -a "$bench_result"
+    source /etc/one-click/ocb/temp.conf
+    sed -Ei '
+      s/\x1B\[[0-9;]*[mK]//g;
+      s/\x0F|\r//g;
+      s/ Running iperf3 test to[^│]*│//;
+      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d
+    '  "$bench_result"
+    end=$(date +%s)
+    if [[ -n "$key" && "$no_gb" -eq 0 ]]; then
+      raw=$(base64 -w 0 "$bench_result")
+      response=$(
+        jq -n \
+          --arg id "$gb_id" \
+          --arg version "$version" \
+          --arg tool "One-Click Bench" \
+          --arg provider "One-Click Bench" \
+          --arg raw "$raw" \
+          --argjson single "$single" \
+          --argjson multi "$multi" \
+          '{
+            id: $id,
+            version: $version,
+            tool: $tool,
+            provider: $provider,
+            benchmark: {
+              single: $single,
+              multi: $multi
+            },
+            raw_output: $raw
+          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+            -H "Content-Type: application/json" \
+            -H "x-ocb-token: '"$key"'" \
+            --data-binary @-
+      )
+      url=$(echo "$response" | jq -r '.url')
+      total_time "$start" "$end" "$url" "$key"
+      exit 0
+    fi
+  fi
+  total_time "$start" "$end" "$url" "$key"
+  rm -f /etc/one-click/ocb/temp.conf
+  exit 0
+}
+geek() {
+  header_notice "$ocb_header" "$ocb_banner" "3" "62"
+  if (( no_gb == 1 )); then
+    run_sysbench
+  else
+    geekbench_table "${version:-6}" "$gb_path"
   fi
 }
 cpu_sys() {
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  mkdir -p /etc/one-click/ocb
   gb_check
   if (( no_gb == 1 )); then
-    run_sysbench
+    bench_ext="bench_$(date +'%F-%T').sysbench"
+    bench_result="/etc/one-click/ocb/benchmarks/$bench_ext"
+    geek | tee -a "$bench_result"
+    sed -Ei '
+      s/^[^├└T┌│]*//g;
+      s/(.*[^├└T┌│]).*$/\1/
+      /Preparing Geekbench/d
+    ' "$bench_result"
+    end=$(date +%s)
+    source /etc/one-click/ocb/temp.conf
+    if [[ -n "$key" ]]; then
+      raw=$(base64 -w 0 "$bench_result")
+      response=$(
+        jq -n \
+          --arg id "$bench_ext" \
+          --arg version "1" \
+          --arg tool "One-Click Bench" \
+          --arg provider "One-Click Bench" \
+          --arg raw "$raw" \
+          --argjson single "$avg_time" \
+          --argjson multi "$max_time" \
+          '{
+            id: $id,
+            version: $version,
+            tool: $tool,
+            provider: $provider,
+            benchmark: {
+              single: $single,
+              multi: $multi
+            },
+            raw_output: $raw
+          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+            -H "Content-Type: application/json" \
+            -H "x-ocb-token: '"$key"'" \
+            --data-binary @-
+      )
+      url=$(echo "$response" | jq -r '.url')
+    fi
   else
     version="${1:-6}"
     gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+    bench_result="/etc/one-click/ocb/benchmarks/bench-only_$(date +'%F-%T').gb${1:-6}"
     mkdir -p "$gb_path"
     # ==== Detect package ====
     if [[ $version == "6" ]]; then
@@ -308,7 +448,45 @@ cpu_sys() {
     else
       return
     fi
-    install_geekbench "$gb_url" "$gb_path" "$version"
-    geekbench_table "${version:-6}" "$gb_path"
+    geek | tee -a "$bench_result"
+    sed -Ei '
+      s/\x1B\[[0-9;]*[mK]//g;
+      s/\x0F|\r//g;
+      s/ Running iperf3 test to[^│]*│//;
+      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d
+    '  "$bench_result"
+    source /etc/one-click/ocb/temp.conf
+    end=$(date +%s)
+    if [[ -n "$key" ]]; then
+      raw=$(base64 -w 0 "$bench_result")
+      response=$(
+        jq -n \
+          --arg id "$gb_id" \
+          --arg version "$version" \
+          --arg tool "One-Click Bench" \
+          --arg provider "One-Click Bench" \
+          --arg raw "$raw" \
+          --argjson single "$single" \
+          --argjson multi "$multi" \
+          '{
+            id: $id,
+            version: $version,
+            tool: $tool,
+            provider: $provider,
+            benchmark: {
+              single: $single,
+              multi: $multi
+            },
+            raw_output: $raw
+          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+            -H "Content-Type: application/json" \
+            -H "x-ocb-token: '"$key"'" \
+            --data-binary @-
+      )
+      url=$(echo "$response" | jq -r '.url')
+    fi
   fi
+  total_time "$start" "$end" "$url" "$key"
+  rm -f /etc/one-click/ocb/temp.conf
+  exit 0
 }
