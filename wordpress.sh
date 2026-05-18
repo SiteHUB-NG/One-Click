@@ -321,10 +321,11 @@ main_board() {
       "║ ${magenta}3${blue}  ║ ${green}Manage Redis  ${blue}                                        ║" \
       "║ ${magenta}4${blue}  ║ ${green}Cron   ${blue}                                               ║" \
       "║ ${magenta}5${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
-      "║ ${magenta}6${blue}  ║ ${green}Guard   ${blue}                                              ║" \
-      "║ ${magenta}7${blue}  ║ ${green}Generate Sitemap + Robots   ${blue}                          ║" \
-      "║ ${magenta}8${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
-      "║ ${magenta}9${blue}  ║ ${green}Delete Site${blue}                                           ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Clone Domain   ${blue}                                       ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Guard   ${blue}                                              ║" \
+      "║ ${magenta}8${blue}  ║ ${green}Generate Sitemap + Robots   ${blue}                          ║" \
+      "║ ${magenta}9${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
+      "║ ${magenta}10${blue} ║ ${green}Delete Site${blue}                                           ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
@@ -346,8 +347,15 @@ main_board() {
         fi
         ;;
       5) select_domain           ;;
-      6) view_security "$domain" ;;
-      7)
+      6) 
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          error "This tool cannot be used for Wordpress sites" \
+            "Please use ${magenta}one-click --wp-admin${reset}"
+        fi
+        clone_static_site "$domain" 
+        ;;
+      7) view_security "$domain" ;;
+      8)
         if [[ "$wpstatic" == "wordpress" ]]; then
           die "This can not be used for Wordpress sites"
         fi
@@ -394,8 +402,8 @@ main_board() {
           fi
         fi
         ;;
-      8) check_permissions $domain ;;
-      9)
+      9) check_permissions $domain ;;
+      10)
         read -rp "This action will delete the domain $domain."
         read -rp "Are you sure you want to continue (y|n): " del_domain
         del_domain="${del_domain,,}"
@@ -1616,6 +1624,7 @@ run_script() {
   echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_DIR=$site" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_GROUP=$webserver_user" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "WEBSERVER=$webserver" >> /etc/one-click/wordpress/$domain/meta.conf
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
   [[ "$enable_staging" == "n" ]] && staging_status=No || staging_status=Yes
@@ -1983,6 +1992,7 @@ create_static_site() {
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
   echo "SITE_DIR=$site_dir" >> /etc/one-click/sites/$domain/meta.conf
   echo "SITE_GROUP=$webserver_user" >> /etc/one-click/sites/$domain/meta.conf
+  echo "WEBSERVER=$webserver" >> /etc/one-click/sites/$domain/meta.conf
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide the Admin Email: " email
     [[ -n "$email" ]] && break
@@ -2014,9 +2024,80 @@ EOF
   one-click engine "allow $webserver"
   install_letsencrypt static
   wp_backup_scheduler
+  check_permissions "$domain"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_static-web-monitor_$domain
   success "One-Click static site has now been installed for $domain"
   info "Access the site from ${magenta}https://${domain}${reset}"
+}
+clone_static_site() {
+  old_domain="$1"
+  read -rp "New cloned domain name: " new_domain
+  echo
+  source /etc/one-click/sites/$old_domain/meta.conf
+  old_site_dir="/etc/one-click/sites/${old_domain}/www"
+  new_site_dir="/etc/one-click/sites/${new_domain}/www"
+  [[ ! -d "$old_site_dir" ]] && {
+    error "Source website does not exist:"
+    error "$old_site_dir"
+    return 1
+  }
+  if [[ -d "$new_site_dir" ]]; then
+    error "Destination already exists:"
+    error "$new_site_dir"
+    return 1
+  fi
+  # ==== Begin cloning ====
+  info "Creating cloned website directory..."
+  mkdir -p "$new_site_dir"
+  info "Copying website files..."
+  rsync -aHAX --info=progress2 \
+    "$old_site_dir/" \
+    "$new_site_dir/"
+  success "Website files copied successfully."
+  info "Replacing domain references..."
+  find "$new_site_dir" \
+    -type f \
+    \( \
+      -name "*.html" \
+      -o -name "*.htm" \
+      -o -name "*.php" \
+      -o -name "*.js" \
+      -o -name "*.css" \
+      -o -name "*.json" \
+      -o -name "*.xml" \
+      -o -name "*.txt" \
+    \) \
+    -exec sed -i \
+      "s/${old_domain//\//\\/}/${new_domain//\//\\/}/g" {} \;
+  success "Domain references updated."
+  info "Creating vhost..."
+
+  web_user="ocb_$(echo -n "$domain" | sha1sum | cut -c1-8)"
+  warn "Creating web owner $web_user"
+  id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
+  touch /etc/one-click/sites/$domain/meta.conf
+  echo "SITE_USER=$web_user" >> /etc/one-click/sites/$new_domain/meta.conf
+  echo "SITE_DIR=$new_site_dir" >> /etc/one-click/sites/$new_domain/meta.conf
+  echo "SITE_GROUP=$SITE_GROUP" >> /etc/one-click/sites/$new_domain/meta.conf
+  echo "WEBSERVER=$WEBSERVER" >> /etc/one-click/sites/$new_domain/meta.conf
+  install_webserver static "$new_domain" "$new_site_dir"
+  create_isolated_php_runtime "$new_domain" "$php_ver" "$web_user" "$WEBSERVER" "sites"
+  chown "$web_user":"$SITE_GROUP" "$new_site_dir"
+  dns_check
+  one-click engine "allow $WEBSERVER"
+  domain="$new_domain"
+  install_letsencrypt static
+  wp_backup_scheduler
+  check_permissions "$new_domain"
+  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_static-web-monitor_$domain
+  success "One-Click static site has now been installed for $domain"
+  info "Access the site from ${magenta}https://${domain}${reset}"
+  success "Clone completed successfully."
+  info \
+    "Source      : $old_domain" \
+    "Cloned Site : $new_domain" \
+    "Location    : $new_site_dir" \
+    "Conf File   : /etc/one-click/sites/$new_domain/meta.conf"
 }
 nginx_static_conf() {
   local domain="$1"
