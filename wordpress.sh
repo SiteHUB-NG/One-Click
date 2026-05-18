@@ -322,7 +322,9 @@ main_board() {
       "║ ${magenta}4${blue}  ║ ${green}Cron   ${blue}                                               ║" \
       "║ ${magenta}5${blue}  ║ ${green}Change Domain   ${blue}                                      ║" \
       "║ ${magenta}6${blue}  ║ ${green}Guard   ${blue}                                              ║" \
-      "║ ${magenta}7${blue}  ║ ${green}Delete Site${blue}                                           ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Generate Sitemap + Robots   ${blue}                          ║" \
+      "║ ${magenta}8${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
+      "║ ${magenta}9${blue}  ║ ${green}Delete Site${blue}                                           ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
@@ -346,6 +348,54 @@ main_board() {
       5) select_domain           ;;
       6) view_security "$domain" ;;
       7)
+        if [[ "$wpstatic" == "wordpress" ]]; then
+          die "This can not be used for Wordpress sites"
+        fi
+        if [[ -f /etc/cron.d/one-click-sitemap_robots ]];then
+          warn "Sitemap automation is already enabled"
+          while true; do
+            printf "${magenta}[SITEMAP]${reset} %s\n" \
+              "====================================" \
+              "        SITEMAP GENERATOR" \
+              "====================================" \
+              "1) Remove automation, sitemap and robots" \
+              "2) Regenerate sitemap and robots" \
+              "3) Go back" \
+              "===================================="
+            read -rp "Select an option [1-3]: " choice
+            case "$choice" in
+              1)
+                warn "${yellow}[*]${yellow} Removing automation..."
+                rm -f /etc/cron.d/one-click-sitemap_robots
+                rm -f "/etc/one-click/sites/${domain}/www/sitemap.xml"
+                rm -f "/etc/one-click/sites/${domain}/www/robots.txt"
+                success "${green}[+]${reset} Automation removed"
+                ;;
+              2)
+                warn "${yellow}[*]${reset} Regenerating sitemap and robots site."
+                sitemap_robots "$domain" "/etc/one-click/sites/${domain}/www"
+                success "${green}[+]${reset} Regeneration complete"
+                ;;
+              3)
+                warn "${yellow}[*] Going back${red}.${magenta}.${orange}.${reset}"
+                break
+                ;;
+              *)
+                error "[!] Invalid option. Please choose 1-3."
+                ;;
+            esac
+            echo ""
+          done
+        else
+          read -rp "Please confirm you'd like to generate a robots and sitemap file and automate crawling weekly to check for updates to submit to Google (y|n): " add_sitemap
+          add_sitemap="${add_sitemap,,}"
+          if [[ "$add_sitemap" == "y" || "$add_sitemap" == "yes" ]]; then
+            sitemap_robots $domain /etc/one-click/sites/${domain}/www
+          fi
+        fi
+        ;;
+      8) check_permissions $domain ;;
+      9)
         read -rp "This action will delete the domain $domain."
         read -rp "Are you sure you want to continue (y|n): " del_domain
         del_domain="${del_domain,,}"
@@ -1511,7 +1561,6 @@ run_script() {
   site="/etc/one-click/wordpress/$domain/www"
   mkdir -p "$site"
   touch "${site}/meta.conf"
-  echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
@@ -1564,6 +1613,9 @@ run_script() {
       echo "Invalid selection" 
       ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
   esac
+  echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "SITE_DIR=$site" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "SITE_GROUP=$webserver_user" >> /etc/one-click/wordpress/$domain/meta.conf
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
   [[ "$enable_staging" == "n" ]] && staging_status=No || staging_status=Yes
@@ -1826,6 +1878,51 @@ get_site_user() {
   [[ -f "$meta" ]] || meta="/etc/one-click/sites/$domain/meta.conf"
   sed -En 's/^SITE_USER=(.*)/\1/p' "$meta"
 }
+check_permissions() {
+  local domain="$1"
+  source "/etc/one-click/sites/$domain/meta.conf" || source "/etc/one-click/wordpress/$domain/meta.conf"
+  local site_dir="$SITE_DIR"
+  local expected_user="$SITE_USER"
+  local expected_group="${SITE_GROUP:-$expected_user}"
+  [[ ! -d "$site_dir" ]] && {
+    error "Directory does not exist: $site_dir"
+    return 1
+  }
+  info "Scanning: $site_dir"
+  echo
+  local bad=0
+  local fixed=0
+  local checked=0
+  while IFS= read -r -d '' item || [[ -n "$item" ]]; do
+    checked=$((checked + 1))
+    read -r owner group < <(
+      stat -c '%U %G' "$item"
+    )
+    if [[ "$owner" != "$expected_user" || "$group" != "$expected_group" ]]; then
+      warn "Ownership mismatch detected"
+      info \
+        "Path   : $item" \
+        "Current: $owner:$group" \
+        "Expect : $expected_user:$expected_group"
+      if chown "$expected_user:$expected_group" "$item" 2>/dev/null; then
+        success "Ownership repaired"
+        fixed=$((fixed + 1))
+      else
+        error "Failed to repair ownership"
+        bad=$((bad + 1))
+      fi
+    fi
+  done < <(find "$site_dir" -print0)
+  echo
+  success "Scan complete"
+  info \
+    "Checked : $checked items" \
+    "Fixed   : $fixed items" \
+    "Failed  : $bad items"
+  if [[ "$bad" -eq 0 ]]; then
+    success "All permissions now look correct."
+  fi
+}
 ############################## STATIC SITES ##############################################
 create_static_site() {
   local domain site_dir webserver_choice
@@ -1877,17 +1974,35 @@ create_static_site() {
       ;;
     *) echo "Invalid selection"; return 1 ;;
   esac
-  warn "Creating web owner"
   web_user="ocb_$(echo -n "$domain" | sha1sum | cut -c1-8)"
+  warn "Creating web owner $web_user"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   site_dir="/etc/one-click/sites/$domain/www"
   mkdir -p "$site_dir"
   touch /etc/one-click/sites/$domain/meta.conf
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
+  echo "SITE_DIR=$site_dir" >> /etc/one-click/sites/$domain/meta.conf
+  echo "SITE_GROUP=$webserver_user" >> /etc/one-click/sites/$domain/meta.conf
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide the Admin Email: " email
     [[ -n "$email" ]] && break
   done
+  while true; do
+    read -rp "{cyan}[USER]${reset} Would you like to automate sitemap and robots generation? (y|n): " robots
+    [[ -n "$robots" ]] && break
+  done
+  robots="${robots,,}"
+  if [[ "$robots" == "y" || "$robots" == "yes" ]]; then
+    sitemap_robots $domain $site_dir 
+    cat <<EOF >/etc/cron.d/one-click-sitemap_robots
+# Crawl site at 2am every week for changes to be submitted to Google
+0 2 * * 0 root bash /var/cache/one-click/wordpress.sh --crawler $domain $site_dir       # One-Click $domain Crawler
+EOF
+  else
+    info "Automated crawler can be set up from web-admin at a later time if preferred"
+    sleep 1
+  fi
+  info "Generating default page"
   cat <<'EOF' > "$site_dir/index.html"
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>SiteHUB Default WebPage</title><link rel="icon" type="image/png" href="https://sitehub.agency/wp-content/uploads/2025/06/cropped-Untitled-design-9-e1750161170804.png"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box}body,html{height:100%;font-family:'Roboto',sans-serif}body{background:linear-gradient(135deg,#28a745,#003366);display:flex;flex-direction:column;justify-content:space-between;color:#fff}header{text-align:center;padding:50px 20px}header img.logo{height:80px;margin-bottom:20px}header h1{font-size:2.5em;margin-bottom:10px}header p{font-size:1.2em}.visuals{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;z-index:0}.visuals span{position:absolute;display:block;border-radius:50%;background:rgba(255,255,255,.05);animation:float 25s linear infinite}@keyframes float{0%{transform:translateY(0) rotate(0deg)}100%{transform:translateY(-1000px) rotate(720deg)}}main{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:20px;text-align:center}section{margin:50px 0}.main-hero h2{font-size:2em;margin-bottom:15px}.main-hero p{font-size:1.1em;line-height:1.6;margin-bottom:25px}.cta-btn{display:inline-block;background:#fff;color:#003366;font-weight:700;text-decoration:none;padding:12px 25px;border-radius:50px;margin:10px;transition:all .3s ease}.cta-btn:hover{background:#e0e0e0}footer{text-align:center;padding:20px;font-size:.9em;color:rgba(255,255,255,.7)}@media(max-width:768px){header h1{font-size:2em}.main-hero h2{font-size:1.6em}}</style></head><body><div class="visuals" id="visuals"></div><header><img class="logo" src="https://us1.plesk.sitehub.agency/images/logos/6EwrLBBn5Xg.png" alt="SiteHUB"><h1>Default Web Page for <span id="domain-name">dynamic-domain.ng</span></h1><p>This page is generated by <a href="https://sitehub.agency" style="color:darkgreen;text-decoration:none;">Site <span style="color:blue;text-decoration:none;">HUB</span></a>, the leading hosting provider in Nigeria.<br>You see this page because there is no website at this address.</p></header><main id="placeholder-content"></main><footer>Copyright &copy; SiteHUB Agency <span id="year"></span>. All rights reserved - RC6935293</footer><script>document.getElementById("year").textContent=new Date().getFullYear();document.addEventListener("DOMContentLoaded",()=>{const e=location.hostname,t=location.protocol+"//"+e+":8443",n="support@sitehub.agency";document.getElementById("domain-name").textContent=e;const o=document.getElementById("placeholder-content");let a="";a+=`<section class="main-hero"><h2>Your domain <strong>${e}</strong> is now live!</h2><p><strong>${e}</strong> default page has been generated by the One-Click Toolbox Automation tool . No website content has been uploaded yet.<br>For more information about One-Click Toolbox:</p><a class="cta-btn" href="https://github.com/SiteHUB-NG/One-Click/" target="_blank">View On GitHub</a><br><br><br><hr><br><h2>Need Hosting?</h2><p>Start your own website in minutes with our web hosting & VPS plans!</p><a class="cta-btn" href="https://sitehub.agency/shared/" target="_blank">View Web Hosting Plans</a><a class="cta-btn" href="https://features.sitehub.agency/vps/" target="_blank">View VPS Plans</a></section>`,a+=`<section class="main-hero"><h2>Need Help?</h2><p>Contact our support team: <a style="color:#fff;text-decoration:underline;" href="mailto:${n}">${n}</a></p></section>`,o.innerHTML=a;const r=document.getElementById("visuals");for(let t=0;t<30;t++){let n=document.createElement("span"),o=60*Math.random()+20;n.style.width=o+"px",n.style.height=o+"px",n.style.left=100*Math.random()+"%",n.style.top=100*Math.random()+"%",n.style.animationDuration=20+20*Math.random()+"s",r.appendChild(n)}});</script></body></html>
 EOF
@@ -2876,6 +2991,195 @@ monitor_web_logs() {
   fi
   done
 }
+submit_sitemap() {
+  sitemap="$1"
+  warn "${yellow}[*]${reset} Submitting sitemap: $sitemap"
+  # ==== Submit to Bing ====
+  curl -s "https://www.bing.com/ping?sitemap=$sitemap" &> /dev/null && info "${green}[+]${reset} Bing submitted"
+  # ==== Submit to Yandex ====
+  curl -s "https://webmaster.yandex.com/ping?sitemap=$sitemap" &> /dev/null && info "${green}[+]${reset} Yandex submitted"
+  success "${green}[✓]${reset} Submission cycle complete"
+}
+sitemap_robots() {
+  local base
+  IFS=$'\n\t'
+  domain="$1"
+  site_dir="$2"
+  sitemap="$site_dir/sitemap.xml"
+  html="$site_dir/sitemap.html"
+  robots="$site_dir/robots.txt"
+  extensions="html htm php"
+  tmpfile="$(mktemp)"
+  trap 'echo "</urlset>" >> "$sitemap"' EXIT
+  trap 'rm -f "$tmpfile"' EXIT
+  info "Generating sitemap for $domain..."
+  cat > "$sitemap" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset
+    xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+EOF
+  cat > "$html" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>$domain Sitemap</title>
+
+<style>
+body {
+    font-family: system-ui, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    max-width: 1000px;
+    margin: auto;
+    padding: 40px 20px;
+    line-height: 1.6;
+}
+
+h1 {
+    border-bottom: 2px solid #334155;
+    padding-bottom: 10px;
+    margin-bottom: 30px;
+}
+
+.sitemap-entry {
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 16px;
+    transition: 0.2s ease;
+}
+
+.sitemap-entry:hover {
+    border-color: #3b82f6;
+    transform: translateY(-2px);
+}
+
+.sitemap-title a {
+    color: #60a5fa;
+    text-decoration: none;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.sitemap-title a:hover {
+    text-decoration: underline;
+}
+
+.sitemap-meta {
+    margin-top: 10px;
+    font-size: 14px;
+    color: #94a3b8;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+</style>
+</head>
+
+<body>
+
+<h1>$domain Sitemap</h1>
+EOF
+  while IFS= read -r file; do
+    base="$(basename "$file")"
+    # ==== Ignore Hidden ====
+    [[ "$base" =~ ^\. ]] && continue
+    ext="${file##*.}"
+    include=0
+    case "$ext" in
+      html|htm|php) include=1 ;;
+      *) include=0            ;;
+    esac
+    [[ "$include" -eq 0 ]] && continue
+    rel="${file#$site_dir}"
+    # ==== Normalize index files ====
+    rel="$(sed 's/index\.\(html\|htm\|php\)$//' <<< "$rel")"
+    rel="$(sed 's,//*,/,g' <<< "$rel")"
+    url="${domain}${rel}"
+    title=$(sed -En 's/.*<title>|<\/title>.*//gp' "$file")
+    lastmod="$(date -u -r "$file" '+%Y-%m-%dT%H:%M:%SZ')"
+    priority="0.6"
+    if [[ "$rel" == "/" ]]; then
+      priority="1.0"
+    elif [[ "$rel" =~ /guide|/docs|/api ]]; then
+      priority="0.9"
+    fi
+    cat >> "$sitemap" <<EOF
+    <url>
+      <loc>$url</loc>
+      <lastmod>$lastmod</lastmod>
+      <priority>$priority</priority>
+    </url>
+EOF
+
+    cat >> "$html" <<EOF
+<div class="sitemap-entry">
+    <div class="sitemap-title">
+        <a href="https://${url}">$title</a>
+    </div>
+
+    <div class="sitemap-meta">
+        <span class="sitemap-lastmod">
+            Last Updated: $lastmod
+        </span>
+
+        <span class="sitemap-priority">
+            Priority: $priority
+        </span>
+    </div>
+</div>
+EOF
+  done < <(find "$site_dir" -type f \
+  \( \
+    -iname "*.html" \
+    -o -iname "*.htm" \
+    -o -iname "*.php" \
+  \) \
+  -not -path "*/assets/*" \
+  -not -path "*/static/*" \
+  -not -path "*/plugins/*" \
+  -not -path "*/node_modules/*" \
+  -not -path "*/vendor/*" \
+  -not -path "*/cache/*" \
+  -not -path "*/tmp/*" \
+  -not -path "*/\.git/*")
+  echo "</urlset>" >> "$sitemap"
+  cat >> "$html" <<EOF
+</body>
+</html>
+EOF
+# ==== Robots ====
+  info "Generating robots page..."
+  cat > "$robots" <<EOF
+User-agent: *
+Allow: /
+
+# Block sensitive/system areas
+Disallow: /.git/
+Disallow: /tmp/
+Disallow: /cache/
+Disallow: /private/
+Disallow: /backup/
+
+Sitemap: $domain/sitemap.xml
+EOF
+  info "Generated:" \
+    " - $sitemap" \
+    " - $html" \
+    " - $robots"
+  submit_sitemap "$sitemap"
+  # ==== Configure cron to crawl every week ====
+  if [[ ! -f /etc/cron.d/one-click-sitemap_robots ]];then
+    cat <<EOF >/etc/cron.d/one-click-sitemap_robots
+# Crawl site at 2am every week for changes to be submitted to Google
+0 2 * * 0 root bash /var/cache/one-click/wordpress.sh --crawler $domain $site_dir       # One-Click $domain Crawler
+EOF
+  fi
+}
 if [[ ! -f /etc/systemd/system/one-click-guard.service ]]; then
   cat << EOF > /etc/systemd/system/one-click-guard.service
 [Unit]
@@ -3667,4 +3971,7 @@ if [[ "${1:-}" == "-staticrotate" ]]; then
 fi
 if [[ "${1:-}" == "--monitor-site" ]]; then
   get_monitor_stats "${2:-}"
+fi
+if [[ "${1:-}" == "--crawler" ]]; then
+  sitemap_robots "${2:-}" "${3:-}"
 fi
