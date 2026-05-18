@@ -61,6 +61,8 @@ sys_info() {
       printf "%*s%s\n", pad, "", $0
     }'
   }
+  whois_ipv6="$(echo "$whois_ipv6" | tail -1)"
+  whois_ip="$(echo "$whois_ip" | tail -1)"
   hidden() {
     if [[ "$hide_mode" == true ]]; then
       whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ip")
@@ -110,8 +112,8 @@ sys_info() {
       "│${key_col}Bandwidth Used Monthly${blue} │${desc_col}$(awk  -v date="$(date +'%Y-%m')" '$1==date{print "RX: " $2$3 " | TX: " $5$6 " | Total: " $8$9 " | Rate: " $11$12}' <(vnstat -i "$nic" -m 2> /dev/null)) ${blue}    " \
       "└───────────────────────┴───────────────────────────────────────────────────────────────────┘${reset}" " " " "
       if [[ -f /etc/one-click/ocb/ocb_results.txt ]]; then
-        single=$(awk -F"|" '{print $2}' /etc/one-click/ocb/ocb_results.txt)
-        multi=$(awk -F"|" '{print $3}' /etc/one-click/ocb/ocb_results.txt)
+        single=$(awk -F"|" '{print $2}' /etc/one-click/ocb/ocb_results.txt | tail -1)
+        multi=$(awk -F"|" '{print $3}' /etc/one-click/ocb/ocb_results.txt | tail -1)
         printf '%s\n' " " " "\
           "${blue}┌──────────────────────────┐" \
           "│${blue} ======= ${orange}GEEKBENCH${blue} ====== ${blue}│" \
