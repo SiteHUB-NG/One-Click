@@ -341,7 +341,8 @@ run_ocb_pipe() {
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
       s/ Running iperf3 test to[^│]*│//;
-      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d
+      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d;
+      s/(hostname[^│]*│ ).*/\1ONE-CLICK REDACTED/I
     '  "$bench_result"
     end=$(date +%s)
     if [[ -n "$key" && "$no_gb" -eq 0 ]]; then
@@ -453,7 +454,8 @@ cpu_sys() {
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
       s/ Running iperf3 test to[^│]*│//;
-      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d
+      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d;
+      s/(hostname[^│]*│ ).*/\1ONE-CLICK REDACTED/I
     '  "$bench_result"
     source /etc/one-click/ocb/temp.conf
     end=$(date +%s)
