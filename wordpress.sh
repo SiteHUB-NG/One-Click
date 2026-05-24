@@ -26,10 +26,25 @@ if command -v install_dep &> /dev/null; then
   install_dep "dig" "command -v dig" "$dig_pkg" "$pkg_mgr" true
 fi
 . /etc/os-release
+config_dir="$base_dir/configuration"
+db_manager_dir=/etc/one-click/db-manager
+sitectl_dir="${db_manager_dir}/sites"
+mkdir -p ${db_manager_dir}/{sites,runtime,logs,backups,cache,templates}
+mkdir -p ${db_manager_dir}/runtime/{db,sessions,locks,temp}
+mkdir -p ${db_manager_dir}/runtime/tokens
+chmod 700 ${db_manager_dir}/runtime/tokens
+chmod -R 755 ${db_manager_dir}
 secret_key="/etc/one-click.backup_secret.key"
 current_profile_file="$config_dir/current_profile"
 webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
 centos_ver=$(grep -Eo [0-9]+ /etc/centos-release 2> /dev/null || true)
+app_dir="/etc/one-click/apps"
+#app_log_dir="/var/log/one-click/apps/${runtime}/${domain}"
+app_port_start=5000
+app_port_end=5999
+if [[ -f /etc/cron.d/db-manager ]]; then
+  */10 * * * * find /etc/one-click/db-manager/runtime/tokens -type f -mmin +30 -delete
+fi
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
@@ -50,10 +65,10 @@ wp_backup() {
       printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
     }
     warn() {
-      printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n" 
+      printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
     }
     error() {
-      printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n" 
+      printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
     }
   fi
   local domain base site backup timestamp config_path
@@ -119,7 +134,7 @@ wp_restore() {
   site_dir="$base/$domain/www"
   config_path="$base/$domain/wp-config.php"
   read -rp "${cyan}[USER]${yellow} This will overwrite the current $domain. Continue? (y|n): " confirm
-  if [[ "$confirm" != "y" ]]; then 
+  if [[ "$confirm" != "y" ]]; then
     return 1
   fi
   [[ ! -d "$backup_dir" ]] && {
@@ -201,14 +216,47 @@ select_wp_domain() {
   export domain
 }
 wp_backup_interactive() {
-  central_menu wordpress 
+  central_menu wordpress
 }
 ################################### MENUS ####################################
+web_logs() {
+  while true; do
+    paste <(printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}ONE-CLICK WEB LOGS${blue}                      ║" \
+      "╠════╦═══════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Access Logs${blue}                                       ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Error Logs${blue}                                        ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Filter 200 Response Code${blue}                          ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Filter Response Codes${blue}                             ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                              ║" \
+      "╚════╩═══════════════════════════════════════════════════╝${reset}") <(get_current_profile)
+    read -rp "${cyan}[USER]${blue} Select an option: " choice
+    case "$choice" in
+      1) web_log_view "$domain" access     ;;
+      2) web_log_view "$domain" error      ;;
+      3) web_log_view "$domain" access 200 ;;
+      4) 
+        while true; do
+          read -rp "${cyan}[USER]${reset} Enter the port number to filter: " filter_port
+          if [[ ! "$filter_port" =~ ^[0-9]+$ ]]; then
+            error "Please enter an integer"
+          else
+            break
+          fi
+        done
+          web_log_view "$domain" access view "$filter_port"
+        ;;
+      0) clear; return 0                 ;;
+      *) error "Invalid option"          ;;
+    esac
+  done
+}
 profiles_board() {
   while true; do
     paste <(printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
-      "║                ${yellow}ONE-CLICK WEB BACKUP MANAGER${blue}                ║" \
+      "║                ${yellow}ONE-CLICK PROFILES MANAGER${blue}                  ║" \
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ ${magenta}1${blue}  ║ ${green}Switch Profiles${blue}                                       ║" \
       "║ ${magenta}2${blue}  ║ ${green}List Profiles ${blue}                                        ║" \
@@ -226,7 +274,7 @@ profiles_board() {
       4) remote_profile_delete             ;;
       5) remote_profile_test               ;;
       0) clear; return 0                   ;;
-      *) echo "Invalid option"             ;;
+      *) error "Invalid option"            ;;
     esac
   done
 }
@@ -253,7 +301,7 @@ backup_board() {
         if [[ "$wpstatic" == "wordpress" ]]; then
           if [[ -z "${domain:-}" ]]; then
             warn "Please create a vhost before proceeding"
-            read -rp "Press Enter to continue"
+            read -rp "${cyan}[USER]${reset} Press Enter to continue"
             run_script
           fi
           resolve_profile "$domain"
@@ -261,7 +309,7 @@ backup_board() {
         else
           if [[ -z "${domain:-}" ]]; then
             warn "Please create a vhost before proceeding"
-            read -rp "Press Enter to continue"
+            read -rp "${cyan}[USER]${reset} Press Enter to continue"
             create_static_site
           fi
           resolve_profile "$domain"
@@ -303,7 +351,7 @@ backup_board() {
         ;;
       8) rollback_list "$domain" ;;
       0) clear; return 0         ;;
-      *) echo "Invalid option"   ;;
+      *) error "Invalid option"  ;;
     esac
   done
 }
@@ -326,6 +374,7 @@ main_board() {
       "║ ${magenta}8${blue}  ║ ${green}Generate Sitemap + Robots   ${blue}                          ║" \
       "║ ${magenta}9${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
       "║ ${magenta}10${blue} ║ ${green}Delete Site${blue}                                           ║" \
+      "║ ${magenta}11${blue} ║ ${green}Web Logs${blue}                                              ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
   read -rp "${cyan}[USER]${blue} Select an option: " choice
@@ -347,12 +396,12 @@ main_board() {
         fi
         ;;
       5) select_domain           ;;
-      6) 
+      6)
         if [[ "$wpstatic" == "wordpress" ]]; then
           error "This tool cannot be used for Wordpress sites" \
             "Please use ${magenta}one-click --wp-admin${reset}"
         fi
-        clone_static_site "$domain" 
+        clone_static_site "$domain"
         ;;
       7) view_security "$domain" ;;
       8)
@@ -370,7 +419,7 @@ main_board() {
               "2) Regenerate sitemap and robots" \
               "3) Go back" \
               "===================================="
-            read -rp "Select an option [1-3]: " choice
+            read -rp "${cyan}[USER]${reset} Select an option [1-3]: " choice
             case "$choice" in
               1)
                 warn "${yellow}[*]${yellow} Removing automation..."
@@ -395,7 +444,7 @@ main_board() {
             echo ""
           done
         else
-          read -rp "Please confirm you'd like to generate a robots and sitemap file and automate crawling weekly to check for updates to submit to Google (y|n): " add_sitemap
+          read -rp "${cyan}[USER]${reset} Please confirm you'd like to generate a robots and sitemap file and automate crawling weekly to check for updates to submit to Google (y|n): " add_sitemap
           add_sitemap="${add_sitemap,,}"
           if [[ "$add_sitemap" == "y" || "$add_sitemap" == "yes" ]]; then
             sitemap_robots $domain /etc/one-click/sites/${domain}/www
@@ -404,8 +453,8 @@ main_board() {
         ;;
       9) check_permissions $domain ;;
       10)
-        read -rp "This action will delete the domain $domain."
-        read -rp "Are you sure you want to continue (y|n): " del_domain
+        read -rp "${cyan}[USER]${reset} This action will delete the domain $domain."
+        read -rp "${cyan}[USER]${reset} Are you sure you want to continue (y|n): " del_domain
         del_domain="${del_domain,,}"
         if [[ "$del_domain" != "y" && "$del_domain" != "yes" ]]; then
           error "Not progressing with domain deleteion of $domain"
@@ -421,11 +470,12 @@ main_board() {
           rm -f /etc/httpd/conf.d/${domain}.conf
         fi
         ;;
+      11) web_logs ;;
       0)
-        echo "Exiting..."
+        error "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
         ;;
-      *) echo "Invalid option" ;;
+      *) error "Invalid option" ;;
     esac
   done
 }
@@ -445,7 +495,7 @@ central_menu() {
     current_profile_file="$config_dir/current_profile"
     mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
   fi
-  main_board    
+  main_board
 }
 wp_restore_interactive() {
   central_menu wordpress
@@ -482,7 +532,8 @@ install_wp_cli() {
 }
 # ==== Configure DB ====
 configure_db() {
-  db="one_click_$(openssl rand -hex 4)_$dbuser"
+  db="one_click:${domain}:$(openssl rand -hex 4):$dbuser"
+  echo "DB_NAME=$db" >> /etc/one-click/wordpress/$domain/meta.conf
   systemctl enable mariadb --now
   mysql -e "CREATE DATABASE IF NOT EXISTS \`$db\`;"
   user_exists=$(mysql -sN -e "SELECT 1 FROM mysql.user WHERE user='$dbuser' AND host='localhost'")
@@ -540,15 +591,15 @@ install_wp() {
 }
 # ==== Harden ====
 harden_wp() {
-  $wp_cmd config set DISALLOW_FILE_EDIT true --raw 
-  $wp_cmd config shuffle-salts 
+  $wp_cmd config set DISALLOW_FILE_EDIT true --raw
+  $wp_cmd config shuffle-salts
   chown -R "$web_user":"$webserver_user" /etc/one-click/wordpress/$domain/www
   find /etc/one-click/wordpress/$domain/www -type d -exec chmod 755 {} \;
   find /etc/one-click/wordpress/$domain/www -type f -exec chmod 644 {} \;
 }
 ####################### MOVE TO FUNCTIONS ############################
 draw_box() {
-  local title line max_len lines width bar 
+  local title line max_len lines width bar
   title="$1"
   shift
   lines=("$@")
@@ -573,7 +624,7 @@ wp_plugins() {
   $wp_cmd plugin install \
     wordfence \
     wp-super-cache \
-    --activate 
+    --activate
   # ==== Installing Selected Services ====
   if [[ "$enable_redis" == "y" ]]; then
     info "Installing and configuring Redis"
@@ -731,20 +782,20 @@ redis_menu() {
       1) systemctl start "$instance_service"   ;;
       2) systemctl stop "$instance_service"    ;;
       3) systemctl restart "$instance_service" ;;
-      4) 
+      4)
         echo -e "${cyan}--- Last 20 lines of logs for $domain ---${reset}"
         journalctl -u "$instance_service" -n 20 --no-pager
         read -p "Press Enter to continue..."
         ;;
       5) nano "$instance_conf" && systemctl restart "$instance_service" ;;
-      6) 
+      6)
         read -p "Enter new memory limit (e.g. 256mb): " new_limit
         sed -i "s/^maxmemory .*/maxmemory $new_limit/" "$instance_conf"
         systemctl restart "$instance_service"
         success "Memory updated to $new_limit"
         sleep 1
         ;;
-      7) 
+      7)
         if [[ "$status_raw" == "active" ]]; then
           redis-cli -s "$instance_sock" flushall
           success "Redis cache for $domain cleared."
@@ -771,7 +822,7 @@ wp_staging() {
   chown -R "$web_user":"$webserver_user" "$stage"
   chmod 644 "$stage/wp-config.php"
   cd "$stage"
-  $wp_cmd db export stage.sql 
+  $wp_cmd db export stage.sql
   stage_db="stage_$(openssl rand -hex 4)"
   if mysql -e "USE $stage_db;" 2>/dev/null; then
     echo -e "\e[33m[WARN] Database $stage_db already exists\e[0m"
@@ -780,7 +831,7 @@ wp_staging() {
     echo "  2) Use existing DB"
     echo "  3) Cancel staging"
     while true; do
-      read -rp "Enter choice [1-3]: " choice
+      read -rp "${cyan}[USER]${reset} Enter choice [1-3]: " choice
       case "$choice" in
         1)
           echo "Dropping existing database..."
@@ -805,7 +856,7 @@ wp_staging() {
   else
     mysql -e "CREATE DATABASE $stage_db"
     mysql -e "GRANT ALL PRIVILEGES ON $stage_db.* TO '$db_user'@'localhost' IDENTIFIED BY '$db_pass'"
-    $wp_cmd config set DB_NAME "$stage_db" 
+    $wp_cmd config set DB_NAME "$stage_db"
     #$wp_cmd db export "$stage/stage.sql"
     $wp_cmd db import "$stage/stage.sql"
     $wp_cmd option update siteurl "https://staging.$domain"
@@ -821,8 +872,8 @@ wp_staging_push() {
   printf '%s\n' "$(tput setaf 165)[PUSH}${reset} Deploying staging to production"
   rsync -a --delete "$stage/" "$prod/"
   cd "$prod"
-  $wp_cmd db export deploy.sql 
-  $wp_cmd db import deploy.sql 
+  $wp_cmd db export deploy.sql
+  $wp_cmd db import deploy.sql
   printf '%s\n' "$(tput setaf 165)[PUSH}${green} Deployment completed: Push from staging successful${reset}"
 }
 staging_vhost_nginx() {
@@ -861,6 +912,51 @@ server {
 EOF
   systemctl reload nginx
 }
+default_nginx() {
+  if [[ -d /etc/nginx/sites-enabled ]]; then
+    conf=/etc/nginx/sites-enabled/00-default.conf
+  else
+    /etc/nginx/conf.d/00-default.conf
+  fi
+  openssl req -x509 -nodes -days 365 -newkey rsa:4096 \
+    -keyout /etc/ssl/private/ssl-cert-default_site.key \
+    -out /etc/ssl/certs/ssl-cert-default_site.pem \
+    -subj "/CN=localhost"
+  cat> "$conf" << EOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
+    server_name _;
+    
+    return 444; 
+}
+
+server {
+    listen 443 default_server ssl;
+    listen [::]:443 default_server ssl;
+    
+    server_name _;
+
+    ssl_certificate /etc/ssl/certs/ssl-cert-default_site.pem;
+    ssl_certificate_key /etc/ssl/private/ssl-cert-default_site.key;
+
+    return 444;
+}
+EOF
+  if [[ "$pkg_mgr" == "apt" && -d /etc/nginx/sites-available ]]; then
+    ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/$domain.conf
+  fi
+  for i in /etc/nginx/sites-enabled/ /etc/nginx/sites-available /etc/nginx/con.d/ ; do
+    if [[ ! -d "$i" ]]; then
+      continue
+    fi
+    find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
+  done
+  if nginx -t &> /dev/null; then
+    systemctl reload nginx
+  fi
+}
 staging_vhost_apache() {
   local domain stage_root
   domain="$1"
@@ -887,7 +983,7 @@ staging_vhost_apache() {
 
     ErrorLog ${apache_log_dir}/$domain-error.log
     CustomLog ${apache_log_dir}/$domain-access.log combined
-    
+
 </VirtualHost>
 EOF
   systemctl reload httpd 2> /dev/null || systemctl reload apache2 2> /dev/null
@@ -912,7 +1008,6 @@ wp_staging_disable() {
   systemctl reload nginx 2>/dev/null || systemctl reload httpd
   success "Staging disabled for $domain"
 }
-# ===== Helper functions =====
 staging_status() {
     local domain="$1"
     [[ -d "/etc/one-click/wordpress/staging/$domain" ]] && echo "ON" || echo "OFF"
@@ -941,16 +1036,17 @@ wp_submenu() {
     "${magenta}6${green}  Push Staging${blue}"
     "${magenta}7${green}  Delete Site${blue}"
     "${magenta}8${green}  Reset Password${blue}"
+    "${magenta}9${green}  Web Logs${blue}"
     "${magenta}0${green}  Exit${blue}"
   )
   local choice
   while true; do
     draw_box "${magenta}Managing WordPress:${yellow} $domain${blue}" "${options[@]}"
-    read -rp "Select an option: " choice
+    read -rp "${cyan}[USER]${reset} Select an option: " choice
     case "$choice" in
       1) wp_plugin_manager "$domain" ;;
       2) wp_backup "$domain"         ;;
-      3) 
+      3)
         resolve_profile "$domain"
         wp_restore_int "$domain"    ;;
       4) wp_staging_menu "$domain"  ;;
@@ -958,6 +1054,7 @@ wp_submenu() {
       6) wp_staging_push "$domain"  ;;
       7) delete_site "$domain"      ;;
       8) wp_magic_login "$domain"   ;;
+      9) web_logs                   ;;
       0) echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
         ;;
@@ -978,7 +1075,7 @@ wp_staging_menu() {
   local choice
   while true; do
     draw_box "${magenta}Managing WordPress:${yellow} $domain${blue}" "${options[@]}"
-    read -rp "Select an option: " choice
+    read -rp "${cyan}[USER]${reset} Select an option: " choice
     case "$choice" in
       1) wp_staging "$domain"         ;;
       2) wp_staging_enable "$domain"  ;;
@@ -1000,7 +1097,7 @@ wp_rollback_menu() {
   local choice
   while true; do
     draw_box "${magenta}Managing WordPress:${yellow} $domain${blue}" "${options[@]}"
-    read -rp "Select an option: " choice
+    read -rp "${cyan}[USER]${reset} Select an option: " choice
     case "$choice" in
       1) create_rollback_snapshot "$domain" wordpress ;;
       2) rollback_restore "$domain" wordpress         ;;
@@ -1016,6 +1113,8 @@ install_webserver() {
   mode="$1"
   if [[ "$mode" == "wordpress" ]]; then
     mode_ver="$mode"
+  elif [[ "$mode" == "nodejs" ]]; then
+    mode_ver="apps/nodejs"
   else
     mode_ver="sites"
   fi
@@ -1032,11 +1131,25 @@ install_webserver() {
       fi
       if [[ -f /etc/nginx/nginx.conf ]]; then
         if ! grep -q 'oneclick' /etc/nginx/nginx.conf; then
-          mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.one-click-bak
-          ((sed -En '0,/^http \{/ {p}' /etc/nginx/nginx.conf.one-click-bak; echo "    log_format oneclick '\$remote_addr - \$remote_user [\$time_local] '
-                        '\"\$request\" \$status \$body_bytes_sent '
-                        '\"\$http_referer\" \"\$http_user_agent\" \"\$host\"';"); sed -En '/^http \{/ {:a;n;p;ba};/access_log/s/main/oneclick/' /etc/nginx/nginx.conf.one-click-bak) > /etc/nginx/nginx.conf
+          mkdir -p /etc/nginx/one-click
+          cat > /etc/nginx/one-click/logging.conf <<'EOF'
+# ==== One-Click Logging ====
+
+log_format oneclick '$remote_addr - $remote_user [$time_local] '
+                    '"$request" $status $body_bytes_sent '
+                    '"$http_referer" "$http_user_agent" "$host"';
+
+EOF
         fi
+        if ! grep -q 'include /etc/nginx/one-click/\*.conf;' /etc/nginx/nginx.conf; then
+          cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.one-click-bak
+          sed -Ei '
+            s,(access_log ).*,include /etc/nginx/one-click/*.conf;\n\t\1/var/log/nginx/example.com.access.log oneclick;,;
+          ' /etc/nginx/nginx.conf
+        fi
+      fi
+      if [[ ! -f /etc/nginx/sites-enabled/00-default.conf ]]; then
+        default_nginx
       fi
       nginx_conf
     else
@@ -1110,9 +1223,11 @@ nginx_conf() {
   if [[ "$pkg_mgr" == "apt" ]]; then
     nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
     nginx_log_dir="/var/log/nginx"
+    echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
   else
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
     nginx_log_dir="/var/log/nginx"
+    echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
   fi
   mkdir -p /var/log/nginx/${domain}
   cat << EOF > "$nginx_conf_file"
@@ -1144,20 +1259,31 @@ server {
     }
 }
 EOF
-  if [[ "$pkg_mgr" == "apt" ]]; then
+  if [[ "$pkg_mgr" == "apt" && -d /etc/nginx/sites-available ]]; then
     ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/$domain.conf
   fi
   sed -Ei.one-click.bak '/log_format|access_log/{s/main/oneclick/}' /etc/nginx/nginx.conf
+  for i in /etc/nginx/sites-enabled/ /etc/nginx/sites-available /etc/nginx/con.d/ ; do
+    if [[ ! -d "$i" ]]; then
+      continue
+    fi
+    find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
+  done
   nginx -t
   systemctl enable nginx --now
   systemctl reload nginx
 }
 # ==== Apache ====
 apache_conf() {
+  if [[ "$mode" == "static" ]]; then
+    mode="sites"
+  fi
   if [[ "$pkg_mgr" == "apt" ]]; then
     apache_confi=/etc/apache2/sites-available/$domain.conf
+    echo "VHOST=$apache_confi" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     apache_confi=/etc/httpd/conf.d/$domain.conf
+    echo "VHOST=$apache_confi" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
   fi
   if [[ -d /etc/apache2 ]]; then
     apache_log_dir="/var/log/apache2"
@@ -1172,7 +1298,7 @@ apache_conf() {
 
     DocumentRoot /etc/one-click/$mode_ver/$domain/www
 
-    <Directory /etc/one-click/wordpress/$domain/www>
+    <Directory /etc/one-click/${mode_ver}/${domain}/www>
         AllowOverride All
         Require all granted
     </Directory>
@@ -1203,7 +1329,7 @@ apache_ssl_conf() {
 
     DocumentRoot /etc/one-click/$mode_ver/$domain/www
 
-    <Directory /etc/one-click/wordpress/$domain/www>
+    <Directory /etc/one-click/${mode_ver}/$domain/www>
         AllowOverride All
         Require all granted
     </Directory>
@@ -1269,12 +1395,12 @@ start_screen() {
     default_site="ONE-CLICK STATIC INSTALLATION"
     site="html site"
     wp_title=$(cat <<'EOF'
-  ___                ____ _ _      _      ____  _ _            
- / _ \ _ __   ___   / ___| (_) ___| | __ / ___|(_) |_ ___  ___ 
+  ___                ____ _ _      _      ____  _ _
+ / _ \ _ __   ___   / ___| (_) ___| | __ / ___|(_) |_ ___  ___
 | | | | '_ \ / _ \ | |   | | |/ __| |/ / \___ \| | __/ _ \/ __|
 | |_| | | | |  __/ | |___| | | (__|   <   ___) | | ||  __/\__ \
  \___/|_| |_|\___|  \____|_|_|\___|_|\_\ |____/|_|\__\___||___/
-     
+
 EOF
   )
   fi
@@ -1359,17 +1485,17 @@ install_letsencrypt() {
       fi
     fi
     if [[ "$webserver" == "nginx" ]]; then
-      if certbot --nginx -d "$domain" -d "www.$domain" --non-interactive --agree-tos -m "$email"; then
+      if certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email"; then
         bot_installed=1
       fi
     else
-      if certbot --apache -d "$domain" -d "www.$domain" --non-interactive --agree-tos -m "$email"; then
+      if certbot --apache -d "$domain" --non-interactive --agree-tos -m "$email"; then
         bot_installed=1
       fi
     fi
     if [[ "${bot_installed:-}" -eq 1 ]]; then
       if [[ "$mode" == "wordpress" ]]; then
-        $wp_cmd option update home "https://$domain" 
+        $wp_cmd option update home "https://$domain"
         $wp_cmd option update siteurl "https://$domain"
       fi
       info "SSL successfully installed!"
@@ -1397,7 +1523,7 @@ install_letsencrypt() {
             return
           fi
           ;;
-        2) 
+        2)
           while true; do
             read -rp "${cyan}[USER]${blue} Enter new email: " email
             [[ -n "$email" ]] && break
@@ -1601,7 +1727,7 @@ run_script() {
     [[ -n "$webserver" ]] && break
   done
   case "$webserver" in
-    1) 
+    1)
       webserver="nginx"
       if command -v apt &> /dev/null; then
         webserver_user="www-data"
@@ -1609,7 +1735,7 @@ run_script() {
         webserver_user="nginx"
       fi
       ;;
-    2) 
+    2)
       webserver="apache"
       if command -v apt &> /dev/null; then
         webserver_user="www-data"
@@ -1617,14 +1743,16 @@ run_script() {
         webserver_user="apache"
       fi
       ;;
-    *) 
-      echo "Invalid selection" 
+    *)
+      echo "Invalid selection"
       ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
   esac
   echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_DIR=$site" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_GROUP=$webserver_user" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "WEBSERVER=$webserver" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "DB_PASS=$dbpass" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "DB_USER=$dbuser" >> /etc/one-click/wordpress/$domain/meta.conf
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
   [[ "$enable_staging" == "n" ]] && staging_status=No || staging_status=Yes
@@ -1649,7 +1777,7 @@ run_script() {
     [[ -n "$proceed" ]] && break
   done
   proceed="${proceed,,}"
-  echo 
+  echo
   # ==== Install Dependancies ====
   if [[ "$proceed" == "y" || "$proceed" == "yes" ]]; then
     info "Updating System"
@@ -1670,7 +1798,7 @@ run_script() {
   info "Configuring PHP-FPM"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "wordpress"
   info "Enabling PHP"
-  systemctl enable php-fpm@${domain}.service --now 
+  systemctl enable php-fpm@${domain}.service --now
   info "Confguring MariaDB"
   configure_db
   dns_check
@@ -1704,7 +1832,7 @@ run_script() {
   one-click engine "allow $webserver"
   info "Installing Plugins"
   wp_plugins
-  $wp_cmd option get home 
+  $wp_cmd option get home
   info "Configuring SSL"
   install_letsencrypt wordpress
   set +o pipefail
@@ -1715,6 +1843,9 @@ run_script() {
   wp_backup_scheduler
   systemctl restart "$webserver"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_wp-web-monitor_$domain
+  info "Fixing permissions"
+  sleep 1
+  check_permissions "$domain"
   success "One-Click Wordpress has now been installed!"
   if [[ "$enable_staging" =~ ^[y|Y|yes|Yes]$ ]]; then
     wp_staging_enable "$domain"
@@ -1827,7 +1958,7 @@ wp_plugin_manager() {
         read -rp "${cyan}[USER]${blue} Select ID to DELETE (0 to cancel): " d_choice
         if [[ "$d_choice" =~ ^[0-9]+$ ]] && (( d_choice >= 1 && d_choice <= ${#installed[@]} )); then
           local del_slug="${installed[$((d_choice-1))]}"
-          read -rp "Confirm deletion of $del_slug? (y|n): " confirm
+          read -rp "${cyan}[USER]${reset} Confirm deletion of $del_slug? (y|n): " confirm
           [[ "$confirm" == "y" ]] && $wp_cmd plugin delete "$del_slug"
         fi
         ;;
@@ -1889,10 +2020,13 @@ get_site_user() {
 }
 check_permissions() {
   local domain="$1"
-  source "/etc/one-click/sites/$domain/meta.conf" || source "/etc/one-click/wordpress/$domain/meta.conf"
+  . "/etc/one-click/${mode_ver:-$type}/$domain/meta.conf" || true
+  . "/etc/one-click/apps/nodejs/${domain}/meta.conf" || true
   local site_dir="$SITE_DIR"
-  local expected_user="$SITE_USER"
-  local expected_group="${SITE_GROUP:-$expected_user}"
+  local secrets_dir="/etc/one-click/db-manager/secrets/db/${domain}.pass"
+  local registry_dir="/etc/one-click/db-manager/sites/${domain}.json"
+  local expected_user="${SITE_USER:-$USER}"
+  local expected_group="${SITE_GROUP:-$WEBSERVER_USER}"
   [[ ! -d "$site_dir" ]] && {
     error "Directory does not exist: $site_dir"
     return 1
@@ -1921,7 +2055,7 @@ check_permissions() {
         bad=$((bad + 1))
       fi
     fi
-  done < <(find "$site_dir" -print0)
+  done < <(find "$site_dir" "$registry_dir" "$secrets_dir" -print0)
   echo
   success "Scan complete"
   info \
@@ -1932,30 +2066,277 @@ check_permissions() {
     success "All permissions now look correct."
   fi
 }
-############################## STATIC SITES ##############################################
-create_static_site() {
-  local domain site_dir webserver_choice
-  start_screen static
-  php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+############################## APPS (NODEjs) #############################################
+app_exists() {
+  local runtime="$1"
+  local domain="$2"
+  [[ -d "${app_dir}/${runtime}/${domain}" ]]
+}
+app_user_from_domain() {
+  local domain="$1"
+  echo "$(sed 's/.*\.//' <<< $(basename $(mktemp)))-$domain" \
+    | tr '.' '-' \
+    | tr -cd 'a-zA-Z0-9-'
+}
+app_runtime_path() {
+  local runtime="$1"
+  local domain="$2"
+  echo "${app_dir}/${runtime}/${domain}"
+}
+app_allocate_port() {
+  local used
+  used="$(ss -lnt | awk 'NR>1 {split($4,a,":"); print a[length(a)]}')"
+  for ((port=$app_port_start;port<=$app_port_end;port++)); do
+    if ! grep -qx "$port" <<< "$used"; then
+      echo "$port"
+      return 0
+    fi
+  done
+  return 1
+}
+app_create_user() {
+  local domain="$1"
+  local user
+  user="$(app_user_from_domain "$domain")"
+  if ! id "$user" &>/dev/null; then
+    useradd \
+      --system \
+      --shell /usr/sbin/nologin \
+      --home "/nonexistent" \
+      "$user"
+  fi
+  echo "$user"
+}
+app_create_directories() {
+  local runtime="$1"
+  local domain="$2"
+  local root
+  root="$(app_runtime_path "$runtime" "$domain")"
+  mkdir -p \
+    "$root/app" \
+    "$root/logs" \
+    "$root/env" \
+    "$root/run" \
+    "$root/config" \
+    "$root/backups" \
+    "$root/releases"
+}
+app_write_runtime() {
+  local runtime="$1"
+  local domain="$2"
+  local port="$3"
+  local start_command="$4"
+  local user="$5"
+  local root
+  root="$(app_runtime_path "$runtime" "$domain")"
+  local node_path="${root}/node_bin/bin/node"
+  cat > "${root}/runtime.json" <<EOF
+{
+  "runtime": "${runtime}",
+  "domain": "${domain}",
+  "port": ${port},
+  "start": "${start_command}",
+  "user": "${user}",
+  "node_path": "${node_path}"
+}
+EOF
+}
+nodejs_validate_app() {
+  local path="$1"
+  [[ -f "${path}/package.json" ]]
+}
+app_generate_systemd() {
+  local runtime="$1"
+  local domain="$2"
+  local root
+  root="$(app_runtime_path "$runtime" "$domain")"
+  local port; port="$(jq -r '.port' "${root}/runtime.json")"
+  local user; user="$(jq -r '.user' "${root}/runtime.json")"
+  local node_path; node_path="$(jq -r '.node_path' "${root}/runtime.json")"  
+  local entry_point
+  if [[ -f "${root}/app/package.json" ]]; then
+    entry_point="$(jq -r '.main // "index.js"' "${root}/app/package.json")"
+    [[ "$entry_point" == "null" ]] && entry_point="index.js"
+  else
+    entry_point="index.js"
+  fi
+  local service="one-click-${runtime}-${domain}.service"  
+  cat > "/etc/systemd/system/${service}" <<EOF
+[Unit]
+Description=One-Click ${runtime} App (${domain})
+After=network.target
+
+[Service]
+Type=simple
+User=${user}
+WorkingDirectory=${root}/app
+
+Environment=PORT=${port}
+Environment=NODE_ENV=production
+Environment=PATH=${root}/node_bin/bin:/usr/bin:/bin
+EnvironmentFile=-${root}/env/.env
+
+ExecStart=${node_path} ${entry_point}
+
+Restart=always
+RestartSec=5
+StandardOutput=append:${root}/logs/app.log
+StandardError=append:${root}/logs/error.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now "${service}"
+}
+app_generate_nginx_proxy() {
+  local domain="$1"
+  local port="$2"
+  . "${app_dir}/${runtime}/${domain}/meta.conf"
+  cat> ${app_dir}/nodejs/${domain}/config/nginx.conf <<EOF
+
+location / {
+
+    proxy_pass http://127.0.0.1:${port};
+
+    proxy_http_version 1.1;
+
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_read_timeout 300;
+    proxy_connect_timeout 300;
+
+}
+
+EOF
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    nginx_conf_file="/etc/nginx/sites-enabled/$domain.conf"
+  else
+    nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
+  fi
+  sed -Ei "
+    /^[ \t]+index.*/ {
+      p;
+      s,,include ${app_dir}/nodejs/${domain}/config/nginx.conf;,
+    };
+    \,location / \{,,/}/d
+  " "$nginx_conf_file"
+  systemctl reload nginx
+}
+app_generate_apache_proxy() {
+  local domain="$1"
+  local port="$2"
+  .  "${app_dir}/${runtime}/${domain}/meta.conf"
+  cat> ${app_dir}/nodejs/${domain}/config/apache.conf <<EOF
+
+ProxyPreserveHost On
+
+ProxyPass / http://127.0.0.1:${port}/
+ProxyPassReverse / http://127.0.0.1:${port}/
+
+RequestHeader set X-Forwarded-Proto "https"
+
+EOF
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    apache_conf_file="/etc/apache2/sites-available/$domain.conf"
+  else
+    apache_conf_file="/etc/httpd/conf.d/$domain.conf"
+  fi
+  sed -Ei "
+    /DocumentRoot.*/ {
+      p;
+      s,,IncludeOptional ${app_dir}/nodejs/${domain}/config/apache.conf,
+    };
+  " "$apache_conf_file"
+  systemctl reload apache2 || systemctl reload httpd
+}
+app_service_name() {
+  local runtime="$1"
+  local domain="$2"
+  echo "one-click-${runtime}-${domain}.service"
+}
+app_start() {
+  local runtime="$1"
+  local domain="$2"
+  systemctl start "$(app_service_name "$runtime" "$domain")"
+}
+app_stop() {
+  local runtime="$1"
+  local domain="$2"
+  systemctl stop "$(app_service_name "$runtime" "$domain")"
+}
+app_restart() {
+  local runtime="$1"
+  local domain="$2"
+  systemctl restart "$(app_service_name "$runtime" "$domain")"
+}
+app_status() {
+  local runtime="$1"
+  local domain="$2"
+  systemctl status "$(app_service_name "$runtime" "$domain")"
+}
+app_logs() {
+  local runtime="$1"
+  local domain="$2"
+  local app_log_dir="/var/log/one-click/apps/${runtime}/${domain}"
+  local root
+  root="$(app_runtime_path "$runtime" "$domain")"
+  tail -F \
+    "${app_log_dir}/app.log" \
+    "${app_log_dir}/error.log"
+}
+ensure_isolated_nodejs() {
+  local root="$1"
+  local node_version="v20.11.1" # You can pin any stable LTS release here
+  local arch
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64) arch="x64"    ;;
+    aarch64) arch="arm64" ;;
+    *) error "Unsupported architecture: $arch"; return 1 ;;
+  esac
+  local node_dir="${root}/node_bin"
+  if [[ -x "${node_dir}/bin/node" && -x "${node_dir}/bin/npm" ]]; then
+    return 0
+  fi
+  info "Installing Node.js (${node_version})..."
+  mkdir -p "$node_dir"
+  local tarball="node-${node_version}-linux-${arch}.tar.xz"
+  local url="https://nodejs.org/dist/${node_version}/${tarball}"
+  curl -fsSL "$url" -o "/tmp/${tarball}"
+  tar -xJf "/tmp/${tarball}" -C "$node_dir" --strip-components=1
+  rm "/tmp/${tarball}"
+  success "Isolated Node.js engine placed at ${node_dir}/bin/node"
+}
+app_create_nodejs() {
+  local git_repo="${1:-}"
+  local runtime="nodejs"
+  local php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
   while true; do
-    local br=0
-    read -rp "${cyan}[USER]${reset} Enter a domain name to use for your new site site: " domain
+    br=0
+    read -rp "${cyan}[USER]${reset} Enter a domain name to use for your new app: " domain
     if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-      echo "Invalid domain name"
+      warn "Invalid domain name"
       br=1
     fi
     if [[ -n "$domain" && "$br" -ne 1 ]]; then
       export domain
       break
     fi
-    echo "Domain cannot be empty!"
+    warn "Domain cannot be empty!"
   done
   info "Which webserver should host $domain?" \
     "[1] Nginx" \
     "[2] Apache"
   read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver_choice
   case "$webserver_choice" in
-    1) 
+    1)
       webserver="nginx"
       if id nginx &> /dev/null; then
         webserver_user="nginx"
@@ -1968,7 +2349,7 @@ create_static_site() {
         return 1
       fi
       ;;
-    2) 
+    2)
       webserver="apache"
       if command -v apt &> /dev/null; then
         webserver_user=www-data
@@ -1981,7 +2362,327 @@ create_static_site() {
         return 1
       fi
       ;;
-    *) echo "Invalid selection"; return 1 ;;
+    *) error "Invalid selection"; return 1 ;;
+  esac
+  if app_exists "$runtime" "$domain"; then
+    warn "Application already exists."
+    return 1
+  fi
+  mkdir -p "${app_dir}/${runtime}/${domain}"
+  local root
+  root="$(app_runtime_path "$runtime" "$domain")"
+  local user
+  user="$(app_create_user "$domain")"
+  if [[ ! $(sed -En '/# One-Click Routing/p' /etc/hosts) == "# One-Click Routing" ]]; then
+    echo "# One-Click Routing" >> /etc/hosts
+  elif [[ ! $(cat /etc/hosts) =~ 127.0.0.1.*"$domain" ]]; then
+    sed -Ei.one-click_bak -e "/# One-Click/{a\127.0.0.1\t${domain}" -e '}' /etc/hosts
+  fi
+  warn "Creating app owner $user"
+  id "$user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$user"
+  echo "USER=$user" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  echo "WEBSERVER_USER=$webserver_user" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  echo "WEBSERVER=$webserver" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  echo "APP_DIR=$app_dir" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  echo "SITE_DIR=$root" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  info "Creating Node.js application..."
+  local port
+  port="$(app_allocate_port)"
+  if [[ -z "$port" ]]; then
+    error "Failed to allocate port."
+    return 1
+  fi
+  echo "PORT=$port" >> "${app_dir}/${runtime}/${domain}/meta.conf"
+  app_create_directories "$runtime" "$domain"
+  ensure_isolated_nodejs "$root"
+  cd "${root}/app" || return 1
+  if [[ -n "$git_repo" ]]; then
+    git clone "$git_repo" "${root}/app"
+  else
+    mkdir -p "${root}/app"
+  fi
+  if [[ ! -f "${root}/app/package.json" ]]; then
+    info "No package.json found. Creating a generic default configuration..."
+    mkdir -p "${root}/app/public"
+    info "Generating default page"
+  cat <<'EOF' > "${root}/app/public/index.html"
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>SiteHUB Default WebPage</title><link rel="icon" type="image/png" href="https://sitehub.agency/wp-content/uploads/2025/06/cropped-Untitled-design-9-e1750161170804.png"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box}body,html{height:100%;font-family:'Roboto',sans-serif}body{background:linear-gradient(135deg,#28a745,#003366);display:flex;flex-direction:column;justify-content:space-between;color:#fff}header{text-align:center;padding:50px 20px}header img.logo{height:80px;margin-bottom:20px}header h1{font-size:2.5em;margin-bottom:10px}header p{font-size:1.2em}.visuals{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;z-index:0}.visuals span{position:absolute;display:block;border-radius:50%;background:rgba(255,255,255,.05);animation:float 25s linear infinite}@keyframes float{0%{transform:translateY(0) rotate(0deg)}100%{transform:translateY(-1000px) rotate(720deg)}}main{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:20px;text-align:center}section{margin:50px 0}.main-hero h2{font-size:2em;margin-bottom:15px}.main-hero p{font-size:1.1em;line-height:1.6;margin-bottom:25px}.cta-btn{display:inline-block;background:#fff;color:#003366;font-weight:700;text-decoration:none;padding:12px 25px;border-radius:50px;margin:10px;transition:all .3s ease}.cta-btn:hover{background:#e0e0e0}footer{text-align:center;padding:20px;font-size:.9em;color:rgba(255,255,255,.7)}@media(max-width:768px){header h1{font-size:2em}.main-hero h2{font-size:1.6em}}</style></head><body><div class="visuals" id="visuals"></div><header><img class="logo" src="https://us1.plesk.sitehub.agency/images/logos/6EwrLBBn5Xg.png" alt="SiteHUB"><h1>Default Web Page for <span id="domain-name">dynamic-domain.ng</span></h1><p>This page is generated by <a href="https://sitehub.agency" style="color:darkgreen;text-decoration:none;">Site <span style="color:blue;text-decoration:none;">HUB</span></a>, the leading hosting provider in Nigeria.<br>You see this page because there is no website at this address.</p></header><main id="placeholder-content"></main><footer>Copyright &copy; SiteHUB Agency <span id="year"></span>. All rights reserved - RC6935293</footer><script>document.getElementById("year").textContent=new Date().getFullYear();document.addEventListener("DOMContentLoaded",()=>{const e=location.hostname,t=location.protocol+"//"+e+":8443",n="support@sitehub.agency";document.getElementById("domain-name").textContent=e;const o=document.getElementById("placeholder-content");let a="";a+=`<section class="main-hero"><h2>Your domain <strong>${e}</strong> is now live!</h2><p><strong>${e}</strong> default page has been generated by the One-Click Toolbox Automation tool . No website content has been uploaded yet.<br>For more information about One-Click Toolbox:</p><a class="cta-btn" href="https://github.com/SiteHUB-NG/One-Click/" target="_blank">View On GitHub</a><br><br><br><hr><br><h2>Need Hosting?</h2><p>Start your own website in minutes with our web hosting & VPS plans!</p><a class="cta-btn" href="https://sitehub.agency/shared/" target="_blank">View Web Hosting Plans</a><a class="cta-btn" href="https://features.sitehub.agency/vps/" target="_blank">View VPS Plans</a></section>`,a+=`<section class="main-hero"><h2>Need Help?</h2><p>Contact our support team: <a style="color:#fff;text-decoration:underline;" href="mailto:${n}">${n}</a></p></section>`,o.innerHTML=a;const r=document.getElementById("visuals");for(let t=0;t<30;t++){let n=document.createElement("span"),o=60*Math.random()+20;n.style.width=o+"px",n.style.height=o+"px",n.style.left=100*Math.random()+"%",n.style.top=100*Math.random()+"%",n.style.animationDuration=20+20*Math.random()+"s",r.appendChild(n)}});</script></body></html>
+EOF
+    cat > "${root}/app/package.json" <<EOF
+{
+  "name": "${domain//./-}",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {}
+}
+EOF
+  cat > "${root}/app/index.js" <<EOF
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const port = process.env.PORT || 3000;
+const publicDir = path.join(__dirname, 'public');
+
+const mimeTypes = {
+    '.html': 'text/html',
+    '.css': 'text/css',
+    '.js': 'application/javascript',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon'
+};
+
+const server = http.createServer((req, res) => {
+    const safeUrl = decodeURIComponent(req.url.split('?')[0]);
+    let filePath = path.join(publicDir, safeUrl === '/' ? 'index.html' : safeUrl);
+
+    const relative = path.relative(publicDir, filePath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        res.writeHead(403);
+        return res.end('403 Forbidden');
+    }
+
+    fs.readFile(filePath, (err, content) => {
+        if (err) {
+            res.writeHead(404);
+            return res.end('404 Not Found');
+        }
+
+        const ext = path.extname(filePath);
+        res.writeHead(200, {
+            'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+            'X-Content-Type-Options': 'nosniff' // Additional security header
+        });
+
+        res.end(content);
+    });
+});
+
+server.listen(port, '127.0.0.1', () => {
+    console.log(\`Server listening on \${port}\`);
+});
+EOF
+  fi
+  if ! nodejs_validate_app "${root}/app"; then
+    warn "package.json not found."
+    error "Invalid Node.js application."
+    return 1
+  fi
+  install_webserver nodejs "$domain" "$app_dir"
+  create_isolated_php_runtime "$domain" "$php_ver" "$user" "$webserver_user" "apps/nodejs"
+  if [[ "$webserver" == "nginx" ]];then
+    app_generate_nginx_proxy "$domain" "$port"
+  else
+    app_generate_apache_proxy "$domain" "$port"
+  fi
+  chown -R "${user}:${webserver_user}" "$root"
+  one-click engine "allow $port"
+  info "Running npm install via isolated binary engine..."
+  sudo -u "$user" \
+    env PATH="${root}/node_bin/bin:/usr/bin:/bin" \
+    HOME="${root}" \
+    "${root}/node_bin/bin/npm" install
+  app_write_runtime \
+    "$runtime" \
+    "$domain" \
+    "$port" \
+    "npm start" \
+    "$user"
+  type="apps/nodejs"
+  check_permissions "$domain"
+  printf "${magenta}[NODEjs]${reset} %s\n" \
+    "=================================================" \
+    "NODEJS APPLICATION CREATED" \
+    "=================================================" " " \
+    "Domain:  $domain" \
+    "Runtime: nodejs" \
+    "Port:    $port" \
+    "Path:    $root" " " 
+  app_generate_systemd "$runtime" "$domain"
+  success "Node.js hosting successfully configured and proxied"
+}
+nodejs_board() {
+  if [[ -z "${domain:-}" ]]; then
+    select_domain || return 1
+  fi
+  if [[ ! -d "/etc/one-click/apps/nodejs/$domain" ]]; then
+    error "No app found for $domain"
+    return 1
+  fi
+  runtime="$1"
+  root="$(app_runtime_path "$runtime" "$domain")"
+  service="$(app_service_name "$runtime" "$domain")"
+  while true; do
+    local status="STOPPED"
+    if systemctl is-active --quiet "$service"; then
+      status="RUNNING"
+    fi
+    clear
+    printf "%s\n" \
+      "${cyan}=================================================${reset}" \
+      "${magenta}        ONE-CLICK APP MANAGEMENT${reset}" \
+      "${cyan}=================================================${reset}" " " \
+      "${yellow}Domain:${reset} $domain" \
+      "${yellow}Runtime:${reset} $runtime" \
+      "${yellow}Status:${reset} $status"
+    if [[ -f "${root}/runtime.json" ]]; then
+      printf "${yellow}Port:${reset}     %s\n" \
+        $(jq -r '.port' "${root}/runtime.json")
+    fi
+    paste <(printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}ONE-CLICK NodeJS ADMIN         ${blue}             ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Start Application  ${blue}                                   ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Stop Application ${blue}                                     ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Restart Application${blue}                                   ║" \
+      "║ ${magenta}4${blue}  ║ ${green}View Status${blue}                                           ║" \
+      "║ ${magenta}5${blue}  ║ ${green}View Logs   ${blue}                                          ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Enable Service ${blue}                                       ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Disable Service   ${blue}                                    ║" \
+      "║ ${magenta}8${blue}  ║ ${green}Toggle Service   ${blue}                                     ║" \
+      "║ ${magenta}9${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
+      "║ ${magenta}10${blue} ║ ${green}View Service File${blue}                                     ║" \
+      "║ ${magenta}11${blue} ║ ${green}Edit Environment File${blue}                                 ║" \
+      "║ ${magenta}12${blue} ║ ${green}Open App Directory${blue}                                    ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝")
+  read -rp "${cyan}[USER]${blue} Select an option [0-12]: " choice
+    case "$choice" in
+      1)
+        app_start "$runtime" "$domain"
+        success "Application started"
+        sleep 1
+        ;;
+      2)
+        app_stop "$runtime" "$domain"
+        success "Application stopped"
+        sleep 1
+        ;;
+      3)
+        app_restart "$runtime" "$domain"
+        success "Application restarted"
+        sleep 1
+        ;;
+      4)
+        clear
+        systemctl status "$service"
+        read -rp "${cyan}[USER]${blue} Press enter to continue..."
+        ;;
+      5)
+        clear
+        app_logs "$runtime" "$domain"
+        ;;
+      6)
+        systemctl enable "$service"
+        success "Service enabled"
+        sleep 1
+        ;;
+      7)
+        systemctl disable "$service"
+        success "Service disabled"
+        sleep 1
+        ;;
+      8)
+        if systemctl is-enabled --quiet "$service"; then
+          systemctl disable "$service"
+          warn "Service disabled"
+        else
+          systemctl enable "$service"
+          success "Service enabled"
+        fi
+        sleep 1
+        ;;
+      9) check_permissions "$domain" ;;
+      10)
+        clear
+        less "/etc/systemd/system/${service}"
+        ;;
+      11)
+        mkdir -p "${root}/env"
+        ${EDITOR:-nano} "${root}/env/.env"
+        ;;
+      12)
+        clear
+        cd "${root}" || return 1
+        bash
+        ;;
+      0)
+        error "Exiting..."
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
+        ;;
+      *) error "Invalid option" ;;
+    esac
+  done
+}
+apps_menu() {
+  used_app="${1:-}"
+  if [[ "${used_app:-}" == "nodejs" ]]; then
+    nodejs_board "$used_app"
+  else
+    config_dir="$base/sites/config"
+    profiles_file="$config_dir/remotes.conf"
+    map_file="$config_dir/domain_map.conf"
+    current_profile_file="$config_dir/current_profile"
+    mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
+  fi
+}
+############################## STATIC SITES ##############################################
+create_static_site() {
+  local domain site_dir webserver_choice
+  start_screen static
+  php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+  while true; do
+    local br=0
+    read -rp "${cyan}[USER]${reset} Enter a domain name to use for your new site site: " domain
+    if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+      warn "Invalid domain name"
+      br=1
+    fi
+    if [[ -n "$domain" && "$br" -ne 1 ]]; then
+      export domain
+      break
+    fi
+    warn "Domain cannot be empty!"
+  done
+  info "Which webserver should host $domain?" \
+    "[1] Nginx" \
+    "[2] Apache"
+  read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver_choice
+  case "$webserver_choice" in
+    1)
+      webserver="nginx"
+      if id nginx &> /dev/null; then
+        webserver_user="nginx"
+      elif id www-data &> /dev/null; then
+        webserver_user="www-data"
+      fi
+      if (systemctl is-active apache2 || systemctl is-active httpd) &> /dev/null; then
+        error "Apache is already installed"
+        warn "Either continue using Apache or disable/remove it"
+        return 1
+      fi
+      ;;
+    2)
+      webserver="apache"
+      if command -v apt &> /dev/null; then
+        webserver_user=www-data
+      else
+        webserver_user="apache"
+      fi
+      if systemctl is-active nginx 2> /dev/null; then
+        error "Nginx is already installed"
+        warn "Either continue using Nginx or disable/remove it"
+        return 1
+      fi
+      ;;
+    *) error "Invalid selection"; return 1 ;;
   esac
   web_user="ocb_$(echo -n "$domain" | sha1sum | cut -c1-8)"
   warn "Creating web owner $web_user"
@@ -1998,12 +2699,12 @@ create_static_site() {
     [[ -n "$email" ]] && break
   done
   while true; do
-    read -rp "{cyan}[USER]${reset} Would you like to automate sitemap and robots generation? (y|n): " robots
+    read -rp "${cyan}[USER]${reset} Would you like to automate sitemap and robots generation? (y|n): " robots
     [[ -n "$robots" ]] && break
   done
   robots="${robots,,}"
   if [[ "$robots" == "y" || "$robots" == "yes" ]]; then
-    sitemap_robots $domain $site_dir 
+    sitemap_robots $domain $site_dir
     cat <<EOF >/etc/cron.d/one-click-sitemap_robots
 # Crawl site at 2am every week for changes to be submitted to Google
 0 2 * * 0 root bash /var/cache/one-click/wordpress.sh --crawler $domain $site_dir       # One-Click $domain Crawler
@@ -2031,7 +2732,7 @@ EOF
 }
 clone_static_site() {
   old_domain="$1"
-  read -rp "New cloned domain name: " new_domain
+  read -rp "${cyan}[USER]${reset} New cloned domain name: " new_domain
   echo
   source /etc/one-click/sites/$old_domain/meta.conf
   old_site_dir="/etc/one-click/sites/${old_domain}/www"
@@ -2135,11 +2836,16 @@ server {
     }
 }
 EOF
-  if [[ "$pkg_mgr" == "apt" ]]; then
+  if [[ "$pkg_mgr" == "apt" && -d /etc/nginx/sites-available ]]; then
     ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/$domain.conf
   fi
-  systemctl enable nginx --now
-  nginx -t && systemctl reload nginx
+  for i in /etc/nginx/sites-enabled/ /etc/nginx/sites-available /etc/nginx/con.d/ ; do
+    if [[ ! -d "$i" ]]; then
+      continue
+    fi
+    find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
+  done
+  nginx -t && systemctl enable --now nginx
 }
 apache_static_conf() {
   local domain="$1"
@@ -2195,10 +2901,10 @@ static_backup() {
     printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
   }
   warn() {
-    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n" 
+    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
   }
   error() {
-    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n" 
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
   }
   local domain base site backup timestamp webserver
   domain="${1:-}"
@@ -2293,7 +2999,7 @@ static_restore() {
           cp "$backup_dir/nginx.conf" /etc/nginx/sites-available/$domain.conf 2>/dev/null || \
           cp "$backup_dir/nginx.conf" /etc/nginx/conf.d/$domain.conf
           [[ -d /etc/nginx/sites-enabled ]] && \
-          ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/  
+          ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/
           systemctl reload nginx
         else
           error "$WEBSERVER is inactive"
@@ -2308,7 +3014,7 @@ static_restore() {
           webserver_user=www-data
           if systemctl is-active apache2.service &> /dev/null; then
             cp "$backup_dir/apache.conf" /etc/apache2/sites-available/$domain.conf
-            a2ensite "$domain"       
+            a2ensite "$domain"
             systemctl reload apache2
           else
             error "$WEBSERVER is inactive"
@@ -2423,7 +3129,7 @@ detect_env() {
     [[ "$os_family" == "debian" ]] && conf_path="/etc/nginx/sites-enabled" || conf_path="/etc/nginx/conf.d"
   elif systemctl is-active --quiet apache2 || systemctl is-active --quiet httpd; then
     webserver="apache"
-    if [[ "$os_family" == "debian" ]]; then 
+    if [[ "$os_family" == "debian" ]]; then
       conf_path="/etc/apache2/sites-enabled"
       webserver="apache2"
     else
@@ -2431,7 +3137,7 @@ detect_env() {
       webserver="httpd"
     fi
   else
-    error "No supported webserver detected!" 
+    error "No supported webserver detected!"
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
 }
@@ -2466,7 +3172,7 @@ get_service_state() {
 }
 switch_cli_php() {
   info "Detecting installed PHP CLI versions..."
-  local php_bins=($(ls /usr/bin/php[0-9].* 2>/dev/null | sort -V))    
+  local php_bins=($(ls /usr/bin/php[0-9].* 2>/dev/null | sort -V))
   if [[ ${#php_bins[@]} -eq 0 ]]; then
     error "No versioned PHP binaries found in /usr/bin/"
     return 1
@@ -2496,7 +3202,7 @@ switch_site_php() {
   ini_file="$base_conf/php.ini"
   fpm_conf="$base_conf/php-fpm.conf"
   current_ver=$(awk -F"[ /]" '/ExecStart/{print $4}' <(systemctl cat php-fpm@$domain.service))
-  read -rp "Enter PHP version (e.g., 8.2): " new_ver
+  read -rp "${cyan}[USER]${reset} Enter PHP version (e.g., 8.2): " new_ver
   ver_nodot="${new_ver//.}"
   if [[ "$pkg_mgr" == "apt" ]]; then
     if ! dpkg -l | grep -q "php${new_ver}-fpm"; then
@@ -2587,9 +3293,9 @@ tune_php_settings() {
   local php_vers=($(ls /etc/php/ 2>/dev/null || ls /etc/opt/remi/ 2>/dev/null | grep -E '[0-9]\.[0-9]'))
   [[ ${#php_vers[@]} -eq 0 ]] && { error "No PHP configurations found."; return 1; }
   printf "$(tput setaf 98)[PHP]:${reset} %s\n" "Select PHP version to tune:"
-  for i in "${!php_vers[@]}"; do 
+  for i in "${!php_vers[@]}"; do
     printf "${magenta}[${yellow}%d${magenta}]${reset} PHP %s\n" "$((i+1))" "${php_vers[$i]}"
-  done    
+  done
   while true; do
     read -rp "${cyan}[USER]${blue} Choice: " v_idx
     [[ "$v_idx" =~ ^[0-9]+$ ]] && (( v_idx >= 1 && v_idx <= ${#php_vers[@]} )) && break || error "Invalid selection."
@@ -2642,7 +3348,7 @@ php_menu() {
       "${magenta}[${yellow}0${magenta}]${reset} Exit") <(printf "${blue}[${green}${domain}${blue}] ${yellow}PHP VERSION:${blue} ${php_version} ${magenta}║ ${yellow}WEBSERVER:${blue} ${webserver}${reset}")
       read -rp "${cyan}[USER]${reset} Option: " opt
       case "$opt" in
-        1) 
+        1)
           if [[ "$os_family" == "debian" ]]; then
             apt-cache pkgnames | grep -E '^php[0-9]+\.[0-9]+$' | sort -u
           else
@@ -2660,7 +3366,7 @@ php_menu() {
         *) error "Invalid option" ;;
       esac
       echo
-      read -rp "Press Enter to continue..."
+      read -rp "${cyan}[USER]${reset} Press Enter to continue..."
     done
 }
 set_domain_context() {
@@ -2709,7 +3415,7 @@ php_process_control() {
       *) echo "Invalid option"        ;;
     esac
     echo
-    read -rp "Press Enter to continue..."
+    read -rp "${cyan}[USER]${reset} Press Enter to continue..."
   done
 }
 select_domain() {
@@ -2722,10 +3428,14 @@ select_domain() {
       list_domains() {
         ls /etc/one-click/sites | sed -n '/\./p'
       }
+    elif [[ "$used_app" == "nodejs" ]]; then
+      list_domains() {
+        ls /etc/one-click/apps/nodejs | sed -n '/\./p'
+      }
     fi
   else
     list_domains() {
-      ls /etc/one-click/wordpress /etc/one-click/sites 2> /dev/null | sed -n '/\./p'
+      ls /etc/one-click/wordpress /etc/one-click/sites /etc/one-click/apps/nodejs 2> /dev/null | sed -n '/\./p'
     }
   fi
   mapfile -t domains < <(list_domains)
@@ -2779,7 +3489,7 @@ get_heartbeat() {
   local status
   status=$(curl -Is -o /dev/null -w "%{http_code}" --connect-timeout 2 "$url" 2>/dev/null)
   case "$status" in
-    20[0-9]|30[1278]) 
+    20[0-9]|30[1278])
       echo -e "${green}●${reset}"
       ;;
     *)
@@ -2791,7 +3501,7 @@ create_isolated_php_runtime() {
   local domain php_ver site_user webserver
   domain="$1"
   local php_ver="$2"
-  local site_user="$3" 
+  local site_user="$3"
   local webserver="$4"
   local type="$5"
   if [[ -f "/usr/sbin/php-fpm$php_ver" ]]; then
@@ -2837,7 +3547,7 @@ listen.group = ${webserver_user:-${webserver}}
 listen.mode = 0660
 pm = ondemand
 pm.max_children = 5
-php_admin_value[open_basedir] = /etc/one-click/${type}/${domain}/:/etc/one-click/${type}/${domain}/www/:/tmp:/var/lib/one-click/${domain}/
+php_admin_value[open_basedir] = /etc/one-click/${type}/${domain}/:/etc/one-click/${type}/${domain}/www/:/tmp:/var/lib/one-click/${domain}/:/etc/one-click/db-manager/runtime/tokens:/etc/one-click/db-manager/sites/${domain}.json:/etc/one-click/db-manager/secrets/db/${domain}.pass:/etc/one-click/db-manager/runtime/tokens/
 php_admin_value[upload_tmp_dir] = $lib_dir/tmp
 php_admin_value[session.save_path] = $lib_dir/sessions
 php_admin_value[disable_functions] =
@@ -2966,6 +3676,95 @@ rollback_restore() {
   fi
   success "Rollback completed for $domain"
 }
+web_log_view() {
+  local domain="$1"
+  local type="${2:-access}"
+  local mode="${3:-view}"
+  local status_filter="${4:-}"
+  local log=""
+  local base
+  for base in /var/log/nginx /var/log/apache /var/log/httpd; do
+    if [[ -f "$base/$domain/${type}.log" ]]; then
+      log="$base/$domain/${type}.log"
+      break
+    fi
+  done
+  [[ -z "$log" ]] && {
+    echo "Log not found for $domain ($type)"
+    return 1
+  }
+  color_access() {
+    awk -v status_filter="$status_filter" '
+    {
+      ip=$1
+      match($0, /\[[^]]+\]/)
+      timestamp=substr($0, RSTART, RLENGTH)
+      method=$6
+      gsub(/"/,"",method)
+      path=$7
+      status=$9
+      if (status_filter != "" && status !~ "^"status_filter)
+        next
+      reset="\033[0m"
+      ts_color="\033[90m"
+      ip_color="\033[36m"
+      method_color="\033[34m"
+      if (status ~ /^2/)
+        status_color="\033[32m"
+      else if (status ~ /^3/)
+        status_color="\033[36m"
+      else if (status ~ /^4/)
+        status_color="\033[33m"
+      else if (status ~ /^5/)
+        status_color="\033[31m"
+      else
+        status_color=reset
+      printf "%s%s%s\n",
+        ts_color, timestamp, reset
+      printf "  %s%-15s%s  %s%-6s%s  %s%-4s%s\n",
+        ip_color, ip, reset,
+        method_color, method, reset,
+        status_color, status, reset
+      printf "  %s\n\n", path
+    }'
+  }
+  color_error() {
+    awk '
+    {
+      line=$0
+      reset="\033[0m"
+      match(line, /\[[^]]+\]/)
+      timestamp=substr(line, RSTART, RLENGTH)
+      ts_color="\033[90m"
+      if (tolower(line) ~ /critical|fatal|emerg/)
+        color="\033[31m"
+      else if (tolower(line) ~ /warn|warning/)
+        color="\033[33m"
+      else if (tolower(line) ~ /notice|info/)
+        color="\033[36m"
+      else
+        color="\033[0m"
+      gsub(/\[[^]]+\]/, "", line)
+      printf "%s%s%s\n",
+        ts_color, timestamp, reset
+      printf "  %s%s%s\n\n",
+        color, line, reset
+    }'
+  }
+  if [[ "$mode" == "tail" ]]; then
+    if [[ "$type" == "access" ]]; then
+      (tail -F "$log" | color_access) || true
+    else
+      (tail -F "$log" | color_error) || true
+    fi
+    return
+  fi
+  if [[ "$type" == "access" ]]; then
+    (color_access < "$log" | less -R) || true
+  else
+    (color_error < "$log" | less -R) || true
+  fi
+}
 ##################################### SECURITY ##################################
 declare -gA offense_count
 # ==== Do Not Monitor IPs In Whitelist ====
@@ -2984,7 +3783,7 @@ apply_block() {
   ip="$1"
   proto="$2"
   port="$3"
-  action="$4"      
+  action="$4"
   duration="$5"
   file="$6"
   $fw_bin -I INPUT -p "$proto" --dport "$port" -s "$ip" -j "$action"
@@ -3002,13 +3801,13 @@ apply_block() {
 monitor_web_logs() {
   local ip domain uri duration guard_id stats_file
   domain="$1"
-  infos() { 
+  infos() {
     s=$1
-    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s${s}\n" 
+    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s${s}\n"
   }
-  error() { 
+  error() {
     s=$1
-    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0) %s${s}\n" 
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0) %s${s}\n"
   }
   local log_files=()
   stats_file="/etc/one-click/rule-engine/guard/monitor_stats.db"
@@ -3071,6 +3870,7 @@ monitor_web_logs() {
     fi
   fi
   done
+  return
 }
 submit_sitemap() {
   sitemap="$1"
@@ -3288,11 +4088,11 @@ if ! systemctl is-active one-click-guard.service &> /dev/null; then
 fi
 view_security() {
   local filter_domain="$1"
-  local history="${monitor_history_file}" 
+  local history="${monitor_history_file}"
      draw_row() {
     local ts="$1" ip="$2" domain="$3" uri="$4" reason="$5"
     printf "${blue}│ %-13s │ %-20s │ %-13s │ %-13s │ %-13s │${reset}\n" "$ts" "$ip" "$domain" "$uri" "$reason"
-  } 
+  }
   [[ ! -f "$history" ]] && { echo "[INFO]: No history available."; return 0; }
   printf "${blue}┌───────────────┬──────────────────────┬───────────────┬───────────────┬───────────────┐${reset}\n"
   printf "${blue}│ %-13s │ %-17s    │ %-13s │ %-13s │ %-13s │${reset}\n" "Timestamp" "IP" "Domain" "URI" "Reason"
@@ -3301,7 +4101,7 @@ view_security() {
     local ip=$(jq -r '.ip // "0.0.0.0"' <<< "$line")
     local domain=$(jq -r '.domain // "System"' <<< "$line")
     local uri=$(jq -r '.uri // .action // "-"' <<< "$line")
-    local reason=$(jq -r '.reason // "Firewall"' <<< "$line") 
+    local reason=$(jq -r '.reason // "Firewall"' <<< "$line")
     local ts=$(jq -r '.ts' <<< "$line")
     [[ "$reason" =~ Timeout|UNBLOCKED ]] && continue
     if [[ -n "$filter_domain" ]]; then
@@ -3362,7 +4162,7 @@ profile_list() {
     printf "\e[34m║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" "$profile_name" "$profile_host2" "$profile_base_path"
   done
   echo -e "\e[34m╚══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
-  read -rp "Press Enter to continue" 
+  read -rp "${cyan}[USER]${reset} Press Enter to continue"
 }
 profile_assign() {
   local domain
@@ -3610,7 +4410,7 @@ local_list() {
     base="/etc/one-click/wordpress/backups/$domain"
   else
     base="/etc/one-click/sites/backups/$domain"
-  fi  
+  fi
   [[ ! -d "$base" ]] && { error "No local backups found for $domain"; return 1; }
   echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╗\e[0m"
   echo -e "\e[34m║ ID ║ Timestamp            ║ Type                 ║\e[0m"
@@ -3636,11 +4436,11 @@ local_list() {
         local del_idx="${choice#d}"
         if (( del_idx >= 1 && del_idx <= ${#ts_list[@]} )); then
           local target_ts="${ts_list[$((del_idx-1))]}"
-          read -rp "${red}Are you sure you want to delete backup $target_ts? (y/n): ${reset}" confirm
+          read -rp "${cyan}[USER]${reset} ${red}Are you sure you want to delete backup $target_ts? (y/n): ${reset}" confirm
           if [[ "$confirm" == "y" ]]; then
             rm -rf "$base/$target_ts"
             success "Backup $target_ts deleted."
-            return 0 
+            return 0
           fi
         else
           error "Invalid ID for deletion."
@@ -3649,7 +4449,7 @@ local_list() {
       [0-9]*)
         if (( choice >= 1 && choice <= ${#ts_list[@]} )); then
           ts="${ts_list[$((choice-1))]}"
-          selected_backup_ts="$ts" 
+          selected_backup_ts="$ts"
           return 0
         else
           error "Invalid ID for restore."
@@ -3695,7 +4495,7 @@ profile_switch() {
   success "$domain now uses profile '$selected'"
 }
 get_current_profile() {
-  type="${wpstatic}"
+  type="${wpstatic:-}"
   last_backup=$((ls -1 /etc/one-click/${type}/backups/${domain:-}/ 2> /dev/null | head -1) || true)
   lb_ts=$(echo "$last_backup" | sed -E 's/(.{4})(..)(..).(..)(..).*/\3-\2-\1 \4:\5/')
   disk_usage=$(awk '{print $1}' <(du -s -h /etc/one-click/${type}/${domain:-}/ 2> /dev/null))
@@ -3708,7 +4508,7 @@ get_current_profile() {
     printf "${yellow}[${red}[${magenta}Current Profile: ${blue}$(cat ${current_profile_file:-Not Loaded})${red}]${yellow}]${reset}\n"
     echo -e "${blue}┌──────────────────┬───────────────────────────────────────┐"
     printf "${blue}│${yellow}  %-15s${blue} │${yellow} %-47s ${blue}│${reset}\n" "Uptime" "$monitor_info"
-    printf "${blue}├──────────────────┼───────────────────────────────────────┤\n" 
+    printf "${blue}├──────────────────┼───────────────────────────────────────┤\n"
     printf "${blue}│${magenta}  %-15s ${blue}│${green} %-37s ${blue}│${reset}\n" \
       "Domain" "${domain:-N/A}" \
       "Last Backup" "$lb_ts" \
@@ -3871,11 +4671,412 @@ remote_profile_test() {
         error "${red}Connection failed to $profile_host as $profile_user${reset}"
     fi
 }
+###################################### DNS ###################################
+dns_api_root="/etc/one-click/dns"
+dns_provider_root="${dns_api_root}/providers"
+dns_domain_root="${dns_api_root}/domains"
+mkdir -p \
+    "$dns_provider_root" \
+    "$dns_domain_root"
+dns_provider_supported() {
+  cat <<EOF
+
+cloudflare
+digitalocean
+vultr
+route53
+linode
+hetzner
+gcore
+bunny
+namecheap
+
+EOF
+}
+dns_provider_api_base() {
+  local provider="$1"
+  case "$provider" in
+    cloudflare)
+      echo "https://api.cloudflare.com/client/v4"
+      ;;
+    digitalocean)
+      echo "https://api.digitalocean.com/v2"
+      ;;
+    vultr)
+      echo "https://api.vultr.com/v2"
+      ;;
+    route53)
+      echo "https://route53.amazonaws.com/2013-04-01"
+      ;;
+    linode)
+      echo "https://api.linode.com/v4"
+      ;;
+    hetzner)
+      echo "https://dns.hetzner.com/api/v1"
+      ;;
+    gcore)
+      echo "https://api.gcore.com/dns/v2"
+      ;;
+    bunny)
+      echo "https://api.bunny.net"
+      ;;
+    namecheap)
+      echo "https://api.namecheap.com/xml.response"
+      ;;
+  esac
+}
+dns_master_key="/etc/one-click/.dns.key"
+dns_generate_master_key() {
+  [[ -f "$dns_master_key" ]] && return 0
+  mkdir -p /etc/one-click
+  openssl rand -base64 64 \
+    > "$dns_master_key"
+  chmod 600 "$dns_master_key"
+}
+dns_encrypt() {
+  local plaintext="$1"
+  openssl enc -aes-256-cbc -pbkdf2 -a \
+    -salt \
+    -pass file:"$dns_master_key" \
+  <<< "$plaintext"
+}
+dns_decrypt() {
+  local ciphertext="$1"
+  openssl enc -aes-256-cbc -pbkdf2 -a -d \
+    -salt \
+    -pass file:"$dns_master_key" \
+  <<< "$ciphertext"
+}
+dns_provider_path() {
+  local provider="$1"
+  echo "${dns_provider_root}/${provider}"
+}
+dns_provider_config() {
+  local provider="$1"
+  echo "$(dns_provider_path "$provider")/config.conf"
+}
+dns_domain_path() {
+  local domain="$1"
+  echo "${dns_domain_root}/${domain}"
+}
+dns_domain_meta() {
+  local domain="$1"
+  echo "$(dns_domain_path "$domain")/meta.conf"
+}
+dns_provider_add() {
+  dns_generate_master_key
+  echo
+  echo "Supported Providers:"
+  echo
+  dns_provider_supported
+  echo
+  read -rp "${cyan}[USER]${blue} DNS Provider: " provider
+  mkdir -p "$(dns_provider_path "$provider")"
+  case "$provider" in
+    cloudflare|digitalocean|vultr|linode|hetzner|gcore|bunny)
+      read -rsp "API Token: " token
+      echo
+      encrypted="$(dns_encrypt "$token")"
+      cat > "$(dns_provider_config "$provider")" <<EOF
+PROVIDER=${provider}
+TOKEN=${encrypted}
+EOF
+      ;;
+    route53)
+      read -rp "${cyan}[USER]${blue} AWS Access Key: " access
+      read -rsp "AWS Secret Key: " secret
+      echo
+      enc_access="$(dns_encrypt "$access")"
+      enc_secret="$(dns_encrypt "$secret")"
+      cat > "$(dns_provider_config "$provider")" <<EOF
+PROVIDER=route53
+ACCESS_KEY=${enc_access}
+SECRET_KEY=${enc_secret}
+EOF
+      ;;
+    namecheap)
+      read -rp "${cyan}[USER]${blue} API User: " api_user
+      read -rsp "API Key: " api_key
+      echo
+      enc_user="$(dns_encrypt "$api_user")"
+      enc_key="$(dns_encrypt "$api_key")"
+      cat > "$(dns_provider_config "$provider")" <<EOF
+PROVIDER=namecheap
+API_USER=${enc_user}
+API_KEY=${enc_key}
+EOF
+      ;;
+    *)
+      error "Unsupported provider"
+      return 1
+      ;;
+  esac
+  chmod 600 "$(dns_provider_config "$provider")"
+  success "$provider added"
+}
+dns_provider_load() {
+  local provider="$1"
+  source "$(dns_provider_config "$provider")"
+  case "$provider" in
+    cloudflare|digitalocean|vultr|linode|hetzner|gcore|bunny)
+      DNS_TOKEN="$(dns_decrypt "$TOKEN")"
+      ;;
+    route53)
+      DNS_ACCESS_KEY="$(dns_decrypt "$ACCESS_KEY")"
+      DNS_SECRET_KEY="$(dns_decrypt "$SECRET_KEY")"
+      ;;
+    namecheap)
+      DNS_API_USER="$(dns_decrypt "$API_USER")"
+      DNS_API_KEY="$(dns_decrypt "$API_KEY")"
+      ;;
+  esac
+}
+dns_provider_auth_header() {
+  local provider="$1"
+  case "$provider" in
+    cloudflare)
+      echo "Authorization: Bearer ${DNS_TOKEN}"
+      ;;
+    digitalocean)
+      echo "Authorization: Bearer ${DNS_TOKEN}"
+      ;;
+    vultr)
+      echo "Authorization: Bearer ${DNS_TOKEN}"
+      ;;
+    linode)
+      echo "Authorization: Bearer ${DNS_TOKEN}"
+      ;;
+    hetzner)
+      echo "Auth-API-Token: ${DNS_TOKEN}"
+      ;;
+    gcore)
+      echo "Authorization: APIKey ${DNS_TOKEN}"
+      ;;
+    bunny)
+      echo "AccessKey: ${DNS_TOKEN}"
+      ;;
+  esac
+}
+dns_api_request() {
+  local provider="$1"
+  local method="$2"
+  local endpoint="$3"
+  local data="${4:-}"
+  dns_provider_load "$provider"
+  local api
+  api="$(dns_provider_api_base "$provider")"
+  local auth
+  auth="$(dns_provider_auth_header "$provider")"
+  if [[ -n "$data" ]]; then
+    curl -s \
+      -X "$method" \
+      "${api}${endpoint}" \
+      -H "$auth" \
+      -H "Content-Type: application/json" \
+      --data "$data"
+  else
+    curl -s \
+      -X "$method" \
+      "${api}${endpoint}" \
+      -H "$auth"
+  fi
+}
+dns_cloudflare_get_zone_id() {
+  local domain="$1"
+  dns_api_request \
+    cloudflare \
+    GET \
+    "/zones?name=${domain}" \
+  | jq -r '.result[0].id'
+}
+dns_create_zone() {
+  local provider="$1"
+  local domain="$2"
+  case "$provider" in
+    cloudflare)
+      dns_api_request \
+        "$provider" \
+        POST \
+        "/zones" \
+        "{\"name\":\"${domain}\",\"jump_start\":true}"
+      ;;
+    digitalocean)
+      dns_api_request \
+        "$provider" \
+        POST \
+        "/domains" \
+        "{\"name\":\"${domain}\"}"
+      ;;
+    vultr)
+      dns_api_request \
+        "$provider" \
+        POST \
+        "/domains" \
+        "{\"domain\":\"${domain}\"}"
+      ;;
+  esac
+  mkdir -p "$(dns_domain_path "$domain")"
+  cat > "$(dns_domain_meta "$domain")" <<EOF
+DOMAIN=${domain}
+PROVIDER=${provider}
+CREATED=$(date +%s)
+EOF
+  success "Zone created"
+}
+dns_add_record() {
+  local domain="$1"
+  source "$(dns_domain_meta "$domain")"
+  local provider="$PROVIDER"
+  printf "${orange}[DNS]${magenta} %s\n" \
+    "1)${reset} A" \
+    "2)${reset} AAAA" \
+    "3)${reset} CNAME" \
+    "4)${reset} TXT" \
+    "5)${reset} MX" " "
+  read -rp "${cyan}[USER]${blue} Record Type: " type
+  read -rp "${cyan}[USER]${blue} Host: " host
+  read -rp "${cyan}[USER]${blue} Value: " value
+  ttl=3600
+  case "$provider" in
+    cloudflare)
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      case "$type" in
+        1) record_type="A"     ;;
+        2) record_type="AAAA"  ;;
+        3) record_type="CNAME" ;;
+        4) record_type="TXT"   ;;
+        5) record_type="MX"    ;;
+      esac
+      dns_api_request \
+        "$provider" \
+        POST \
+        "/zones/${zone_id}/dns_records" \
+        "{
+          \"type\":\"${record_type}\",
+          \"name\":\"${host}\",
+          \"content\":\"${value}\",
+          \"ttl\":${ttl},
+          \"proxied\":false
+        }"
+      ;;
+    digitalocean)
+      zone="${domain}"
+      case "$type" in
+        1) record_type="A"     ;;
+        2) record_type="AAAA"  ;;
+        3) record_type="CNAME" ;;
+        4) record_type="TXT"   ;;
+        5) record_type="MX"    ;;
+      esac
+      dns_api_request \
+        "$provider" \
+        POST \
+        "/domains/${zone}/records" \
+        "{
+          \"type\":\"${record_type}\",
+          \"name\":\"${host}\",
+          \"data\":\"${value}\",
+          \"ttl\":${ttl}
+        }"
+      ;;
+  esac
+  success "DNS record added"
+}
+dns_list_records() {
+  local domain="$1"
+  source "$(dns_domain_meta "$domain")"
+  local provider="$PROVIDER"
+  case "$provider" in
+    cloudflare)
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      dns_api_request \
+      "$provider" \
+      GET \
+      "/zones/${zone_id}/dns_records" \
+    | jq
+    ;;
+  digitalocean)
+    dns_api_request \
+      "$provider" \
+      GET \
+      "/domains/${domain}/records" \
+    | jq
+    ;;
+  esac
+}
+dns_check_authority() {
+  local domain="$1"
+  source "$(dns_domain_meta "$domain")"
+  local provider="$PROVIDER"
+  printf "${orange}[DNS]${blue} %s${reset}\n" \
+    "=================================================" \
+    " ${yellow}DNS AUTHORITY STATUS${reset}" \
+    "=================================================" " "
+  echo "${orange}[DNS]${magenta} Detected Nameservers:${reset}"
+  dig +short NS "$domain"
+  echo
+  case "$provider" in
+    cloudflare)
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      dns_api_request \
+        "$provider" \
+        GET \
+        "/zones/${zone_id}" \
+      | jq '.result.name_servers'
+      ;;
+  esac
+}
+dns_menu() {
+  select_domain
+  while true; do
+    clear
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}Registry Management${blue}                         ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Add DNS Provider${blue}                                      ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Create Zone${blue}                                           ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Add Record${blue}                                            ║" \
+      "║ ${magenta}4${blue}  ║ ${green}List Records${blue}                                          ║" \
+      "║ ${magenta}5${blue}  ║ ${green}Authority Status${blue}                                      ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Back${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option [1-5]: " choice
+      case "$choice" in
+        1)
+          dns_provider_add
+          read -rp "${cyan}[USER]${blue} Press enter..."
+          ;;
+        2)
+          read -rp "${cyan}[USER]${blue} Provider: " provider
+          dns_create_zone \
+            "$provider" \
+            "$domain"
+          read -rp "${cyan}[USER]${blue} Press enter..."
+          ;;
+        3)
+          dns_add_record "$domain"
+          read -rp "${cyan}[USER]${blue} Press enter..."
+          ;;
+        4)
+          dns_list_records "$domain"
+          read -rp "${cyan}[USER]${blue} Press enter..."
+          ;;
+        5)
+          dns_check_authority "$domain"
+          read -rp "${cyan}[USER]${blue} Press enter..."
+          ;;
+        0)
+          break
+          ;;
+    esac
+  done
+}
 ################################# SITE REMOVAL ###############################
 delete_site() {
   local domain="$1"
   web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) | head -1)
-  detect_env 
+  detect_env
   local type="${2:-wordpress}"
   local slice_name="one-click_${domain}.slice"
   local service_name="php-fpm@${domain}.service"
@@ -3952,11 +5153,11 @@ delete_site() {
   fi
   # ==== MISC LOST+FOUND ====
   warn "Stopping services owned by $domain"
-  sed -n '/\.service$/p' <(locate "$domain") | while read line; do 
+  sed -n '/\.service$/p' <(locate "$domain") | while read line; do
     systemctl disable $(basename $line) --now
   done
   warn "Deleting all other associated files and directories for $domain"
-  (sed -n '\,/var/log,!p' <(locate "$domain") | while read line; do 
+  (sed -n '\,/var/log,!p' <(locate "$domain") | while read line; do
     rm -rf "$line"
   done) 2> /dev/null
   # ==== Remove system user ====
@@ -4037,6 +5238,1578 @@ monitor() {
     echo "$current_state $last_ts" > "$status_file"
   fi
 }
+############################### DATABASE MANAGEMENT ############################
+registry_exists() {
+  local domain="$1"
+  if [[ -z "$domain" ]]; then
+    return 1
+  fi
+  [[ -f "$registry" ]]
+}
+registry_create() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local type="$2"
+  local meta_file="/etc/one-click/${type}/${domain}/meta.conf"
+  local php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
+  passfile="/etc/one-click/db-manager/secrets/db/${domain}.pass"
+  mkdir -p ${db_manager_dir}/secrets/db
+  chmod 700 ${db_manager_dir}/secrets
+  chmod 700 ${db_manager_dir}/secrets/db
+  if [[ -z "$domain" ]]; then
+    error "Missing domain"
+    return
+  fi
+  if [[ -z "$type" ]]; then
+    error "Missing type"
+    return
+  fi
+  if [[ ! -d "$sitectl_dir" ]]; then
+    error "Registry directory missing: $sitectl_dir"
+    return
+  fi
+  if [[ -f "$meta_file" ]]; then
+    . "$meta_file" || true
+    if [[ -d "/etc/one-click/wordpress/$domain" ]]; then
+      info "Creating $passfile"
+      echo "$DB_PASS" > "$passfile"
+      db_status=true
+    fi
+  else
+    error "Meta file is missing!"
+    return
+  fi
+  if registry_exists "$domain"; then
+    error "Site registry already exists"
+    return
+  fi
+  if [[ ! $(sed -En '/# One-Click Routing/p' /etc/hosts) == "# One-Click Routing" ]]; then
+    echo "# One-Click Routing" >> /etc/hosts
+  elif [[ ! $(cat /etc/hosts) =~ 127.0.0.1.*"$domain" ]]; then
+    sed -Ei.one-click_bak -e "/# One-Click/{a\127.0.0.1\t${domain}" -e '}' /etc/hosts
+  fi
+  local nginx_vhost=""
+  local apache_vhost=""
+  if [[ "$WEBSERVER" == "nginx" ]]; then
+    nginx_vhost="$VHOST"
+  elif [[ "$WEBSERVER" == "apache" ]]; then
+    apache_vhost="$VHOST"
+  else
+    warn "Unknown webserver in meta.conf"
+  fi
+  local created_at
+  created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  local pool
+  pool=$(echo "$domain" | tr '.' '_')
+  local json
+  json=$(cat <<EOF
+{
+  "version": 1,
+  "site": {
+    "domain": "$domain",
+    "aliases": [],
+    "type": "$type",
+    "root": "$SITE_DIR",
+    "created_at": "$created_at",
+    "status": "active"
+  },
+  "php": {
+    "enabled": true,
+    "version": "$php_ver",
+    "pool": "$pool",
+    "socket": "/run/one-click/$domain/php.sock"
+  },
+  "database": {
+    "enabled": "${db_status:-null}",
+    "engine": null,
+    "host": null,
+    "port": null,
+    "primary": {
+      "name": "${DB_NAME:-null}",
+      "user": "${DB_USER:-null}"
+    },
+    "databases": [],
+    "users": [],
+    "password_file": "${db_manager_dir}/secrets/db/${domain}.pass",
+    "ui_enabled": false
+  },
+  "nginx": {
+    "enabled": true,
+    "vhost": "$nginx_vhost",
+    "ssl": false,
+    "http2": false
+  },
+  "apache": {
+    "enabled": false,
+    "vhost": "$apache_vhost",
+    "ssl": false,
+    "http2": false
+  },
+  "wordpress": {
+    "detected": false,
+    "table_prefix": null
+  },
+  "security": {
+    "isolated_pool": true,
+    "open_basedir": true
+  },
+  "backup": {
+    "enabled": false,
+    "last_backup": null
+  }
+}
+EOF
+)
+  if ! echo "$json" | jq empty >/dev/null 2>&1; then
+    error "Generated invalid JSON"
+    return
+  fi
+  if ! echo "$json" > "$registry"; then
+    error "Failed to write registry"
+    return
+  fi
+  if [[ ! -f "$registry" ]]; then
+    error "Registry was not created"
+    return
+  fi
+  success "Registry created"
+  info "$registry"
+  mkdir -p "/etc/one-click/${type}/${domain}/www/db"
+  install_adminer 2> /dev/null \
+    | sed -E '/^(Submodule|Cloning|remote|From|Unpacking|Missing| ?\*|adminer|PHP|Receiving|Resolving|Note:|^$|)/d'
+  cat > "/etc/one-click/${type}/${domain}/www/db/index.php" <<EOF
+<?php
+
+ini_set('display_errors', 0);
+error_reporting(E_ALL);
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+\$pathParts = explode('/', str_replace('\\\\', '/', __FILE__));
+\$currentDomain = \$pathParts[count(\$pathParts) - 4] ?? '';
+
+\$registryFile =
+    "/etc/one-click/db-manager/sites/" .
+    \$currentDomain .
+    ".json";
+
+if (!file_exists(\$registryFile)) {
+    http_response_code(500);
+    exit("Registry missing");
+}
+
+\$registry = json_decode(
+    file_get_contents(\$registryFile),
+    true
+);
+
+if (!\$registry) {
+    http_response_code(500);
+    exit("Registry decode failed");
+}
+
+if (!(\$registry['database']['ui_enabled'] ?? false)) {
+    session_unset();
+    session_destroy();
+
+    http_response_code(403);
+    exit("UI Disabled");
+}
+
+\$passwordFile =
+    \$registry['database']['password_file'] ?? '';
+
+if (!\$passwordFile || !file_exists(\$passwordFile)) {
+    http_response_code(500);
+    exit("Password file missing");
+}
+
+if (array_key_exists('token', \$_GET)) {
+
+    \$token = \$_GET['token'];
+
+    if (!preg_match('/^[a-zA-Z0-9\-]+$/', \$token)) {
+        http_response_code(403);
+        exit("Invalid token format");
+    }
+
+    \$tokenFile =
+        "/etc/one-click/db-manager/runtime/tokens/" .
+        \$token .
+        ".json";
+
+    if (!file_exists(\$tokenFile)) {
+        http_response_code(403);
+        exit("Invalid token");
+    }
+
+    \$data = json_decode(
+        file_get_contents(\$tokenFile),
+        true
+    );
+
+    if (!\$data) {
+        http_response_code(403);
+        exit("Invalid token data");
+    }
+
+    \$tokenDomain =
+        trim(\$data['domain'] ?? '');
+
+    \$expectedDomain =
+        trim(\$currentDomain);
+
+    if (
+        strcasecmp(
+            \$tokenDomain,
+            \$expectedDomain
+        ) !== 0
+    ) {
+        http_response_code(403);
+        exit("Invalid token verification data");
+    }
+
+    if ((\$data['expires'] ?? 0) < time()) {
+
+        @unlink(\$tokenFile);
+
+        http_response_code(403);
+        exit("Token expired");
+    }
+
+    \$_SESSION['oneclick_db_auth'] =
+        \$expectedDomain;
+
+    \$_SESSION['oneclick_db_ip'] =
+        \$_SERVER['REMOTE_ADDR'] ?? '';
+
+    \$_SESSION['oneclick_db_ua'] =
+        \$_SERVER['HTTP_USER_AGENT'] ?? '';
+
+    \$_SESSION['oneclick_db_last_activity'] =
+        time();
+
+    session_regenerate_id(true);
+
+    @unlink(\$tokenFile);
+}
+
+\$timeout = 1800;
+
+if (
+    isset(\$_SESSION['oneclick_db_last_activity']) &&
+    (
+        time() -
+        \$_SESSION['oneclick_db_last_activity']
+    ) > \$timeout
+) {
+
+    session_unset();
+    session_destroy();
+
+    http_response_code(403);
+    exit("Session expired");
+}
+
+\$_SESSION['oneclick_db_last_activity'] =
+    time();
+
+\$sessionAuth =
+    \$_SESSION['oneclick_db_auth'] ?? '';
+
+\$sessionIP =
+    \$_SESSION['oneclick_db_ip'] ?? '';
+
+\$sessionUA =
+    \$_SESSION['oneclick_db_ua'] ?? '';
+
+\$currentIP =
+    \$_SERVER['REMOTE_ADDR'] ?? '';
+
+\$currentUA =
+    \$_SERVER['HTTP_USER_AGENT'] ?? '';
+
+if (
+    \$sessionAuth !== \$currentDomain ||
+    \$sessionIP !== \$currentIP ||
+    \$sessionUA !== \$currentUA
+) {
+
+    session_unset();
+    session_destroy();
+
+    http_response_code(403);
+    exit("Unauthorized");
+}
+
+if (!array_key_exists('username', \$_GET)) {
+    \$_GET['username'] = '';
+}
+
+function adminer_object() {
+
+    class OneClickAdminer extends Adminer {
+
+        private \$registry;
+
+        public function __construct() {
+
+            global \$currentDomain;
+
+            \$registryFile =
+                "/etc/one-click/db-manager/sites/" .
+                \$currentDomain .
+                ".json";
+
+            \$this->registry = json_decode(
+                file_get_contents(\$registryFile),
+                true
+            );
+        }
+
+        function credentials() {
+
+            \$passwordFile =
+                \$this->registry['database']['password_file'];
+
+            return [
+                'localhost',
+                \$this->registry['database']['primary']['user'],
+                trim(file_get_contents(\$passwordFile))
+            ];
+        }
+
+        function database() {
+
+            return
+                \$this->registry['database']['primary']['name'];
+        }
+
+        function name() {
+
+            global \$currentDomain;
+
+            return
+                'One-Click DB Manager (' .
+                \$currentDomain .
+                ')';
+        }
+    }
+
+    return new OneClickAdminer;
+}
+
+if (file_exists(__DIR__ . "/adminer.php")) {
+
+    \$_GET['server'] = 'localhost';
+
+    \$_GET['username'] =
+        \$registry['database']['primary']['user'] ?? '';
+
+    \$_GET['db'] =
+        \$registry['database']['primary']['name'] ?? '';
+
+    \$_SESSION['pwds']['server']['localhost']
+        [\$_GET['username']] =
+        trim(file_get_contents(\$passwordFile));
+
+    include __DIR__ . "/adminer.php";
+
+} else {
+
+    http_response_code(500);
+    exit("UI Disabled. Please enable first.");
+}
+EOF
+  registry_sync_databases "$domain"
+  registry_detect_wordpress "$domain"
+  check_permissions "$domain"
+  success "Registry successfully generated"
+}
+registry_list() {
+  find "$sitectl_dir" -maxdepth 1 -name "*.json" | sort
+}
+registry_show() {
+  local domain="$1"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry does not exist"
+    return
+  fi
+  jq . "$registry"
+}
+normalize_domain() {
+  local d="$1"
+  d="${d//[$'\t\r\n ']}"
+  d="${d,,}"
+  d="${d%.}"
+  echo "$d"
+}
+registry_validate() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  jq empty "$registry" 2>/dev/null
+  if [[ $? -ne 0 ]]; then
+    error "Invalid JSON"
+    return
+  fi
+  local required=(
+    ".version"
+    ".site.domain"
+    ".site.type"
+    ".site.root"
+    ".site.created_at"
+    ".site.status"
+  )
+  for field in "${required[@]}"; do
+    local value
+    value=$(jq -r "$field // empty" "$registry")
+    if [[ -z "$value" ]]; then
+      warn "Missing field $field"
+      return 1
+    fi
+  done
+  success "Registry valid"
+}
+registry_update() {
+  local domain="$1"
+  #local jq_filter=".site.enabled = true"
+  local jq_filter="$2"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return 1
+  fi
+  local tmpfile
+  tmpfile=$(mktemp)
+  if ! jq "$jq_filter" "$registry" > "$tmpfile"; then
+    rm -f "$tmpfile"
+    error "jq update failed"
+    return 1
+  fi
+  if ! jq empty "$tmpfile" 2>/dev/null; then
+    rm -f "$tmpfile"
+    error "Update produced invalid JSON"
+    return 1
+  fi
+  mv "$tmpfile" "$registry"
+  success "Registry updated"
+}
+registry_delete() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  rm -f "$registry"
+  warn "Registry deleted"
+}
+registry_get() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local field="$2"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  jq -r "$field" "$registry"
+}
+registry_set() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local field="$2"
+  local value="$3"
+  registry_update "$domain" "$field = \$value" --arg value "$value"
+}
+registry_get_field() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local field="$2"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  jq -r "$field // empty" "$registry"
+}
+registry_set_field() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local field="$2"
+  local value="$3"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq --arg value "$value" "$field = \$value" "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Update failed"
+    return
+  }
+  jq empty "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Invalid JSON after update"
+    return
+  }
+  mv "$tmpfile" "$registry"
+}
+registry_add_alias() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local alias="$2"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return
+  fi
+  if [[ -z "$alias" ]]; then
+    error "No aliases provided"
+    warn "Including www subdomain"
+    alias="www.${domain}"
+  fi
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq --arg alias "$alias" '.site.aliases += [$alias]' "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Failed to add alias"
+    return
+  }
+  mv "$tmpfile" "$registry"
+  success "Alias added: $alias"
+}
+registry_set_status() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local status="$2"
+  registry_set_field "$domain" ".site.status" "$status"
+}
+registry_enable_db() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local engine="$2"
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq --arg engine "$engine" '
+    .database.enabled = true |
+    .database.engine = $engine
+  ' "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Failed to enable DB"
+    return
+  }
+  mv "$tmpfile" "$registry"
+  success "Database enabled: $engine"
+}
+registry_each() {
+  local callback="$1"
+  local file
+  for file in "${sitectl_dir}"/*.json; do
+    [[ -f "$file" ]] || continue
+    local domain
+    domain=$(basename "$file" .json)
+    "$callback" "$domain" "$file" "$@"
+  done
+}
+registry_filter() {
+  local jq_filter="$1"
+  local file
+  for file in "${sitectl_dir}"/*.json; do
+    [[ -f "$file" ]] || continue
+    if jq -e "$jq_filter" "$file" >/dev/null 2>&1; then
+      basename "$file" .json
+    fi
+  done
+}
+registry_list_all() {
+  registry_filter 'true'
+}
+registry_list_db_enabled() {
+  registry_filter '.database.enabled == true'
+}
+registry_list_active() {
+  registry_filter '.site.status == "active"'
+}
+registry_list_php_version() {
+  local version="$1"
+  registry_filter ".php.version == \"$version\""
+}
+registry_list_detailed() {
+  local file
+  for file in "${sitectl_dir}"/*.json; do
+    [[ -f "$file" ]] || continue
+
+    jq -r '"\(.site.domain) | \(.site.type) | \(.site.status)"' "$file"
+  done
+}
+registry_list_wordpress() {
+  registry_filter '.site.type == "wordpress"'
+}
+registry_list_static() {
+  registry_filter '.site.type == "sites"'
+}
+db_list_all() {
+  mysql -Nse "SHOW DATABASES;" 2>/dev/null
+}
+registry_add_database() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_name="$2"
+  local role="${3:-secondary}"
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq \
+    --arg db "$db_name" \
+    --arg engine "$engine" \
+    --arg role "$role" '
+    .database.databases //= [] |
+    if any(.database.databases[]?; .name == $db) then .
+    else
+      .database.databases += [{
+        "name": $db,
+        "role": $role
+      }]
+    end
+  ' "$registry" > "$tmpfile" || {
+      rm -f "$tmpfile"
+      error "Failed to add database"
+      return 1
+    }
+  mv "$tmpfile" "$registry"
+  success "Database added to registry: $db_name"
+}
+db_list_user_databases() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
+  printf "${blue}║${reset}  ${magenta}DATABASE LIST:${reset} %-52s ${blue}║${reset}\n" "$domain"
+  printf "${blue}╠════╦══════════════════════════════╦══════════════════════════════════╣${reset}\n"
+  local -a db_list=()
+  local i=1
+  while read -r db role; do
+    db_list[$i]="$db"
+    local role_color="$cyan"
+    [[ "$role" == "primary" ]] && role_color="$green"
+    printf "${blue}║${reset} ${cyan}%2d${reset} ║ %-28s ${blue}║${reset} ${role_color}%-34s${blue}║${reset}\n" \
+      "$i" "$db" "${role^^}"
+    ((i++))
+  done < <(
+    jq -r '
+      (.database.databases // [])[] |
+      "\(.name) \(.role)"
+    ' "$registry"
+  )
+  printf "${blue}╚════╩══════════════════════════════╩══════════════════════════════════╝${reset}\n"
+}
+db_from_domain() {
+  local domain="$1"
+  sed "s/.*/:${domain}:/" <<< "$domain"
+}
+db_generate_user() {
+  echo "u_$(openssl rand -hex 6)"
+}
+db_detect_engine() {
+  if systemctl is-active --quiet mariadb || \
+     systemctl is-active --quiet mysql; then
+      echo "mariadb"
+      return 0
+  fi
+  if systemctl is-active --quiet postgresql; then
+      echo "postgresql"
+      return 0
+  fi
+  return 1
+}
+db_exists() {
+  local db_name="$1"
+  mysql -N -e "SHOW DATABASES LIKE '${db_name}';" \
+    2>/dev/null | grep -qx "$db_name"
+}
+registry_link_database() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_name="$2"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return 1
+  fi
+  if [[ -z "$db_name" ]]; then
+    error "Database name required"
+    return 1
+  fi
+  if ! db_exists "$db_name"; then
+    error "Database does not exist: $db_name"
+    return 1
+  fi
+  local engine
+  engine=$(db_detect_engine)
+  if [[ -z "$engine" ]]; then
+    error "Unable to detect database engine"
+    return 1
+  fi
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq \
+  --arg db "$db_name" \
+  --arg engine "$engine" '
+    .database.enabled = true |
+    .database.databases //= [] |
+    .database.databases += [{
+      "name": $db,
+      "role": "primary"
+    }] |
+    .database.databases //= [] |
+    .database.databases += [{
+      "name": $db,
+      "role": "primary"
+    }] |
+    .database.engine = $engine
+  ' "$registry" > "$tmpfile" || {
+
+      rm -f "$tmpfile"
+      error "Failed to link database"
+      return 1
+    }
+  mv "$tmpfile" "$registry"
+  success "Database linked: $db_name ($engine)"
+}
+db_detect_domain_databases() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  (mysql -N -B -e "SHOW DATABASES;" 2>/dev/null | \
+    grep ":${domain}:") || error "No database found"
+}
+db_discover_site_db() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local expected
+  expected=$(db_from_domain "$domain")
+  db_discover_mysql_dbs | grep -Fx "$expected"
+}
+registry_sync_databases() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local registry="${sitectl_dir}/${domain}.json"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    warn "Please create site registry for full access to this module"
+    touch skip_reg_check
+    return
+  fi
+  local db_list
+  db_list=$(db_detect_domain_databases "$domain")
+  [[ -z "$db_list" ]] && {
+    warn "No databases detected for $domain"
+    info "Please create a database for full functionality of this tool"
+  }
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq --argjson dbs "$(printf '%s\n' "$db_list" | jq -R . | jq -s .)" '
+    .database.databases //= [] |
+    reduce $dbs[] as $db (
+      .;
+      if any(.database.databases[]?; .name == $db) then
+        .
+      else
+        .database.databases += [{
+          "name": $db,
+          "role": "secondary"
+        }]
+      end
+    )
+  ' "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Failed to sync databases"
+    return 1
+  }
+
+  mv "$tmpfile" "$registry"
+  success "Database sync complete for $domain"
+}
+db_auto_link_registry() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local expected
+  expected=$(db_from_domain "$domain")
+  if db_exists "$expected"; then
+    registry_link_database "$domain" "$expected"
+  else
+    warn "Database not found in MySQL: $expected"
+  fi
+}
+registry_get_db() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  jq -r '.database.databases[]? | select(.role == "primary") | .name' "${sitectl_dir}/${domain}.json"
+}
+registry_db_enabled() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  jq -r '.database.enabled' "${sitectl_dir}/${domain}.json"
+}
+registry_enable_db_ui() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  . /etc/one-click/${type}/${domain}/meta.conf
+  registry_update "$domain" '
+    .database.ui_enabled = true
+  '
+  if [[ -f "/etc/one-click/${type}/${domain}/www/db/adminer.php" ]]; then
+    error "UI is already enabled"
+    return
+  fi
+  mv -f /etc/one-click/${type}/${domain}/www/db/adminer-disabled.php /etc/one-click/${type}/${domain}/www/db/adminer.php
+  success "$domain DB UI has been enabled"
+}
+registry_disable_db_ui() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  . /etc/one-click/${type}/${domain}/meta.conf
+  if [[ -f "/etc/one-click/${type}/${domain}/www/db/adminer-disabled.php" ]]; then
+    error "UI is already disabled"
+    return
+  fi
+  registry_update "$domain" '
+    .database.ui_enabled = false
+  '
+  mv -f /etc/one-click/${type}/${domain}/www/db/adminer.php /etc/one-click/${type}/${domain}/www/db/adminer-disabled.php
+  warn "$domain DB UI has been disabled"
+}
+install_adminer() {
+  local target="/etc/one-click/${type}/${domain}/www/db"
+  local build="/tmp/adminer-build"
+  rm -rf "$build"
+  mkdir -p "$target" "$build"
+  cd "$build"
+  set +o pipefail
+  git clone https://github.com/vrana/adminer.git "$build" || {
+    error "Failed to clone Adminer"
+    return 1
+  }
+  git checkout v4.8.1 || {
+    error "Failed to checkout Adminer version"
+    return 1
+  }
+  git config --global url."https://".insteadOf git://
+  git submodule update --init --recursive || {
+    error "Failed to fetch Adminer submodules"
+    return 1
+  }
+  php compile.php || {
+    error "Adminer compile failed"
+    return 1
+  }
+  [[ ! -f adminer-4.8.1.php ]] && {
+    error "Compiled Adminer missing"
+    return 1
+  }
+  cp adminer-4.8.1.php $target/adminer-disabled.php || {
+    error "Failed to deploy Adminer"
+    return 1
+  }
+  set -o pipefail
+  chmod 644 "$target/adminer-disabled.php"
+  success "Compiled Adminer installed for $domain"
+  info "Be sure to enable the UI to use"
+  return
+}
+db_generate_password() {
+  openssl rand -base64 32 | tr -d '\n'
+}
+db_password_file() {
+  local domain="$1"
+  echo "${db_manager_dir}/secrets/db/${domain}.pass"
+}
+db_write_password() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local password="$2"
+  local passfile
+  passfile=$(db_password_file "$domain")
+  echo "$password" > "$passfile"
+  chmod 600 "$passfile"
+}
+db_create_user() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_name
+  db_name=$(db_from_domain "$domain")
+  local db_user
+  db_user=$(db_generate_user)
+  local password
+  password=$(db_generate_password)
+  local password_file=$(db_password_file "$domain")
+  local tmpfile=$(mktemp)
+  mysql <<EOF
+CREATE USER IF NOT EXISTS '${db_user}'@'localhost'
+IDENTIFIED BY '${password}';
+
+GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';
+
+FLUSH PRIVILEGES;
+EOF
+  if [[ $? -ne 0 ]]; then
+    error "Failed to create DB user"
+    return 1
+  fi
+  jq \
+  --arg user "$db_user" \
+  --arg db "$db_name" \
+  --arg passfile "$password_file" '
+  .database.enabled = true |
+  .database.engine = "mariadb" |
+
+  .database.primary.user = $user |
+  .database.primary.name = $db |
+
+  .database.password_file = $passfile |
+
+  .database.users = [
+    {
+      "name": $user,
+      "role": "primary"
+    }
+  ] |
+
+  .database.databases |= (
+    if any(.[]; .name == $db)
+    then .
+    else . + [{
+      "name": $db,
+      "role": "primary"
+    }]
+    end
+  )
+  ' "$registry" > "$tmpfile" 
+  mv "$tmpfile" "$registry" 
+  rm -f "$tmpfile"
+  db_write_password "$domain" "$password"
+  local role="secondary"
+  if jq -e '.database.primary.user == null' "$registry" >/dev/null 2>&1; then
+    role="primary"
+  fi
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq \
+    --arg user "$db_user" \
+    --arg role "$role" \
+  '
+  .database.users //= [] |
+  if any(.database.users[]; .name == $user)
+  then .
+  else
+    .database.users += [{
+      "name": $user,
+      "role": $role
+    }]
+  end |
+  if $role == "primary" then
+    .database.primary.user = $user
+  else
+    .
+  end
+  ' "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Failed to update registry users"
+    return 1
+  }
+  mv "$tmpfile" "$registry"
+  registry_update "$domain" \
+    --arg user "$db_user" \
+    --arg passfile "$(db_password_file "$domain")" \
+    '
+    .database.primary.user = $user |
+    .database.password_file = $passfile
+    '
+  success "DB user created: $db_user"
+  read -rp "${cyan}[USER]${reset} Would you like to promote $db_user to primary DB user for $domain (y|n)? " promote
+  promote="${promote,,}"
+  if [[ "$promote" != "y" && "$promote" != "yes" ]]; then
+    info "Now exiting..."
+    return
+  fi
+  info "Promoting $db_user"
+  db_set_primary_user "$domain" "$db_user"
+  echo "DB_USER=$db_user" >> /etc/one-click/${type}/${domain}/meta.conf
+}
+db_create_database() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_name
+  db_name=$(db_from_domain "$domain")
+  mysql <<EOF
+CREATE DATABASE IF NOT EXISTS \`${db_name}\`;
+EOF
+  if [[ $? -ne 0 ]]; then
+    error "Failed to create database"
+    return 1
+  fi
+  jq --arg db "$db_name" '
+    .database.enabled = true |
+    .database.engine = "mariadb" |
+    .database.primary.name = $db
+  ' "$registry" > "$registry.tmp" \
+    && mv "$registry.tmp" "$registry"
+  registry_link_database "$domain" "$db_name" "mariadb"
+  success "Database created: $db_name"
+}
+db_list_database_users() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  DB_USER_LIST=()
+  local db_name
+  db_name=$(jq -r '.database.databases[]? | select(.role == "primary") | .name // empty' "$registry")
+  [[ -z "$db_name" ]] && { error "No DB linked"; return 1; }
+  local users
+  users=$(
+    mysql -N -B -e "
+      SELECT DISTINCT GRANTEE
+      FROM information_schema.schema_privileges
+      WHERE TABLE_SCHEMA='${db_name}';
+    " 2>/dev/null | sed "s/'//g" | cut -d@ -f1
+  )
+  printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
+  printf "${blue}║${reset}  ${magenta}DATABASE USERS:${orange} %-51s ${blue}║${reset}\n" "$domain"
+  printf "${blue}╠══════════════════════════════════════════════════════════════════════╣${reset}\n"
+  local i=1
+  while read -r user; do
+    [[ -z "$user" ]] && continue
+    DB_USER_LIST[$i]="$user"
+    printf "${blue}║${reset} ${magenta}%2d${blue} ║ %-63s ${blue}║${reset}\n" \
+      "$i" "$user"
+    ((i++))
+  done <<< "$users"
+  printf "${blue}╚════╩═════════════════════════════════════════════════════════════════╝${reset}\n"
+}
+db_get_user_by_index() {
+  local index="$1"
+  if [[ -z "$index" ]]; then
+    return 1
+  fi
+  echo "${DB_USER_LIST[$index]}"
+}
+db_set_primary_user() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_user="$2"
+  local registry="${sitectl_dir}/${domain}.json"
+  [[ ! -f "$registry" ]] && {
+    error "Registry missing"
+    return 1
+  }
+  [[ -z "$db_user" ]] && {
+    error "Database user required"
+    return 1
+  }
+  local user_exists
+  user_exists=$(mysql -N -e "
+    SELECT User
+    FROM mysql.user
+    WHERE User='${db_user}'
+    LIMIT 1;
+  ")
+  [[ "$user_exists" != "$db_user" ]] && {
+    error "Database user does not exist"
+    return 1
+  }
+  local tmpfile
+  tmpfile=$(mktemp)
+  jq --arg user "$db_user" '
+    .database.users //= [] |
+
+    .database.users |= map(
+      if .name == $user then
+        .role = "primary"
+      else
+        .role = "secondary"
+      end
+    ) |
+    .database.primary.user = $user
+  ' "$registry" > "$tmpfile" || {
+    rm -f "$tmpfile"
+    error "Failed to update registry"
+    return 1
+  }
+  mv "$tmpfile" "$registry"
+  success "Primary DB user updated: $db_user"
+}
+db_list_user_databases_raw() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  jq -r '
+    (.database.databases // [])[] |
+    .name
+  ' "$registry"
+}
+db_bootstrap_site() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  db_create_database "$domain" || return 1
+  db_create_user "$domain" || return 1
+  local primary_user
+  primary_user=$(jq -r '
+    .database.users[0].name // empty
+  ' "$registry")
+  [[ -n "$primary_user" ]] && \
+    db_set_primary_user "$domain" "$primary_user"
+  success "DB bootstrap complete"
+}
+db_generate_token() {
+  openssl rand -hex 32
+}
+db_token_file() {
+  local token="$1"
+  echo "/etc/one-click/db-manager/runtime/tokens/${token}.json"
+}
+db_create_login_token() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry missing"
+    return 1
+  fi
+  local token expires token_file
+  token=$(db_generate_token)
+  expires=$(( $(date +%s) + 1800 ))
+  token_file=$(db_token_file "$token")
+  mkdir -p "$(dirname "$token_file")"
+  cat > "$token_file" <<EOF
+{
+  "domain": "$domain",
+  "expires": $expires
+}
+EOF
+  chmod 600 "$token_file"
+  printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
+  printf "${blue}║${reset}  ${yellow}ACCESS TOKEN GENERATED${reset} %-44s ${blue}║${reset}\n" ""
+  printf "${blue}╠══════════════════════════════════════════════════════════════════════╣${reset}\n"
+  printf "${blue}║${reset} ${cyan}DOMAIN:${reset}  %-59s ${blue}║${reset}\n" "$domain"
+  printf "${blue}║${reset} ${cyan}EXPIRES:${reset} %-59s ${blue}║${reset}\n" "$(date -d "@$expires" 2>/dev/null || echo "$expires")"
+  printf "${blue}╠══════════════════════════════════════════════════════════════════════╣${reset}\n"
+  printf "${blue}║${reset} ${cyan}LOGIN URL:${reset} %-57s ${blue}║${reset}\n" ""
+  printf "${blue}║${reset} ${orange}\e[40m https://${domain}/db/?token=${token} \e[0m ${blue}║${reset}\n"
+  printf "${blue}╚══════════════════════════════════════════════════════════════════════╝${reset}\n"
+}
+db_user_exists() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local db_user="$2"
+  if [[ -z "$domain" || -z "$db_user" ]]; then
+    return 1
+  fi
+  if [[ ! -f "$registry" ]]; then
+    return 1
+  fi
+  local db_name
+  db_name=$(jq -r '.database.databases[]? | select(.role == "primary") | .name // empty' "$registry")
+  if [[ -z "$db_name" ]]; then
+    return 1
+  fi
+  mysql -N -B -e "
+    SELECT GRANTEE
+    FROM information_schema.schema_privileges
+    WHERE TABLE_SCHEMA='${db_name}';
+  " 2>/dev/null | \
+  sed "s/\'//g" | \
+  cut -d@ -f1 | \
+  grep -Fxq "$db_user"
+}
+db_discover_all() {
+  mysql -Nse "SHOW DATABASES;" 2>/dev/null
+}
+db_resolve_user_index() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local index="$2"
+  local user="${DB_USER_LIST[$index]}"
+  if [[ -z "$user" ]]; then
+    return 1
+  fi
+  echo "$user"
+}
+wp_detect() {
+  local wp_base="$1"
+  if [[ -f "$wp_base/wp-config.php" ]] && \
+     [[ -d "$wp_base/www/wp-content" ]] && \
+     [[ -d "$wp_base/www/wp-includes" ]]; then
+    return 0
+  fi
+  warn "This is a static site. There is no database initialized yet!"
+}
+registry_detect_wordpress() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  local root
+  wp_base="/etc/one-click/wordpress/$domain"
+  if [[ ! -f "$wp_base" ]]; then
+    success "Static site detected for $domain"
+    return
+  fi
+  if [[ -f skip_reg_check ]]; then
+    rm -f skip_reg_check
+    return
+  fi
+  if wp_detect "$wp_base"; then
+    local tmpfile
+    tmpfile=$(mktemp)
+    jq '.wordpress.detected = true' \
+      "${sitectl_dir}/${domain}.json" > "$tmpfile" || {
+        rm -f "$tmpfile"
+        error "WordPress detection failed"
+        return 1
+      }
+    mv "$tmpfile" "${sitectl_dir}/${domain}.json"
+    success "WordPress detected for $domain"
+    return 0
+  fi
+  jq '.wordpress.detected = false' \
+    "${sitectl_dir}/${domain}.json" > /dev/null
+  return 1
+}
+db_show_credentials() {
+  local domain="$1"
+  domain="$(normalize_domain "$domain")"
+  if [[ ! -f "$registry" ]]; then
+    error "Registry not found for $domain"
+    return 1
+  fi
+  read -rp "${cyan}[USER]${reset} Reveal DB password for $domain? (y|n): " confirm
+  [[ "$confirm" != "y" ]] && return
+  local db_user db_name passfile password host
+  db_user=$(jq -r '.database.primary.user // empty' "$registry")
+  db_name=$(jq -r '.database.primary.name // empty' "$registry")
+  passfile=$(jq -r '.database.password_file // empty' "$registry")
+  if [[ -z "$db_user" || -z "$db_name" || -z "$passfile" ]]; then
+    error "Incomplete database configuration"
+    return 1
+  fi
+  if [[ ! -f "$passfile" ]]; then
+    error "Password file missing: $passfile"
+    return 1
+  fi
+  password=$(<"$passfile")
+  host="localhost"
+  echo
+  printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
+  printf "${blue}║${reset}  ${magenta}DATABASE CREDENTIALS:${reset} %-43s ${blue}║${reset}\n" "$domain"
+  printf "${blue}╠══════════════════════╦═══════════════════════════════════════════════╣${reset}\n"
+  printf "${blue}║${reset} ${cyan}DATABASE:${reset} %-12s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+    "" "$db_name"
+  printf "${blue}║${reset} ${cyan}USER:${reset} %-16s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+    "" "$db_user"
+  printf "${blue}║${reset} ${cyan}HOST:${reset} %-16s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+    "" "$host"
+  printf "${blue}╠══════════════════════╩═══════════════════════════════════════════════╣${reset}\n"
+  printf "${blue}║${reset} ${yellow}PASSWORD:${reset} %-54s ${blue}║${reset}\n" \
+    "$password"
+  printf "${blue}╚══════════════════════════════════════════════════════════════════════╝${reset}\n"
+}
+pause() {
+  echo
+  read -rp "${cyan}[USER]${reset} Press Enter to continue..."
+}
+db_manager_menu() {
+  domain="$1"
+  domain="$(normalize_domain "$domain")"
+  type="$2"
+  registry=${sitectl_dir}/${domain}.json
+  registry_sync_databases "$domain"
+  registry_detect_wordpress "$domain"
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}ONE-CLICK DB XPRESS${blue}                         ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Database UI${blue}                                           ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Database Management${blue}                                   ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Registry Management${blue}                                   ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Registry Queries${blue}                                      ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option [0-4]: " choice
+    case "$choice" in
+      1) db_ui_menu    ;;
+      2) database_menu ;;
+      3) registry_menu ;;
+      4) query_menu    ;;
+      0) break         ;;
+      *) error "Invalid option" ;;
+    esac
+  done
+}
+db_ui_menu() {
+  db_status=$(jq -r '.database.enabled' /etc/one-click/db-manager/sites/${domain}.json)
+  if [[ "$db_status" != "true" ]]; then
+    error "There is no database for $domain."
+    return
+  fi
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}DB UI Management${blue}                            ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Enable Database UI${blue}                                    ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Disable Database UI${blue}                                   ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Generate Login Token${blue}                                  ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Back${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option: " choice
+    case "$choice" in
+      1)
+        registry_enable_db_ui "$domain"
+        pause
+        ;;
+      2)
+        registry_disable_db_ui "$domain"
+        pause
+        ;;
+      3)
+        db_create_login_token "$domain"
+        pause
+        ;;
+      0)
+        return
+        ;;
+      *)
+        error "Invalid option"
+        pause
+        ;;
+    esac
+  done
+}
+query_menu() {
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}Registry Queries${blue}                ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}List All Sites${blue}                                        ║" \
+      "║ ${magenta}2${blue}  ║ ${green}List Wordpress Sites${blue}                                  ║" \
+      "║ ${magenta}3${blue}  ║ ${green}List DB Enabled Sites${blue}                                 ║" \
+      "║ ${magenta}4${blue}  ║ ${green}List Active Sites${blue}                                     ║" \
+      "║ ${magenta}5${blue}  ║ ${green}List Sites By PHP Versions${blue}                            ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option: " choice
+    case "$choice" in
+      1)
+        registry_list_all
+        pause
+        ;;
+      2)
+        registry_list_wordpress
+        pause
+        ;;
+      3)
+        registry_list_db_enabled
+        pause
+        ;;
+      4)
+        registry_list_active
+        pause
+        ;;
+      5)
+        read -rp "${cyan}[USER]${reset} Which PHP Version: " version
+        registry_list_php_version "$version"
+        pause
+        ;;
+      0)
+        return
+        ;;
+      *)
+        error "Invalid option"
+        pause
+        ;;
+    esac
+  done
+}
+database_menu() {
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}Database Management${blue}                         ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}List Databases${blue}                                        ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Create Database${blue}                                       ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Create Database User${blue}                                  ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Promote Database User${blue}                                 ║" \
+      "║ ${magenta}5${blue}  ║ ${green}Bootsrap Site Database${blue}                                ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Link Database${blue}                                         ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Show Database Status${blue}                                  ║" \
+      "║ ${magenta}8${blue}  ║ ${green}View Database Credentials${blue}                             ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Back${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option: " choice
+      case "$choice" in
+        1)
+          db_list_user_databases "$domain"
+          pause
+          ;;
+        2)
+          db_create_database "$domain"
+          pause
+          ;;
+        3)
+          db_create_user "$domain"
+          pause
+          ;;
+        4)
+          db_list_database_users "$domain"
+          while true; do
+            read -rp "${cyan}[USER]${reset} Select user number to promote: " selection
+            if [[ ! "$selection" =~ ^[0-9]+$ ]]; then
+              warn "Only numeric selection allowed"
+              continue
+            fi
+            promote_name=$(db_resolve_user_index "$domain" "$selection")
+            if [[ -z "$promote_name" ]]; then
+              warn "Invalid selection index"
+              continue
+            fi
+            break
+          done
+          db_set_primary_user "$domain" "$promote_name"
+          pause
+          ;;
+        5)
+          db_bootstrap_site "$domain"
+          pause
+          ;;
+        6)
+          db_list_user_databases "$domain"
+          read -rp "${cyan}[USER]${reset} Database Name: " db_name
+          registry_link_database "$domain" "$db_name"
+          pause
+          ;;
+        7)
+          printf '%s\n' " " \
+            "DB Enabled : $(registry_db_enabled "$domain")" \
+            "DB Name    : $(registry_get_db "$domain")" " "
+          pause
+          ;;
+        8) db_show_credentials "$domain" ;;
+        0)
+          return
+          ;;
+        *)
+          error "Invalid option"
+          pause
+          ;;
+    esac
+  done
+}
+registry_menu() {
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}Registry Management${blue}                         ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Create Site Registry${blue}                                  ║" \
+      "║ ${magenta}2${blue}  ║ ${green}Show Site Registry${blue}                                    ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Validate Registry${blue}                                     ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Delete Registry${blue}                                       ║" \
+      "║ ${magenta}5${blue}  ║ ${green}List Registries${blue}                                       ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Add Alias${blue}                                             ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Set Site Status${blue}                                       ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Back${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option: " choice
+    case "$choice" in
+    1)
+      registry_create "$domain" "$type"
+      pause
+      ;;
+    2)
+      registry_show "$domain"
+      pause
+      ;;
+    3)
+      registry_validate "$domain"
+      pause
+      ;;
+    4)
+      registry_delete "$domain"
+      pause
+      ;;
+    5)
+      registry_list_detailed
+      pause
+      ;;
+    6)
+      while true; do
+      read -rp "${cyan}[USER]${reset} Please provide a space separated list of additional domains for ${domain}: " aliases
+      if [[ -z "$aliases" ]]; then
+        warn "At least one alias is required"
+        continue
+      fi
+      local invalid=0
+      local alias
+      for alias in $aliases; do
+        if [[ ! "$alias" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+          warn "Invalid domain: $alias"
+          invalid=1
+        fi
+      done
+      [[ $invalid -eq 0 ]] && break
+      done
+      registry_add_alias "$domain" "$aliases"
+      pause
+      ;;
+    7)
+      local current_status
+      current_status=$(registry_get_field "$domain" '.site.status')
+      local new_status
+      if [[ "$current_status" == "active" ]]; then
+        new_status="disabled"
+      else
+        new_status="active"
+      fi
+      registry_set_status "$domain" "$new_status"
+      success "$domain status changed to: $new_status"
+      pause
+      ;;
+    8)
+      read -rp "${cyan}[USER]${reset} Enter PHP Version to set: " version
+      registry_set_php_version "$domain" "$version"
+      pause
+      ;;
+    0)
+      return
+      ;;
+    *)
+      error "Invalid option"
+      pause
+      ;;
+    esac
+  done
+}
+db_entry() {
+  select_domain
+  if [[ -d /etc/one-click/sites/${domain}/ && -d /etc/one-click/wordpress/${domain}/ ]]; then
+    info "$domain was found in both wordpress and static site directories."
+    echo "${cyan}[USER]${reset} Select site type:"
+    while true; do
+      printf "${cyan}[USER${reset}%s${cyan}]${reset} %s\n" \
+        "1" "WordPress" \
+        "2" "Static Site"
+      read -rp "${cyan}[USER]${reset}Choice: " choice
+      case "$choice" in
+        1) type="wordpress"; break ;;
+        2) type="sites"; break     ;;
+        *) error "Invalid choice"  ;;
+      esac
+    done
+  elif [[ -d /etc/one-click/wordpress/${domain}/ ]]; then
+    type="wordpress"
+  else
+    type="sites"
+  fi
+  db_manager_menu "$domain" "$type"
+ }
 ################################# CRON NAVIGATION ##############################
 if [[ "${1:-}" == "-wpback" ]]; then
   wp_backup "${2:-}"
