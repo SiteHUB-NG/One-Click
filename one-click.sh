@@ -53,6 +53,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --wp                    Basic wordpress and cron management." \
     "  --wp-admin              Manage all aspects of wordpress such as staging, backups and SSL" \
     "  --wp-create             Install Wordpress with either nginx or apache." \
+    "  --nodejs-admin          Start, stop and manage app." \
+    "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
+    "  --db-admin              Manage Databases and create temp front UI." \
     "  --ssl                   Install SSL for wordpress or any other virtual host." \
     "  --php                   Manage system-wide or per site php settings." \
     "  --version               Check version" \
@@ -172,7 +175,7 @@ secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
 sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
 updated="March 2026"
-version="1.1.9"
+version="1.2.0"
 priv1="-----END PRIVATE KEY-----"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
@@ -284,9 +287,10 @@ check_for_updates() {
   version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
   remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
   if [[ -z "$remote_version" ]]; then
-    return 0
+    error "Could not detect master version"
+    return
   fi
-  if [[ "$remote_version" != "$current_version" ]]; then
+  if [[ "$(printf '%s\n%s' "$current_version" "$remote_version" | sort -V | head -n1)" = "$current_version" ]] && [[ "$current_version" != "$remote_version" ]]; then
     printf "${yellow}%s${reset}\n" \
       "                  ╔══════════════════════════════════════════════════════════════════╗" \
       "                  ║ [UPDATE] A newer version ($remote_version) is available!                   ║" \
@@ -330,6 +334,7 @@ load_body() {
     if curl -fsSL --connect-timeout 5 --max-time 10 \
          "$url" -o "$cache_file.tmp" &> /dev/null; then
         mv -f "$cache_file.tmp" "$cache_file"
+        chmod +x "$cache_file"
     # ==== Try as214354 if primary fails ====
     elif [[ -n "$backup_url" ]] && \
          curl -fsSL --connect-timeout 5 --max-time 10 \
@@ -740,6 +745,13 @@ if [[ $1 == "menu" ]]; then
   one_click_menu
   exit 0
 fi
+# ==== DB Admin ====
+if [[ "$1" == "--db-admin" ]]; then
+  build_vars
+  load_wordpress
+  db_entry
+  exit 0
+fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
   export non_interactive=1                                                                  ##
@@ -799,6 +811,10 @@ _one_click() {
     cmds["--web-admin"]=""
     cmds["--web-backup"]=""
     cmds["--php"]=""
+    cmds["--db-admin"]=""
+    cmds["--nodejs-create"]=""
+    cmds["--nodejs-admin"]=""
+    cmds["--dns"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -920,6 +936,10 @@ _one_click() {
     cmds["--web-backup"]=""
     cmds["--web-admin"]=""
     cmds["--php"]=""
+    cmds["--db-admin"]=""
+    cmds["--nodejs-create"]=""
+    cmds["--nodejs-admin"]=""
+    cmds["--dns"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
@@ -1031,6 +1051,9 @@ map_one_click() {
       --web-create)     echo "-st"           ;;
       --web-admin)      echo "-st-backup"    ;;
       --php)            echo "-php"          ;;
+      --nodejs-create)  echo "-nodejs"       ;;
+      --nodejs-admin)   echo "-njs-admin"    ;;
+      --dns)            echo "-dns"          ;;
       *)                echo "$i"            ;;
     esac
   done
@@ -1244,9 +1267,24 @@ if [[ $# -gt 0 ]]; then
       static_restore_interactive
       exit 0
       ;;
+    -nodejs)
+      load_wordpress
+      app_create_nodejs
+      exit 0
+      ;;
+    -njs-admin)
+      load_wordpress
+      apps_menu nodejs
+      exit 0
+      ;;
     -ssl)
       load_wordpress
       install_letsencrypt
+      exit 0
+      ;;
+    -dns)
+      load_wordpress
+      dns_menu
       exit 0
       ;;
     -php)
@@ -1305,6 +1343,9 @@ if [[ $# -gt 0 ]]; then
         "  --wp                    Basic wordpress and cron management." \
         "  --wp-admin              Manage all aspects of wordpress such as staging, backups and SSL" \
         "  --wp-create             Install Wordpress with either nginx or apache." \
+        "  --nodejs-admin          Start, stop and manage app." \
+        "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
+        "  --db-admin              Manage Databases and create temp front end if needed." \
         "  --ssl                   Install SSL for wordpress or any other virtual host." \
         "  --php                   Manage system-wide or per site php settings." \
         "  --version               Check version" \
