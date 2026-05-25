@@ -2,11 +2,9 @@
 ![One-Click Logo](https://as214354.network/one-click.png)
 # One-Click — Linux Infrastructure Automation Toolkit
 
-**One-Click** is your personal Linux system administration companion. A modular infrastructure automation toolkit designed for **controlled, repeatable server lifecycle management**.
+One-Click is an advanced operational console engineered for power users, developers, and sysadmins who demand maximum control with zero infrastructure bloat. Built on a strict **security-first-by-design** architecture, One-Click completely redefines server management by replacing vulnerable, resource-heavy web UIs with a lean, terminal-driven automation matrix.
 
-It provides a structured approach to managing Linux environments, eliminating manual repetition while maintaining full control and transparency.
-
----
+By abstracting complex Linux primitives into predictable, guided workflows, One-Click eliminates the syntax burden of server administration while maintaining total architectural transparency.
 
 ## Features
 
@@ -24,16 +22,13 @@ One-Click delivers streamlined workflows for essential system administration tas
 - **Web Hosting Deployment**
 - **Fully Isolated Web Hosting Environments (vhosts)**
 
-## Purpose
+## Core Architectural Pillars
 
-One-Click is built to:
+* **Modular Infrastructure Automation** Spin up completely isolated environments on demand. From localized, single-tenant Node.js runtimes utilizing private binary paths to isolated database pools, your server stack remains clean, predictable, and conflict-free.
+* **Workflow-Driven Orchestration** Complex deployments—like installing web servers, provisioning directory-traversal-proof codebases, or cloning Git repositories—are condensed into seamless, structured execution chains.
+* **Context-Aware Deployments** One-Click inherently understands your server topology. It dynamically configures reverse proxy boundaries (Nginx or Apache), auto-scans for vacant network loops, and maps filesystems safely based on active domain environments.
+* **Semantic Firewall & Security Orchestration** Security isn't an afterthought; it is baked into the transport layer. Features an aggressive, automated, out-of-band credential injection wrapper, loopback-restricted bindings (`127.0.0.1`), and single-use, time-bound authentication tokens that shred themselves instantly upon validation.
 
-- Simplify repetitive administrative tasks  
-- Standardize infrastructure operations  
-- Provide consistent, predictable system behavior  
-- Enable rapid deployment and recovery workflows  
-
-Whether you're managing a single server or multiple environments, One-Click ensures your operations remain **reliable, reproducible, and efficient**.
 
 ## Who is it for?
 
@@ -52,8 +47,6 @@ One-Click supports most mainstream Linux distributions, including:
 - Fedora  
 - Rocky Linux  
 - AlmaLinux  
-- openSUSE  
-- Arch Linux  
 
 > **Note:** BSD and Alpine Linux are not supported at this time.
 
@@ -96,6 +89,26 @@ To detach:
 ```
 Ctrl+b d
 ```
+## The Power User Advantage
+
+| Feature | Traditional GUI Panels (e.g., cPanel) | One-Click Engine |
+| :--- | :--- | :--- |
+| **Attack Surface** | **High** (Public login portals exposed to brute-force botnets) | **Near Zero** (No permanent web login interface exists) |
+| **System Footprint** | **Heavy** (Persistent background daemons hoard RAM/CPU) | **Zero-Overhead** (Awakens strictly on-demand per intent) |
+| **Authentication** | **Static** (Username/Password combinations) | **Ephemeral** (Single-use tokens generated via local shell) |
+| **Environment State** | **Shared** (Global binaries risk dependency hell) | **Sandboxed** (Private binary scopes per application path) |
+
+### Zero-Knowledge Authentication
+There is no permanent admin login page for hackers to target. Accessing internal modules like One-Click DB Manager requires a secure, short-lived shell token generated from the local terminal.
+
+### Immutable Cleanliness
+Because every application layer (PHP pools, Node engines, configuration states) is self-contained and path-mapped, deleting a site or environment is truly immutable. Run a delete workflow and the entire workspace is eradicated cleanly, leaving zero residual junk files on the core OS.
+
+### Host-Pinned Session Hardening
+Active sessions are dynamically bound to your exact IP address, browser signature (`User-Agent`), and domain routing. If a session cookie is intercepted laterally on an unsecure network, the engine triggers an immediate, hard session destroy.
+
+> **Note:** One-Click isn't a wrapper that hides Linux; it is a smart, secure lens that amplifies it.
+
 # Usage
 
 ## Syntax
@@ -122,6 +135,17 @@ one-click [COMMAND]
 | cron         | Configure and manage cron jobs |
 | help         | Show help and usage information |
 | uninstall    | Remove One-Click and all associated files and configurations |
+| --web-admin  | Create a backup of selected static site. |
+| --web-create | Install a blank static html or php website. |
+| --wp         | Basic wordpress and cron management. |
+| --wp-admin   | Manage all aspects of wordpress such as staging, backups and SSL |
+| --wp-create  | Install Wordpress with either nginx or apache. |
+| --nodejs-admin | Start, stop and manage app. |
+| --nodejs-create| Install a NodeJS app with either nginx or apache. |
+| --db-admin   | Manage Databases and create temp front UI. |
+| --ssl        | Install SSL for wordpress or any other virtual host. |
+| --php        | Manage system-wide or per site php settings. |
+| --version    | Check version |
 
 ---
 
@@ -181,68 +205,563 @@ one-click engine 'open ssh and drop http,https and mask in nat table'
 One-Click simplifies tedious and complex server tasks.
 It is designed to operate safely in production environments with caching, fallback mirrors, and validation safeguards.
 
-## WordPress Automation Module
+# WordPress Automation Module
 
-The One-Click WordPress module is a **full-stack site provisioning engine**, not just an installer. It automates the creation of complete, isolated web application environments per domain, including web server configuration, database provisioning, PHP runtime isolation, SSL management, and backup lifecycle handling.
+One-Click provides a fully automated WordPress orchestration and lifecycle management system designed to provision isolated, production-ready environments with minimal manual intervention.
 
-Each WordPress deployment is treated as a **standalone system service** with dedicated resources and strict isolation boundaries.
+The WordPress module is not simply an installer. It functions as a complete deployment engine responsible for orchestrating webserver configuration, database provisioning, PHP runtime isolation, SSL integration, filesystem structure, and operational lifecycle management.
 
-### Key Capabilities
-- Fully automated WordPress deployment via WP-CLI
-- Per-site isolation using Linux system users and PHP-FPM pools
-- Independent webserver virtual host generation (Nginx or Apache)
-- Automatic database creation with unique credentials per site
-- Systemd-based CPU and memory isolation per domain
-- SSL provisioning and renewal via Let's Encrypt (Certbot)
-- Structured backup system per domain
-- Deterministic filesystem layout under /etc/one-click
-- Optional caching integration (e.g., Redis plugin support)
+Each WordPress deployment is treated as an independently isolated application environment with dedicated resources, security boundaries, and service-level separation.
 
-### Commands
+## Features
 
-| Command                          | Description |
-|----------------------------------|-------------|
-| `one-click --wp-create`          | Deploy a new WordPress instance. Prompts for domain, admin credentials, database, and optional Redis configuration. Handles file setup, database creation, webserver configuration, and baseline hardening. |
-| `one-click --wp-ssl`             | Install and configure SSL via Let's Encrypt for an existing WordPress and static sites. Automatically updates WordPress home and site URLs to use `https`. |
-| `one-click --wp-backup`          | Local and remote backup and restore for Wordpress sites. Profiles allow for multi-target remote backups |`. |
+- Fully automated WordPress deployment using WP-CLI
+- Isolated Linux system users per deployment
+- Dedicated PHP-FPM pools for each domain
+- Automatic database provisioning with unique credentials
+- NGINX and Apache virtual host automation
+- SSL provisioning and renewal via Let's Encrypt
+- Structured backup and restore workflows
+- Deterministic filesystem layouts
+- Optional Redis caching integration
+- Domain-aware environment management
+- Operational lifecycle tooling
+- Environment isolation and resource control
+- Automated service configuration and orchestration
 
-### Usage Examples
+## Deployment Workflow
 
-**Create a new WordPress site:**
-```
+The WordPress deployment workflow automates:
+
+- filesystem provisioning
+- isolated system user creation
+- PHP runtime isolation
+- database creation and credential generation
+- webserver virtual host generation
+- WordPress installation and configuration
+- SSL provisioning
+- baseline environment hardening
+- operational registration
+
+## Example Commands
+
+### Create a New WordPress Site
+
+```bash
 one-click --wp-create
 ```
-**Wordpress Management**
-```
+
+### WordPress Management
+
+```bash
 one-click --wp
+```
+
+```bash
 one-click --wp-admin
 ```
-**Install SSL for an existing WordPress site:**
-```
+
+### Install SSL for Existing Sites
+
+```bash
 one-click --ssl
 ```
 
-### System Layout
-Each deployment follows a strict structure:
+### Backup and Restore Operations
+
+```bash
+one-click --wp-backup
 ```
+
+## Environment Structure
+
+Each WordPress deployment follows a deterministic filesystem structure.
+
+### Application Files
+
+```text
 /etc/one-click/wordpress/<domain>/www
 ```
-Backups:
-```
+
+### Backups
+
+```text
 /etc/one-click/wordpress/backups/<domain>
 ```
-SSL certificates:
-```
+
+### SSL Certificates
+
+```text
 /etc/letsencrypt/live/<domain>
 ```
-### Notes
 
-- Each WordPress site runs under its own system user and PHP-FPM pool
-- Resource usage is controlled via systemd slices per domain
-- DNS A records for both root and www must point to the server before SSL issuance
-- SSL provisioning depends on successful domain validation and port 80 availability
-- Failures in SSL do not block site provisioning; HTTP deployment continues safely
-- All credentials (database and admin) are generated or validated with enforced complexity rules
+## Isolation Model
+
+Every WordPress deployment is isolated through:
+
+- dedicated Linux system users
+- independent PHP-FPM pools
+- isolated filesystem ownership
+- per-site process separation
+- service-level resource boundaries
+- environment-aware configuration management
+
+This isolation model reduces cross-site impact and improves operational stability.
+
+## Resource Management
+
+One-Click supports resource-aware execution through systemd integration and isolated service control.
+
+Deployments can operate with:
+
+- CPU isolation
+- memory isolation
+- process-level separation
+- workload-specific runtime control
+
+## SSL Integration
+
+SSL provisioning is handled through automated Let's Encrypt integration using Certbot.
+
+The SSL workflow supports:
+
+- automatic certificate issuance
+- certificate renewal
+- virtual host SSL configuration
+- HTTPS redirect handling
+- WordPress URL updates
+- existing deployment integration
+
+## Backup System
+
+The WordPress module includes structured backup lifecycle management.
+
+Supported operations include:
+
+- local backups
+- remote backups
+- restore workflows
+- multi-target backup profiles
+- environment-aware backup organization
+
+## Operational Features
+
+The module includes operational tooling for:
+
+- deployment management
+- administrative access
+- lifecycle orchestration
+- environment inspection
+- backup handling
+- SSL management
+- service visibility
+- isolated runtime management
+
+## Security Model
+
+The WordPress environment is designed around a security-first deployment philosophy that prioritizes:
+
+- isolated execution boundaries
+- reduced privilege exposure
+- unique credentials per deployment
+- controlled filesystem ownership
+- deterministic infrastructure layout
+- automated baseline hardening
+- service separation
+- operational transparency
+
+## Deployment Notes
+
+- Each WordPress deployment operates under its own isolated system user
+- Every site receives a dedicated PHP-FPM pool
+- DNS records must resolve correctly before SSL issuance
+- Port 80 must remain accessible during certificate validation
+- SSL provisioning failures do not prevent HTTP deployment
+- Credentials are generated or validated using enforced complexity requirements
+
+## Design Philosophy
+
+The WordPress module is designed to provide:
+
+- reproducible deployments
+- predictable operational workflows
+- minimal manual configuration
+- secure environment isolation
+- transparent orchestration
+- simplified lifecycle management
+- structured infrastructure provisioning
+
+while preserving direct operational visibility and Linux-native control.
+
+# Static Website Automation Module
+
+One-Click provides a fully automated static website deployment and lifecycle management system designed for secure, isolated, and production-ready hosting environments.
+
+The static website module is not limited to basic file hosting. It functions as a complete provisioning and orchestration layer responsible for webserver configuration, filesystem isolation, SSL integration, deployment structure, and operational lifecycle management.
+
+Each static website deployment is treated as an independently isolated application environment with dedicated ownership boundaries, webserver integration, and operational tooling.
+
+## Features
+
+- Fully automated static website deployment
+- Isolated Linux system users per deployment
+- Independent NGINX or Apache virtual host provisioning
+- SSL provisioning and renewal via Let's Encrypt
+- Deterministic filesystem layouts
+- Structured backup and restore workflows
+- Domain-aware environment management
+- Automatic webroot provisioning
+- Reverse proxy aware operation
+- Operational lifecycle tooling
+- Environment isolation and service separation
+- Automated webserver integration and orchestration
+
+## Deployment Workflow
+
+The static website deployment workflow automates:
+
+- filesystem provisioning
+- isolated system user creation
+- webroot generation
+- virtual host configuration
+- SSL provisioning
+- baseline environment preparation
+- deployment registration
+- operational integration
+
+## Example Commands
+
+### Create a New Static Website
+
+```bash
+one-click --web-create
+```
+
+### Website Management
+
+```bash
+one-click --web
+```
+
+```bash
+one-click --web-admin
+```
+
+### Install SSL for Existing Sites
+
+```bash
+one-click --ssl
+```
+
+### Backup and Restore Operations
+
+```bash
+one-click --web-backup
+```
+
+## Environment Structure
+
+Each static website deployment follows a deterministic filesystem structure.
+
+### Website Files
+
+```text
+/etc/one-click/sites/<domain>/www
+```
+
+### Backups
+
+```text
+/etc/one-click/sites/backups/<domain>
+```
+
+### SSL Certificates
+
+```text
+/etc/letsencrypt/live/<domain>
+```
+
+## Isolation Model
+
+Every static website deployment is isolated through:
+
+- dedicated Linux system users
+- isolated filesystem ownership
+- independent webserver configuration
+- per-site service separation
+- environment-aware configuration management
+
+This isolation model improves operational stability and reduces cross-site exposure.
+
+## Webserver Integration
+
+One-Click supports automated integration with:
+
+- NGINX
+- Apache
+
+The deployment workflow automatically handles:
+
+- virtual host creation
+- webroot configuration
+- SSL integration
+- HTTP to HTTPS handling
+- service reloads and validation
+
+## Resource Management
+
+The static website module supports resource-aware operational management through Linux-native isolation and service orchestration.
+
+Deployments can operate with:
+
+- isolated ownership boundaries
+- workload-aware organization
+- service-level separation
+- environment-specific configuration handling
+
+## SSL Integration
+
+SSL provisioning is managed through automated Let's Encrypt integration using Certbot.
+
+The SSL workflow supports:
+
+- automatic certificate issuance
+- automated certificate renewal
+- HTTPS virtual host integration
+- redirect configuration
+- existing deployment integration
+
+## Backup System
+
+The static website module includes structured backup lifecycle management.
+
+Supported operations include:
+
+- local backups
+- remote backups
+- restore workflows
+- multi-target backup profiles
+- environment-aware backup organization
+
+## Operational Features
+
+The module includes operational tooling for:
+
+- deployment management
+- site administration
+- lifecycle orchestration
+- environment inspection
+- backup handling
+- SSL management
+- webserver visibility
+- isolated environment management
+
+## Security Model
+
+The static website environment is designed around a security-first deployment philosophy that prioritizes:
+
+- isolated execution boundaries
+- controlled filesystem ownership
+- deterministic infrastructure layout
+- reduced privilege exposure
+- service separation
+- operational transparency
+- secure deployment organization
+
+## Deployment Notes
+
+- Each website deployment operates under its own isolated system user
+- DNS records must resolve correctly before SSL issuance
+- Port 80 must remain accessible during certificate validation
+- SSL provisioning failures do not prevent HTTP deployment
+- Deployments follow deterministic filesystem organization under `/etc/one-click/sites`
+
+## Design Philosophy
+
+The static website module is designed to provide:
+
+- reproducible deployments
+- predictable operational workflows
+- simplified hosting management
+- secure environment isolation
+- transparent orchestration
+- minimal manual configuration
+- structured infrastructure provisioning
+
+while preserving direct operational visibility and Linux-native control.
+
+# Node.js Environment Management
+
+One-Click provides automated deployment, isolation, and lifecycle management for Node.js applications through workflow-driven orchestration and environment-aware provisioning.
+
+The platform abstracts the complexity of manually configuring production-ready Node.js environments while preserving operational transparency and shell-native control.
+
+## Features
+
+- Automated Node.js application deployment
+- Isolated runtime environments
+- Reverse proxy configuration
+- Automatic webserver integration
+- Process lifecycle management
+- Application startup orchestration
+- Environment-aware deployment flows
+- SSL integration
+- Static and dynamic application support
+- Runtime monitoring integration
+
+## Supported Webservers
+
+- NGINX
+- Apache
+
+## Deployment Workflow
+
+The Node.js deployment workflow automates:
+
+- application directory creation
+- isolated system user provisioning
+- runtime preparation
+- dependency installation
+- reverse proxy configuration
+- webserver integration
+- SSL provisioning
+- service startup
+- process registration
+
+## Example Usage
+
+```bash
+one-click --nodejs-create
+```
+
+## Guided Deployment Flow
+
+```text
+Application Setup
+        ↓
+Environment Isolation
+        ↓
+Dependency Installation
+        ↓
+Reverse Proxy Configuration
+        ↓
+SSL Provisioning
+        ↓
+Service Startup
+        ↓
+Operational Registration
+```
+
+## Operational Features
+
+One-Click provides operational tooling around Node.js environments including:
+
+- application restart management
+- runtime monitoring
+- log visibility
+- deployment automation
+- process inspection
+- isolated environment management
+- service lifecycle orchestration
+
+## Security Model
+
+Node.js applications are deployed with a security-first isolation model that prioritizes:
+
+- isolated system users
+- controlled runtime environments
+- reverse proxy protection
+- minimized privilege exposure
+- environment separation
+- operational transparency
+
+## Design Philosophy
+
+The Node.js integration is designed to provide:
+
+- reproducible deployments
+- simplified operational workflows
+- predictable environment management
+- transparent runtime behavior
+- reduced manual configuration burden
+
+while preserving direct operational control over the underlying Linux environment.
+
+# Adminer Integration
+
+One-Click includes automated database management integration through Adminer, providing lightweight, temporary, and isolated web-based access to application databases without requiring permanently exposed database administration panels.
+
+Unlike traditional hosting environments that expose persistent database management interfaces, One-Click generates secure time-bound access sessions that are tied directly to the target environment.
+
+## Features
+
+- Automated Adminer deployment
+- Temporary authenticated access sessions
+- Isolated database environment mapping
+- Automatic credential injection
+- Localhost and reverse-proxy aware operation
+- Multi-database compatibility
+- Session expiration and cleanup
+- Domain-aware database discovery
+
+## Supported Database Engines
+
+- MySQL
+- MariaDB
+- PostgreSQL *(future support)*
+- SQLite *(future support)*
+
+## Security Model
+
+Adminer sessions are intentionally ephemeral and are not designed to remain publicly exposed.
+
+The integration prioritizes:
+
+- temporary magic-link authentication
+- isolated database visibility
+- automatic session expiration
+- minimized credential exposure
+- no permanent database passwords in the UI
+- environment-aware database access control
+
+## Example Usage
+
+```bash
+one-click --db-admin
+```
+
+The command automatically:
+
+1. Detects available databases
+2. Maps the correct isolated environment
+3. Generates a temporary authenticated Adminer session
+4. Returns a secure access URL
+
+## Workflow
+
+```text
+Database Detection
+        ↓
+Environment Resolution
+        ↓
+Temporary Session Generation
+        ↓
+Magic Link Creation
+        ↓
+Automatic Adminer Authentication
+```
+
+## Design Philosophy
+
+The Adminer integration is intended to provide:
+
+- fast operational access
+- minimal setup overhead
+- secure temporary administration
+- reduced credential handling
+- lightweight database management
+
+without introducing the attack surface commonly associated with permanently exposed database administration panels.
 
 ## OS Reinstall
 
@@ -584,43 +1103,60 @@ Use `raw:` when you need full control over advanced match extensions.
 ## One-Click Bench (OCB)
 
 One-Click Bench (OCB) is the integrated performance benchmarking module
-designed to evaluate infrastructure quality and detect bottlenecks.
+designed to evaluate infrastructure quality, identify bottlenecks, and
+provide reproducible benchmark reporting with shareable historical results.
 
-It provides a structured, repeatable benchmarking workflow suitable for:
+It delivers a structured benchmarking workflow suitable for:
 
 - VPS validation
 - Dedicated server verification
 - Cloud instance comparison
 - Pre-deployment testing
 - Post-migration performance checks
+- Long-term infrastructure performance tracking
 
 ### Benchmark Coverage
 
-OCB evaluates multiple subsystems:
+OCB evaluates multiple critical subsystems:
 
-- **CPU performance** – single and multi-threaded computational workloads  
-- **Memory performance** – sequential read/write bandwidth tests  
-- **Disk performance** – sequential and random I/O throughput and latency  
-- **Network latency** – multi-target latency measurement with automatic sorting  
-- **System profiling** – virtualization detection, CPU model, kernel, architecture  
+- **CPU performance** – single-threaded and multi-threaded computational workloads  
+- **Memory performance** – sequential read/write bandwidth and latency analysis  
+- **Disk performance** – sequential and random I/O throughput testing  
+- **Network latency** – multi-target latency measurement with automatic ranking  
+- **System profiling** – virtualization detection, CPU model, kernel, architecture, and platform details  
 
 ### Network Test Logic
 
-- All test targets are ping-tested first  
-- Targets are sorted by lowest round-trip latency  
-- Bandwidth or extended tests run in ranked order  
-- Ensures consistency and fair comparison across environments  
+- All network targets are latency-tested before extended benchmarking  
+- Targets are automatically sorted by lowest round-trip latency  
+- Bandwidth and transfer tests execute in ranked order  
+- Provides more consistent and comparable benchmark results across environments  
+
+### Historical Result API
+
+OCB now integrates with a centralized benchmark reporting API.
+
+After each benchmark completes:
+
+- Results can be securely submitted to the reporting platform  
+- A unique public result URL is generated automatically  
+- Historical benchmark reports remain accessible for future comparison  
+- Engineers can share benchmark URLs similarly to platforms such as Geekbench  
+- Enables performance trend analysis across hardware changes, migrations, or provider comparisons  
+
+This allows benchmark results to become portable, verifiable, and easy to reference during infrastructure evaluations, procurement reviews, or support investigations.
 
 ### Design Characteristics
 
 - Non-destructive and safe for production systems  
 - Automatic dependency handling  
-- Structured table output with optional color scoring  
-- Runs inside managed tmux session to prevent interruption  
-- No persistent system changes  
+- Structured table output with optional scoring indicators  
+- Runs inside a managed tmux session to prevent interruption  
+- Minimal operator interaction required  
+- No persistent system modifications  
 
-OCB is designed for engineers who need fast, reproducible performance metrics
-without installing heavy benchmarking suites manually.
+OCB is designed for engineers who require fast, repeatable, and shareable
+performance benchmarking without manually deploying heavyweight testing suites.
 
 ## Log Management Console
 
@@ -762,7 +1298,10 @@ patterns were influenced by the following open-source projects:
 - [reinstall by bin456789](https://github.com/bin456789/reinstall)  
   Influenced aspects of OS deployment methodology and reinstall logic.
 
-One-Click does may embed these projects directly or incorporates concepts,
+- [Adminer by vrana](https://github.com/vrana/adminer/)
+  Adminer is a full-featured database management tool written in PHP. One-Click utilizes it as our single token database management GUI.
+
+One-Click may embed these projects directly or incorporates concepts,
 ideas, and selected implementation approaches adapted to fit its modular
 architecture.
 
