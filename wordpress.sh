@@ -55,30 +55,40 @@ dns_check() {
     warn "Domain does not resolve to this server (${sys_ip:-${sys_ipv6}})"
   fi
 }
+resolve_type() {
+  local domain="$1"
+  local matches=()
+  [[ -e "/etc/one-click/wordpress/$domain" ]] && matches+=("wordpress")
+  [[ -e "/etc/one-click/sites/$domain" ]] && matches+=("sites")
+  [[ -e "/etc/one-click/apps/nodejs/$domain" ]] && matches+=("apps/nodejs")
+  case "${#matches[@]}" in
+    0)
+      type="unknown"
+      return 1
+      ;;
+    1)
+      type="${matches[0]}"
+      return 0
+      ;;
+    *)
+      error "Ambiguous domain '$domain': ${matches[*]}"
+      return 2
+      ;;
+  esac
+}
 # ==== Wordpress Backup ====
 wp_backup() {
-  if [[ ${1:-} =~ ^- ]]; then
-    info() {
-      printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s\n"
-    }
-    success() {
-      printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
-    }
-    warn() {
-      printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
-    }
-    error() {
-      printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
-    }
-  fi
   local domain base site backup timestamp config_path
   domain="${1:-}"
+  resolve_profile "$domain" || return 1
   base="/etc/one-click/wordpress"
   site="$base/$domain/www"
+  . "${base}/${domain}/meta.conf"
   config_path="$base/$domain/wp-config.php"
-  backup="$base/backups/$domain"
   timestamp=$(date +%Y%m%d-%H%M%S)
-  web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) 2> /dev/null | head -1)
+  web_user="$SITE_USER"
+  snap="${3:-}"
+  #web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) 2> /dev/null | head -1)
   [[ ! -d "$site" ]] && {
     error "Site directory not found"
     return 1
@@ -91,6 +101,17 @@ wp_backup() {
       }
     fi
   fi
+  if [[ -n "$snap" ]]; then
+    backup="$base/rollback/$domain"
+    info "Creating rollback snapshot"
+    mkdir -p "$backup/$timestamp"
+    backup_role=Rollback
+  else
+    backup="$base/backups/$domain"
+    info "Creating site backup for $domain"
+    mkdir -p "$backup/$timestamp"
+    backup_role=Backup
+  fi
   info "Creating WordPress backup for $domain"
   mkdir -p "$backup/$timestamp"
   local db_name db_user db_pass
@@ -101,6 +122,7 @@ wp_backup() {
   mysqldump -u"$db_user" -p"$db_pass" "$db_name" | pv | gzip > "$backup/$timestamp/db.sql.gz"
   info "Archiving files..."
   tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" . -C "$(dirname "$config_path")" "wp-config.php"
+  info "Building manifest"
   # ==== Metadata ====
   info "Building metadata"
   cat > "$backup/$timestamp/meta.conf" <<EOF
@@ -111,8 +133,6 @@ TIMESTAMP=$timestamp
 POOL=enabled
 SLICE=enabled
 EOF
-  chown "$web_user":"$web_user" "$backup/$timestamp/meta.conf"
-  info "Building manifest"
   # ==== Manifest ====
   cat > "$backup/$timestamp/manifest.txt" <<EOF
 TYPE=$( [[ -f "$backup/$timestamp/db.sql.gz" ]] && echo wordpress || echo static )
@@ -121,46 +141,67 @@ TIMESTAMP=$timestamp
 HOSTNAME=$(hostname)
 BACKUP_VERSION=1.0
 EOF
-  success "Backup stored at $backup/$timestamp"
+  chown "$web_user":"$web_user" "$backup/$timestamp/meta.conf"
+  update_profile_field "$profile" "LAST_BACKUP" "$timestamp"
+  if [[ "$remote_enabled" == "true" ]]; then
+    mirror_backup "$domain" "$backup/$timestamp" "$timestamp"
+  fi
+  success "$backup_role stored at $backup/$timestamp"
   sleep 2
 }
 wp_restore() {
-  warn "Beginning restore"
-  create_rollback_snapshot "$domain" "wordpress"
   local domain base site_dir backup_dir db_name db_user db_pass
+  local loc dest
   domain="${domain:-${1}}"
-  backup_dir="${2:-}"
+  resolve_profile "$domain" || return 1
+  warn "Beginning WordPress restore"
+  create_rollback_snapshot "$domain" "wordpress"
+  backup_dir="${2:-${backup_dir}}"
   base="/etc/one-click/wordpress"
   site_dir="$base/$domain/www"
   config_path="$base/$domain/wp-config.php"
+  loc="local"
+  dest="$HOSTNAME"
   read -rp "${cyan}[USER]${yellow} This will overwrite the current $domain. Continue? (y|n): " confirm
-  if [[ "$confirm" != "y" ]]; then
-    return 1
-  fi
-  [[ ! -d "$backup_dir" ]] && {
-    die "Backup directory not found"
+  [[ "$confirm" != "y" ]] && return 1
+  [[ -z "$backup_dir" ]] && {
+    die "Backup directory not provided"
   }
-  [[ -d "$site_dir" ]] || {
+  [[ ! -d "$site_dir" ]] && {
     die "Invalid site_dir"
   }
+  if [[ "$remote_enabled" == "true" ]]; then
+    loc="remote"
+    dest="$profile_host"
+    info "Fetching remote backup from $profile_host..."
+    run_rsync \
+      "${profile_user}@${profile_host}:${profile_base}/${domain}/" \
+      "$backup_dir/"
+  fi
   info "Loading metadata..."
-  source "$backup_dir/meta.conf"
+  . "$backup_dir/meta.conf" 2>/dev/null
+  . "$base/$domain/meta.conf" 2>/dev/null
+
   info "Clearing current site directory..."
   find "$site_dir" -mindepth 1 -delete
   rm -f "$config_path"
-  info "Restoring files..."
+  info "Restoring from $loc ($dest) -> $backup_dir"
+  # ==== Restore files ====
   tar -xzf "$backup_dir/files.tar.gz" -C "$site_dir"
+  # ==== Relocate wp-config ====
   if [[ -f "$site_dir/wp-config.php" ]]; then
     info "Relocating wp-config.php to secure parent directory..."
     mv "$site_dir/wp-config.php" "$config_path"
   fi
+  # ==== Restore database ====
   info "Restoring database..."
   db_name=$(grep DB_NAME "$config_path" | cut -d"'" -f4)
   db_user=$(grep DB_USER "$config_path" | cut -d"'" -f4)
   db_pass=$(grep DB_PASSWORD "$config_path" | cut -d"'" -f4)
   pv "$backup_dir/db.sql.gz" | gunzip | mysql -u"$db_user" -p"$db_pass" "$db_name"
-  chown -R "$web_user":"${webserver_user:-${webserver}}" "$site_dir"
-  chown "$web_user":"${webserver_user:-${webserver}}" "$config_path"
+  # ==== Fix permissions ====
+  chown -R "$web_user":"$SITE_GROUP" "$site_dir"
+  chown "$web_user":"$SITE_GROUP" "$config_path"
   chmod 644 "$config_path"
   success "Restore complete for $domain"
 }
@@ -230,7 +271,7 @@ web_logs() {
       "║ ${magenta}3${blue}  ║ ${green}Filter 200 Response Code${blue}                          ║" \
       "║ ${magenta}4${blue}  ║ ${green}Filter Response Codes${blue}                             ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                              ║" \
-      "╚════╩═══════════════════════════════════════════════════╝${reset}") <(get_current_profile)
+      "╚════╩═══════════════════════════════════════════════════╝${reset}") <(get_current_profile "$domain")
     read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
       1) web_log_view "$domain" access     ;;
@@ -264,17 +305,17 @@ profiles_board() {
       "║ ${magenta}4${blue}  ║ ${green}Delete Profile ${blue}                                       ║" \
       "║ ${magenta}5${blue}  ║ ${green}Test Profile Connection ${blue}                              ║" \
       "║ ${magenta}0${blue}  ║ ${green}Back ${blue}                                                 ║" \
-      "╚════╩═══════════════════════════════════════════════════════╝${reset}") <(get_current_profile)
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}") <(get_current_profile "$domain" || true)
     read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
       1) profile_switch
         read -rp "${cyan}[USER]${blue} Press Enter to continue" ;;
-      2) profile_list                      ;;
-      3) remote_profile_add                ;;
-      4) remote_profile_delete             ;;
-      5) remote_profile_test               ;;
-      0) clear; return 0                   ;;
-      *) error "Invalid option"            ;;
+      2) profile_list               ;;
+      3) profile_add                ;;
+      4) profile_delete             ;;
+      5) remote_profile_test        ;;
+      0) clear; return 0            ;;
+      *) error "Invalid option"     ;;
     esac
   done
 }
@@ -293,7 +334,7 @@ backup_board() {
       "║ ${magenta}7 ${blue} ║ ${green}List Remote Backups ${blue}                                  ║" \
       "║ ${magenta}8 ${blue} ║ ${green}List Rollbacks ${blue}                                       ║" \
       "║ ${magenta}0 ${blue} ║ ${green}Back ${blue}                                                 ║" \
-      "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
+      "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile "$domain")
 
   read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
@@ -321,7 +362,7 @@ backup_board() {
           resolve_profile "$domain"
           wp_restore_int
         else
-          static_restore_int
+          static_restore_int "$domain"
         fi
         ;;
       3) remote_backup "$domain" "$wpstatic"    ;;
@@ -376,7 +417,7 @@ main_board() {
       "║ ${magenta}10${blue} ║ ${green}Delete Site${blue}                                           ║" \
       "║ ${magenta}11${blue} ║ ${green}Web Logs${blue}                                              ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
-      "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile)
+      "╚════╩═══════════════════════════════════════════════════════╝") <(get_current_profile "$domain")
   read -rp "${cyan}[USER]${blue} Select an option: " choice
     case "$choice" in
       1) backup_board   ;;
@@ -1029,32 +1070,34 @@ wp_submenu() {
   local domain="$1"
   options=(
     "${magenta}1${green}  WP Plugin Manager${blue}"
-    "${magenta}2${green}  Backup Site${blue}"
-    "${magenta}3${green}  Restore Backup${blue}"
-    "${magenta}4${green}  Staging Menu${blue}"
-    "${magenta}5${green}  Rollback Snapshots${blue}"
-    "${magenta}6${green}  Push Staging${blue}"
-    "${magenta}7${green}  Delete Site${blue}"
-    "${magenta}8${green}  Reset Password${blue}"
-    "${magenta}9${green}  Web Logs${blue}"
+    "${magenta}2${green}  Manage Profiles${blue}"
+    "${magenta}3${green}  Backup Site${blue}"
+    "${magenta}4${green}  Restore Backup${blue}"
+    "${magenta}5${green}  Staging Menu${blue}"
+    "${magenta}6${green}  Rollback Snapshots${blue}"
+    "${magenta}7${green}  Push Staging${blue}"
+    "${magenta}8${green}  Delete Site${blue}"
+    "${magenta}9${green}  Reset Password${blue}"
+    "${magenta}10${green} Web Logs${blue}"
     "${magenta}0${green}  Exit${blue}"
   )
   local choice
   while true; do
-    draw_box "${magenta}Managing WordPress:${yellow} $domain${blue}" "${options[@]}"
+    paste <(draw_box "${magenta}Managing WordPress:${yellow} $domain${blue}" "${options[@]}") <(get_current_profile "$domain")
     read -rp "${cyan}[USER]${reset} Select an option: " choice
     case "$choice" in
       1) wp_plugin_manager "$domain" ;;
-      2) wp_backup "$domain"         ;;
-      3)
+      2) profiles_board              ;;
+      3) wp_backup "$domain"         ;;
+      4)
         resolve_profile "$domain"
         wp_restore_int "$domain"    ;;
-      4) wp_staging_menu "$domain"  ;;
-      5) wp_rollback_menu "$domain" ;;
-      6) wp_staging_push "$domain"  ;;
-      7) delete_site "$domain"      ;;
-      8) wp_magic_login "$domain"   ;;
-      9) web_logs                   ;;
+      5) wp_staging_menu "$domain"  ;;
+      6) wp_rollback_menu "$domain" ;;
+      7) wp_staging_push "$domain"  ;;
+      8) delete_site "$domain"      ;;
+      9) wp_magic_login "$domain"   ;;
+      10) web_logs                   ;;
       0) echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
         ;;
@@ -1827,6 +1870,18 @@ run_script() {
   chmod -R 700 /etc/one-click/wordpress/backups
   chown "$web_user":"$webserver_user" /etc/one-click/wordpress/backups
   chown "$web_user":"$webserver_user" /etc/one-click/wordpress/$domain/meta.conf
+  # ==== Inject direct perms ====
+  file="/etc/one-click/wordpress/${domain}/wp-config.php"
+  grep -q "ONECLICK_PLATFORM_BOOTSTRAP" "$file" || cat >> "$file" <<'EOF'
+if ( ! defined('ONECLICK_PLATFORM_BOOTSTRAP') ) {
+    define('ONECLICK_PLATFORM_BOOTSTRAP', true);
+    define('FS_METHOD', 'direct');
+    define('WP_CONTENT_DIR', ABSPATH . 'wp-content');
+    define('WP_CONTENT_URL', 'https://DOMAIN_REPLACE/wp-content');
+    define('WP_TEMP_DIR', '/var/lib/one-click/ONECLICK-DOMAIN_REPLACE/tmp');
+}
+EOF
+  sed -i "s|ONECLICK-DOMAIN_REPLACE|$domain|g" "$file"
   # ==== Open Firewall ====
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver"
@@ -2020,8 +2075,7 @@ get_site_user() {
 }
 check_permissions() {
   local domain="$1"
-  . "/etc/one-click/${mode_ver:-$type}/$domain/meta.conf" || true
-  . "/etc/one-click/apps/nodejs/${domain}/meta.conf" || true
+  . "/etc/one-click/${mode_ver:-$type}/$domain/meta.conf" || . "/etc/one-click/apps/nodejs/${domain}/meta.conf"
   local site_dir="$SITE_DIR"
   local secrets_dir="/etc/one-click/db-manager/secrets/db/${domain}.pass"
   local registry_dir="/etc/one-click/db-manager/sites/${domain}.json"
@@ -2544,13 +2598,13 @@ nodejs_board() {
       "║ ${magenta}3${blue}  ║ ${green}Restart Application${blue}                                   ║" \
       "║ ${magenta}4${blue}  ║ ${green}View Status${blue}                                           ║" \
       "║ ${magenta}5${blue}  ║ ${green}View Logs   ${blue}                                          ║" \
-      "║ ${magenta}6${blue}  ║ ${green}Enable Service ${blue}                                       ║" \
-      "║ ${magenta}7${blue}  ║ ${green}Disable Service   ${blue}                                    ║" \
-      "║ ${magenta}8${blue}  ║ ${green}Toggle Service   ${blue}                                     ║" \
-      "║ ${magenta}9${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
-      "║ ${magenta}10${blue} ║ ${green}View Service File${blue}                                     ║" \
-      "║ ${magenta}11${blue} ║ ${green}Edit Environment File${blue}                                 ║" \
-      "║ ${magenta}12${blue} ║ ${green}Open App Directory${blue}                                    ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Toggle Service   ${blue}                                     ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Check/Fix Permissions${blue}                                 ║" \
+      "║ ${magenta}8${blue}  ║ ${green}View Service File${blue}                                     ║" \
+      "║ ${magenta}9${blue}  ║ ${green}Edit Environment File${blue}                                 ║" \
+      "║ ${magenta}10${blue} ║ ${green}Open App Directory${blue}                                    ║" \
+      "║ ${magenta}11${blue} ║ ${green}Backup App  ${blue}                                          ║" \
+      "║ ${magenta}12${blue} ║ ${green}Restore App ${blue}                                          ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝")
   read -rp "${cyan}[USER]${blue} Select an option [0-12]: " choice
@@ -2580,16 +2634,6 @@ nodejs_board() {
         app_logs "$runtime" "$domain"
         ;;
       6)
-        systemctl enable "$service"
-        success "Service enabled"
-        sleep 1
-        ;;
-      7)
-        systemctl disable "$service"
-        success "Service disabled"
-        sleep 1
-        ;;
-      8)
         if systemctl is-enabled --quiet "$service"; then
           systemctl disable "$service"
           warn "Service disabled"
@@ -2599,19 +2643,26 @@ nodejs_board() {
         fi
         sleep 1
         ;;
-      9) check_permissions "$domain" ;;
-      10)
+      7) check_permissions "$domain" ;;
+      8)
         clear
         less "/etc/systemd/system/${service}"
         ;;
-      11)
+      9)
         mkdir -p "${root}/env"
         ${EDITOR:-nano} "${root}/env/.env"
         ;;
-      12)
+      10)
         clear
         cd "${root}" || return 1
         bash
+        ;;
+      11)
+        resolve_profile "$domain"
+        static_backup "$domain"
+        ;;
+      12)
+        static_restore_int "$domain"
         ;;
       0)
         error "Exiting..."
@@ -2894,45 +2945,41 @@ EOF
   fi
 }
 static_backup() {
-  info() {
-    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s\n"
-  }
-  success() {
-    printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
-  }
-  warn() {
-    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
-  }
-  error() {
-    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
-  }
   local domain base site backup timestamp webserver
   domain="${1:-}"
-  base="/etc/one-click/sites"
-  site="$base/$domain/www"
-  backup="$base/backups/$domain"
+  snap="${2:-}"
+  resolve_type "$domain"
+  . /etc/one-click/${type}/${domain}/meta.conf
+  base="/etc/one-click/${type}"
+  if [[ -d "$base/$domain/www" ]]; then
+    site="$base/$domain/www"
+  elif [[ -d "$base/$domain/app" ]]; then
+    site="$base/$domain/app"
+  else
+    error "No valid site directory found"
+    return 1
+  fi
   timestamp=$(date +%Y%m%d-%H%M%S)
   [[ ! -d "$site" ]] && {
     error "Site directory not found"
     return 1
   }
-  [[ ! -f "$site/index.html" && ! -f "$site/index.php" ]] && {
-    error "No index file found (not a valid static site)"
+  [[ ! -f "$site/index.html" && ! -f "$site/index.php" && ! -f "$site/index.js" ]] && {
+    error "No index file found (not a valid site: $domain)"
     return 1
   }
-  info "Creating static site backup for $domain"
-  mkdir -p "$backup/$timestamp"
-  if ss -taulpn | grep ':80\|:443' &> /dev/null; then
-    webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
+  if [[ -n "$snap" ]]; then
+    backup="$base/rollback/$domain"
+    info "Creating rollback snapshot"
+    mkdir -p "$backup/$timestamp"
+    backup_role=Rollback
   else
-    if [[ -f "/etc/nginx/sites-available/$domain.conf" || -f "/etc/nginx/conf.d/$domain.conf" ]]; then
-      webserver="nginx"
-    elif [[ -f "/etc/apache2/sites-available/$domain.conf" ]]; then
-      webserver="www-data"
-    else
-      webserver="apache"
-    fi
+    backup="$base/backups/$domain"
+    info "Creating site backup for $domain"
+    mkdir -p "$backup/$timestamp"
+    backup_role=Backup
   fi
+  webserver="$WEBSERVER"
   info "Archiving files..."
   tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" .
   # ==== Save vhost config ====
@@ -2947,6 +2994,21 @@ static_backup() {
       cp /etc/httpd/conf.d/$domain.conf "$backup/$timestamp/apache.conf"
       ;;
   esac
+  # ==== Database Backup ===
+  if resolve_site_database "$domain"; then
+    info "Backing up database $db_name"
+    db_pass=$(<"${db_password_file:-${db_pass}}")
+    mysqldump \
+      -h "$db_host" \
+      -P "$db_port" \
+      -u "$db_user" \
+      -p"$db_pass" \
+      "$db_name" \
+      | gzip > "$backup/$timestamp/db.sql.gz"
+    db_included=true
+  else
+    db_included=false
+  fi
   # ==== Metadata ====
   cat > "$backup/$timestamp/meta.conf" <<EOF
 DOMAIN=$domain
@@ -2959,32 +3021,48 @@ SLICE=enabled
 EOF
   # ==== Manifest ====
   cat > "$backup/$timestamp/manifest.txt" <<EOF
-TYPE=$( [[ -f "$backup/$timestamp/db.sql.gz" ]] && echo wordpress || echo static )
+TYPE="$type"
 DOMAIN=$domain
 TIMESTAMP=$timestamp
 HOSTNAME=$(hostname)
 BACKUP_VERSION=1.0
+DB_INCLUDED=$db_included
+DB_ENGINE=${db_engine:-}
+DB_HOST=${db_host:-}
+DB_PORT=${db_port:-}
+DB_NAME=${db_name:-}
+DB_USER=${db_user:-}
 EOF
-  success "Backup stored at $backup/$timestamp"
+  success "$backup_role stored at $backup/$timestamp"
   sleep 2
 }
 static_restore() {
+  local domain base site_dir backup_dir webserver
+  domain="${domain:-${1}}"
+  resolve_type "$domain"
   read -rp "${yellow}[USER]${yellow} This will overwrite $domain. Continue? (y|n): " confirm
   [[ "$confirm" != "y" && "$confirm" != "yes" ]] && return 1
   create_rollback_snapshot "$domain" "static"
-  local domain base site_dir backup_dir webserver
-  domain="${domain:-${1}}"
   backup_dir="$2"
-  base="/etc/one-click/sites"
-  site_dir="$base/www/$domain"
+  base="/etc/one-click/${type}"
+  if [[ -d "$base/$domain/www" ]]; then
+    site_dir="$base/$domain/www"
+  elif [[ -d "$base/$domain/app" ]]; then
+    site_dir="$base/$domain/app"
+  else
+    error "No valid site directory found"
+    return 1
+  fi
   [[ ! -d "$backup_dir" ]] && {
     die "Backup directory not found"
   }
-  [[ -d "$site_dir" && "$site_dir" == *"/www/"* ]] || {
-    die "Invalid site_dir"
+  [[ -d "$site_dir" ]] || {
+    die "Invalid site directory: $site_dir"
   }
   info "Loading metadata..."
-  source "$backup_dir/meta.conf"
+  . "$base/$domain/meta.conf"
+  . "$backup_dir/meta.conf"
+  . "$backup_dir/manifest.txt"
   # ==== Restore files ====
   info "Restoring files..."
   find "$site_dir" -mindepth 1 -delete
@@ -2993,7 +3071,7 @@ static_restore() {
   info "Restoring webserver configuration..."
   case "$WEBSERVER" in
     nginx)
-      webserver_user=nginx
+      webserver_user="$SITE_GROUP"
       if [[ -f "$backup_dir/nginx.conf" ]]; then
         if systemctl is-active nginx.service &> /dev/null; then
           cp "$backup_dir/nginx.conf" /etc/nginx/sites-available/$domain.conf 2>/dev/null || \
@@ -3011,7 +3089,7 @@ static_restore() {
     apache)
       if [[ -f "$backup_dir/apache.conf" ]]; then
         if [[ -d /etc/apache2 ]]; then
-          webserver_user=www-data
+          webserver_user="$SITE_GROUP"
           if systemctl is-active apache2.service &> /dev/null; then
             cp "$backup_dir/apache.conf" /etc/apache2/sites-available/$domain.conf
             a2ensite "$domain"
@@ -3022,7 +3100,7 @@ static_restore() {
             return
           fi
         else
-          webserver_user=apache
+          webserver_user="$SITE_GROUP"
           if systemctl is-active httpd.service &> /dev/null; then
             cp "$backup_dir/apache.conf" /etc/httpd/conf.d/$domain.conf
             systemctl reload httpd
@@ -3035,7 +3113,18 @@ static_restore() {
       fi
       ;;
   esac
-  chown -R "$web_user":"$webserver_user" "$site_dir"
+  # ==== Restore Database ====
+  if [[ "$DB_INCLUDED" == "true" ]]; then
+    if [[ -f "$backup_dir/db.sql.gz" ]]; then
+      db_password_file=$(cat /etc/one-click/db-manager/secrets/db/${domain}.pass)
+      DB_PASS=$(<"${db_password_file:-${DB_PASS}}")
+      pv "$backup_dir/db.sql.gz" | gunzip | mysql \
+        -u "$DB_USER" \
+        -p"$DB_PASS" \
+        "$DB_NAME"
+    fi
+  fi
+  chown -R "$SITE_USER":"$SITE_GROUP" "$site_dir"
   success "Restore complete for $domain"
 }
 select_static_domain() {
@@ -3089,9 +3178,14 @@ static_backup_int() {
   static_backup "$domain"
 }
 static_restore_int() {
-  select_static_domain "restore" || return 1
+  if [[ -z "${1}" ]]; then
+    select_static_domain "restore" || return 1
+  else
+    domain="$1"
+  fi
+  resolve_type "$domain"
   resolve_profile "$domain"
-  local backup_base="/etc/one-click/sites/backups/$domain"
+  local backup_base="/etc/one-click/${type}/backups/$domain"
   local backups i choice
   mapfile -t backups < <(find "$backup_base" -mindepth 1 -maxdepth 1 -type d | sort)
   if [[ ${#backups[@]} -eq 0 ]]; then
@@ -3123,7 +3217,7 @@ detect_env() {
     error "Unsupported OS."
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
-  web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) | head -1)
+  web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites,apps/nodejs}/$domain 2> /dev/null) | head -1)
   if systemctl is-active --quiet nginx; then
     webserver="nginx"
     [[ "$os_family" == "debian" ]] && conf_path="/etc/nginx/sites-enabled" || conf_path="/etc/nginx/conf.d"
@@ -3253,14 +3347,14 @@ install_php() {
   setup_repos
   info "Installing PHP $ver and common extensions..."
   if [[ "${os_family:-}" == "debian" ]]; then
-    $pkg_mgr install -y "php-fpm php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" || return 1
+    $pkg_mgr install -y "php-fpm php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" "php$ver-zip" "php$ver-gd" || return 1
     fpm_service="php$ver-fpm"
     v=$(sed -En '/PHP/s/^[^0-9]*([0-9]\.).*/\1/p' <(php -v))
     cp /usr/sbin/php-fpm${v}* /usr/sbin/php-fpm
   else
     $pkg_mgr module reset php -y
     $pkg_mgr module enable "php:remi-$ver" -y
-    $pkg_mgr install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl || return 1
+    $pkg_mgr install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl php-zip "php$ver-xml" php-gd || return 1
     fpm_service="php-fpm"
   fi
   $pkg_mgr stop "php$ver-fpm" 2>/dev/null || true
@@ -3545,8 +3639,13 @@ listen = $run_dir/php.sock
 listen.owner = $site_user
 listen.group = ${webserver_user:-${webserver}}
 listen.mode = 0660
-pm = ondemand
-pm.max_children = 5
+pm = dynamic
+pm.max_children = 20
+pm.start_servers = 4
+pm.min_spare_servers = 2
+pm.max_spare_servers = 6
+pm.process_idle_timeout = 10s
+pm.max_requests = 500
 php_admin_value[open_basedir] = /etc/one-click/${type}/${domain}/:/etc/one-click/${type}/${domain}/www/:/tmp:/var/lib/one-click/${domain}/:/etc/one-click/db-manager/runtime/tokens:/etc/one-click/db-manager/sites/${domain}.json:/etc/one-click/db-manager/secrets/db/${domain}.pass:/etc/one-click/db-manager/runtime/tokens/
 php_admin_value[upload_tmp_dir] = $lib_dir/tmp
 php_admin_value[session.save_path] = $lib_dir/sessions
@@ -3574,6 +3673,7 @@ Slice=one-click_$domain.slice
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+ReadWritePaths=/etc/one-click/
 NoNewPrivileges=true
 Restart=always
 
@@ -3595,34 +3695,38 @@ EOF
 create_rollback_snapshot() {
   local domain type ts base backup_source rollback_dir latest
   domain="$1"
-  type="$2"
+  resolve_type "$domain"
   ts=$(date +%Y%m%d-%H%M%S)
   info "Creating rollback snapshot for $domain"
   if [[ "$type" == "wordpress" ]]; then
     base="/etc/one-click/wordpress"
-    wp_backup "$domain" "ran"
+    wp_backup "$domain" "ran" snap
   else
-    base="/etc/one-click/sites"
-    static_backup "$domain"
+    base="/etc/one-click/${type}"
+    static_backup "$domain" snap
   fi
   set +o pipefail
   backup_source="$base/backups/$domain"
-  latest=$(ls -dt "$backup_source/"* 2>/dev/null | head -n1)
+  latest=$(ls -1 "$backup_source/" 2>/dev/null | tail -n1)
   set -o pipefail
-  [[ -z "$latest" ]] && { error "No recent backup found to snapshot"; return 1; }
+  if [[ -z "$latest" ]]; then
+    error "No recent backup found to snapshot"
+    return 1
+  fi
   rollback_dir="$base/rollback/$domain/$ts"
   mkdir -p "$rollback_dir"
-  cp -a "$latest/." "$rollback_dir/"
+  cp -a "$backup_source/$latest/." "$rollback_dir/"
   success "Rollback snapshot created: $ts"
 }
 rollback_list() {
   local domain="$1"
   skip_prompt="${2:-}"
-  local base="/etc/one-click/wordpress/rollback"
+  resolve_type "$domain"
+  local base="/etc/one-click/$type/rollback"
   echo -e "\e[34m╔════╦══════════════════════╗\e[0m"
   echo -e "\e[34m║ ID ║ Snapshot             ║\e[0m"
   echo -e "\e[34m╠════╬══════════════════════╣\e[0m"
-  mapfile -t snaps < <(ls -1 "$base/$domain" 2>/dev/null | sort -r)
+  mapfile -t snaps < <(ls -1 "$base/$domain/" 2>/dev/null | sort -r)
   local i=1
   for s in "${snaps[@]}"; do
     printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "$i" "$s"
@@ -3765,7 +3869,7 @@ web_log_view() {
     (color_error < "$log" | less -R) || true
   fi
 }
-##################################### SECURITY ##################################
+##################################### SECURITY (GUARD) ##################################
 declare -gA offense_count
 # ==== Do Not Monitor IPs In Whitelist ====
 WHITELIST=("127.0.0.1")
@@ -4115,171 +4219,6 @@ view_security() {
   printf "${blue}└───────────────┴──────────────────────┴───────────────┴───────────────┴───────────────┘${reset}\n"
 }
 ######################################## REMOTE BACKUP & RESTORE ##################################
-#config_dir="$base/sites/config"
-#profiles_file="$config_dir/remotes.conf"
-#map_file="$config_dir/domain_map.conf"
-#current_profile_file="$config_dir/current_profile"
-#mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
-profile_add() {
-  export d_pass
-  read -rp "${cyan}[USER]${blue} Please provide the remote hosts IP address:${reset} " host
-  read -rp "${cyan}[USER]${blue} Please provide the remote username:${reset} " user
-  user="${user:-root}"
-  read -rp "${cyan}[USER]${blue} Remote base path [/backups]: ${reset}" base_path
-  base_path="${base_path:-/backups}"
-  check_auth
-  cat >> "$profiles_file" <<EOF
-[$profile]
-HOST=${host}
-USER=${user:-root}
-BASE_PATH=$base_path
-E-PASSWD=$e_pass
-EOF
-  if [[ -z "$profiles_file" ]]; then
-    error "profiles file was not populated"
-    return 1
-  fi
-  if grep -q "^\[$profile" "$profiles_file"; then
-    success "Profile '$profile' created"
-    return 0
-  else
-    error "Profile "$profile" not added"
-    return 1
-  fi
-}
-profile_list() {
-  echo -e "\e[34m╔══════════════════════╦══════════════════════╦══════════════════════╗\e[0m"
-  echo -e "\e[34m║ Name                 ║ Host                 ║ Base Path            ║\e[0m"
-  echo -e "\e[34m╠══════════════════════╬══════════════════════╬══════════════════════╣\e[0m"
-  awk '
-    /^\[/ {name=substr($0,2,length($0)-2)}
-    /^HOST=/ {host=substr($0,6)}
-    /^BASE_PATH=/ {
-      base=substr($0,11)
-      printf "%-22s %-22s %-22s\n", name, host, base
-    }
-  ' "$profiles_file" | while read -r profile_name profile_host2 profile_base_path; do
-    printf "\e[34m║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" "$profile_name" "$profile_host2" "$profile_base_path"
-  done
-  echo -e "\e[34m╚══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
-  read -rp "${cyan}[USER]${reset} Press Enter to continue"
-}
-profile_assign() {
-  local domain
-  domain="${1:-}"
-  if [[ -z "$domain" ]]; then
-    read -rp "${cyan}[USER]${blue} Please enter domain: " domain
-  fi
-  read -rp "${cyan}[USER]${blue} Please create a profile name: " profile
-  echo "$domain=$profile" > /tmp/map.tmp
-  echo "$profile" > "$current_profile_file"
-  grep -v "^$domain=" "$map_file" 2>/dev/null >> /tmp/map.tmp || true
-  mv -f /tmp/map.tmp "$map_file"
-  profile_add
-  success "$profile has been created" "$domain → $profile"
-  return 0
-}
-load_profile() {
-  local profile
-  profile="$1"
-  profile_pass_enc=$(awk -v p="[$profile]" '
-    $0==p {f=1; next}
-    /^\[/ {f=0}
-    f && /^E-PASSWD=/ {
-      print substr($0,10)
-      exit
-    }
-  ' "$profiles_file")
-  profile_type=$(awk -v p="[$profile]" '
-    $0==p {f=1; next}
-    /^\[/ {f=0}
-    f && /^TYPE=/ {print substr($0,6); exit}
-' "$profiles_file")
-  if [[ "$profile_type" == "local" ]]; then
-    remote_host=""
-    remote_user=""
-    remote_base=""
-    profile_pass=""
-    return 0
-  fi
-  if [[ -n "$profile_pass_enc" ]]; then
-    profile_pass=$(decrypt_password "$profile_pass_enc")
-  else
-    profile_pass=""
-  fi
-  profile_host=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^HOST=/{print substr($0,6)}' "$profiles_file")
-  profile_user=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^USER=/{print substr($0,6)}' "$profiles_file")
-  profile_base=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0}f&&/^BASE_PATH=/{print substr($0,11)}' "$profiles_file")
-  if [[ -z "$profile_host" ]]; then
-    error "Profile not found"
-    return 1
-  fi
-  export profile_pass
-  return
-}
-resolve_profile() {
-  local domain
-  domain="$1"
-  profile=$(grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2)
-  if [[ -z "$profile" ]]; then
-    info "No profile assigned to $domain"
-    profile="local-default"
-  fi
-  load_profile "$profile"
-  remote_host="$profile_host"
-  remote_user="$profile_user"
-  remote_base="$profile_base"
-}
-assign_profile_to_domain() {
-  local domain="$1"
-  echo "Available profiles:"
-  profile_list
-  read -rp "${cyan}[USER]${blue} Select profile: " profile
-  grep -v "^$domain=" "$map_file" 2>/dev/null > /tmp/map.tmp || true
-  echo "$domain=$profile" >> /tmp/map.tmp
-  mv -f /tmp/map.tmp "$map_file"
-  success "$domain → $profile"
-}
-ensure_local_profile() {
-  if ! grep -q "^\[Not Assigned\]" "$profiles_file" 2>/dev/null; then
-    cat >> "$profiles_file" <<EOF
-[local-default]
-TYPE=local
-EOF
-  fi
-}
-check_auth() {
-  if [[ "$profile_type" == "local" ]]; then
-    use_sshpass=0
-    return 0
-  fi
-  if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "${user:-remote_user}@${host:-remote_host}" "exit" >/dev/null 2>&1; then
-    #read -rsp "${cyan}[USER]${blue} ${host:-remote_host}'s password: " sshpass
-    #if [[ -n "$sshpass" ]]; then
-    #  e_pass=$(encrypt_password "$sshpass")
-    #fi
-    #echo
-    use_sshpass=1
-  else
-    use_sshpass=0
-  fi
-  #export e_pass
-  #export d_pass
-}
-run_ssh() {
-  if [[ "$use_sshpass" == 1 ]]; then
-    sshpass -p "$d_pass" ssh -o StrictHostKeyChecking=no "$remote_user@$remote_host" "$1"
-  else
-    ssh "$remote_user@$remote_host" "$1"
-  fi
-}
-run_rsync() {
-  if [[ "$use_sshpass" == 1 ]]; then
-    sshpass -p "$d_pass" rsync -az --progress -e "ssh -o StrictHostKeyChecking=no" "$@"
-  else
-    rsync -az --progress "$@"
-  fi
-}
 remote_backup() {
   local domain type
   domain="$1"
@@ -4496,6 +4435,8 @@ profile_switch() {
 }
 get_current_profile() {
   type="${wpstatic:-}"
+  domain="$1"
+  resolve_type "$domain"
   last_backup=$((ls -1 /etc/one-click/${type}/backups/${domain:-}/ 2> /dev/null | head -1) || true)
   lb_ts=$(echo "$last_backup" | sed -E 's/(.{4})(..)(..).(..)(..).*/\3-\2-\1 \4:\5/')
   disk_usage=$(awk '{print $1}' <(du -s -h /etc/one-click/${type}/${domain:-}/ 2> /dev/null))
@@ -4511,74 +4452,25 @@ get_current_profile() {
     printf "${blue}├──────────────────┼───────────────────────────────────────┤\n"
     printf "${blue}│${magenta}  %-15s ${blue}│${green} %-37s ${blue}│${reset}\n" \
       "Domain" "${domain:-N/A}" \
-      "Last Backup" "$lb_ts" \
+      "Last Backup" "${lb_ts:-Not Taken}" \
       "Disk Usage" "$disk_usage"
     echo -e "${blue}└──────────────────┴───────────────────────────────────────┘${reset}"
   fi
 }
-####################### REMOTE PROFILES MANAGEMENT ################################
-# ==== Add New Profile ====
-remote_profile_add() {
-  local profile host user base_path sshpass e_pass
-  read -rp "${cyan}[USER]${blue} Enter new profile name: " profile
-  [[ -z "$profile" ]] && { error "Invalid name"; return 1; }
-  if grep -q "^\[$profile\]" "$profiles_file"; then
-    echo "Profile already exists"
+####################### PROFILES MANAGEMENT ################################
+# ==== Delete Profile ====
+profile_delete() {
+  local profiles choice selected tmpfile current_profile
+  mapfile -t profiles < <(
+    awk '/^\[.*\]/{
+      gsub(/\[|\]/,"")
+      print
+    }' "$profiles_file"
+  )
+  if [[ ${#profiles[@]} -eq 0 ]]; then
+    error "No profiles available to delete"
     return 1
   fi
-  read -rp "${cyan}[USER]${blue} Enter the remote host IP: " host
-  read -rp "${cyan}[USER]${blue} Enter ${host}'s username [root]: " user
-  user="${user:-root}"
-  read -rp "${cyan}[USER]${blue} Enter remote base path [/backups]: " base_path
-  base_path="${base_path:-/backups}"
-  read -rsp "${cyan}[USER]${blue} Password (leave empty for SSH key): " sshpass
-  echo
-  [[ -n "$sshpass" ]] && e_pass=$(encrypt_password "$sshpass") || e_pass=""
-  cat >> "$profiles_file" <<EOF
-[$profile]
-HOST=$host
-USER=$user
-BASE_PATH=$base_path
-E-PASSWD=$e_pass
-EOF
-    success "Profile '$profile' added"
-}
-# ==== List Remote Profiles ====
-remote_profile_list() {
-  local -a names hosts bases
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^\[(.*)\]$ ]]; then
-      name="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^HOST=(.*)$ ]]; then
-      host="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^BASE_PATH=(.*)$ ]]; then
-      base="${BASH_REMATCH[1]}"
-      names+=("$name")
-      hosts+=("$host")
-      bases+=("$base")
-    fi
-  done < "$profiles_file"
-  if [[ ${#names[@]} -eq 0 ]]; then
-    error "No profiles found."
-    return 1
-  fi
-  echo -e "\e[34m╔════╦══════════════════════╦══════════════════════╦══════════════════════╗\e[0m"
-  echo -e "\e[34m║ ID ║ Profile Name         ║ Host                 ║ Base Path            ║\e[0m"
-  echo -e "\e[34m╠════╬══════════════════════╬══════════════════════╬══════════════════════╣\e[0m"
-  local i=1
-  for idx in "${!names[@]}"; do
-    printf "\e[34m║ %-2s ║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" \
-      "$i" "${names[$idx]}" "${hosts[$idx]}" "${bases[$idx]}"
-    ((i++))
-  done
-  echo -e "\e[34m╚════╩══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
-  read -rp "${cyan}[USER]${blue} Press Enter to continue"
-}
-# ==== Switch Active Profile ====
-remote_profile_switch() {
-  local profiles choice selected
-  mapfile -t profiles < <(awk '/^\[/{gsub(/\[|\]/,""); print}' "$profiles_file")
-  [[ ${#profiles[@]} -eq 0 ]] && { error "No profiles found"; return 1; }
   echo -e "\e[34m╔════╦══════════════════════╗\e[0m"
   echo -e "\e[34m║ ID ║ Profile Name         ║\e[0m"
   echo -e "\e[34m╠════╬══════════════════════╣\e[0m"
@@ -4590,86 +4482,356 @@ remote_profile_switch() {
   printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "0" "Exit"
   echo -e "\e[34m╚════╩══════════════════════╝\e[0m"
   while true; do
-    read -rp "${cyan}[USER]${blue} Select profile ID to activate: ${reset}" choice
-    if [[ "$choice" -eq 0 ]]; then
-      return
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#profiles[@]} )); then
-      selected="${profiles[$((choice-1))]}"
-      echo "$selected" > "$current_profile_file"
-      success "Active profile: $selected"
-      break
-    else
-      error "Invalid selection"
-    fi
-  done
-}
-# ==== Delete Remote Profile ====
-remote_profile_delete() {
-  local profiles choice selected
-  mapfile -t profiles < <(awk '/^\[.*\]/{gsub(/\[|\]/,""); print $0}' "$profiles_file")
-  if [[ ${#profiles[@]} -eq 0 ]]; then
-    error "No profiles available to delete"
-    return 1
-  fi
-  echo -e "\e[34m╔════╦══════════════════════╗\e[0m"
-  echo -e "\e[34m║ ${yellow}ID ${blue}║ ${yellow}Profile Name${blue}         ║\e[0m"
-  echo -e "\e[34m╠════╬══════════════════════╣\e[0m"
-  local i=1
-  for p in "${profiles[@]}"; do
-    printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "$i" "$p"
-    ((i++))
-  done
-  printf "\e[34m║ %-2s ║ %-20s ║\e[0m\n" "0" "Exit"
-  echo -e "\e[34m╚════╩══════════════════════╝\e[0m"
-  while true; do
     read -rp "${cyan}[USER]${blue} Select profile ID to delete: ${reset}" choice
-    if [[ "$choice" -eq 0 ]]; then
-      return
-    fi
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#profiles[@]} )); then
+    [[ "$choice" == "0" ]] && return 0
+    if [[ "$choice" =~ ^[0-9]+$ ]] &&
+       (( choice >= 1 && choice <= ${#profiles[@]} )); then
       selected="${profiles[$((choice-1))]}"
       break
-    else
-      error "Invalid selection, try again."
     fi
+    error "Invalid selection"
   done
-  if grep -q "=${selected}$" "$map_file"; then
-    error "Profile '$selected' is assigned to a domain"
+  validate_profile_integrity "$selected"
+  # ==== Protect defaults ====
+  if [[ "$selected" == "local-default" ]]; then
+    error "Cannot delete protected profile"
     return 1
   fi
+  # ==== Prevent deletion if assigned ====
+  if grep -qE "^[^=]+=${selected}$" "$map_file" 2>/dev/null; then
+    error "Profile '$selected' is still assigned to one or more domains"
+    return 1
+  fi
+  read -rp "${cyan}[USER]${red} Delete profile '$selected'? (y|n): ${reset}" confirm
+  [[ "$confirm" != "y" ]] && {
+    info "Cancelled"
+    return 0
+  }
+  tmpfile=$(mktemp)
   awk -v p="[$selected]" '
     $0==p {f=1; next}
     /^\[/ {f=0}
     !f
-  ' "$profiles_file" > /tmp/remotes.tmp
-  mv /tmp/remotes.tmp "$profiles_file"
+  ' "$profiles_file" > "$tmpfile"
+  mv "$tmpfile" "$profiles_file"
+  # ==== Clear stale active profile ====
+  if [[ -f "$current_profile_file" ]]; then
+    current_profile=$(<"$current_profile_file")
+    if [[ "$current_profile" == "$selected" ]]; then
+      echo "local-default" > "$current_profile_file"
+    fi
+  fi
   success "Profile '$selected' deleted"
 }
 # ==== Test Profile Connection ====
 remote_profile_test() {
-  local profile profile_host profile_user profile_pass_enc d_pass ret
-  [[ -f "$current_profile_file" ]] || { error "No active profile"; return; }
+  local profile ret
+  [[ -f "$current_profile_file" ]] || {
+    error "No active profile"
+    return 1
+  }
   profile=$(<"$current_profile_file")
-  profile_pass_enc=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^E-PASSWD=/{print substr($0,10)}' "$profiles_file")
-  [[ -z "$profile" ]] && { error "Active profile is empty"; return 1; }
-  profile_host=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^HOST=/{print substr($0,6)}' "$profiles_file")
-  profile_user=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^USER=/{print substr($0,6)}' "$profiles_file")
-  profile_pass_enc=$(awk -v p="[$profile]" '$0==p{f=1;next}/^\[/{f=0} f&&/^E-PASSWD=/{print substr($0,10)}' "$profiles_file")
-  [[ -n "$profile_pass_enc" ]] && d_pass=$(decrypt_password "$profile_pass_enc") || d_pass=""
-  if [[ -n "$d_pass" ]]; then
-    sshpass -p "$d_pass" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-      "$profile_user@$profile_host" "echo OK" >/dev/null 2>&1 || ret=$?
+  load_profile "$profile" || return 1
+  if [[ "$remote_enabled" != "true" ]]; then
+    info "Local profile does not require connection testing"
+    return 0
+  fi
+  if [[ -n "$profile_pass" ]]; then
+    sshpass -p "$profile_pass" \
+      ssh \
+      -o StrictHostKeyChecking=no \
+      -o ConnectTimeout=5 \
+      "$profile_user@$profile_host" \
+      "echo OK" >/dev/null 2>&1 || ret=$?
   else
-    ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
-      "$profile_user@$profile_host" "echo OK" >/dev/null 2>&1 || ret=$?
+    ssh \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=no \
+      -o ConnectTimeout=5 \
+      "$profile_user@$profile_host" \
+      "echo OK" >/dev/null 2>&1 || ret=$?
   fi
   ret=${ret:-0}
   if [[ $ret -eq 0 ]]; then
-  success "${green}Connection OK to $profile_host as $profile_user${reset}"
+    success "Connection OK"
+  else
+    error "Connection failed"
+  fi
+}
+profile_add() {
+  local profile type host user base_path sshpass e_pass remote_enabled
+  read -rp "${cyan}[USER]${blue} Profile name: ${reset}" profile
+  [[ -z "$profile" ]] && {
+    error "Invalid profile name"
+    return 1
+  }
+  if grep -q "^\[$profile\]" "$profiles_file" 2>/dev/null; then
+    error "Profile already exists"
+    return 1
+  fi
+  while true; do
+    read -rp "${cyan}[USER]${blue} Profile type (local|remote): ${reset}" type
+    if [[ "$type" != "local" && "$type" != "remote" ]]; then
+      error "Invalid backup type!"
+      info "Please enter a valid type."
     else
-        error "${red}Connection failed to $profile_host as $profile_user${reset}"
+      break
     fi
+  done
+  case "$type" in
+    remote)
+      remote_enabled=true
+      read -rp "${cyan}[USER]${blue} Remote host IP: ${reset}" host
+      read -rp "${cyan}[USER]${blue} Remote username [root]: ${reset}" user
+      user="${user:-root}"
+      read -rp "${cyan}[USER]${blue} Remote base path [/backups]: ${reset}" base_path
+      base_path="${base_path:-/backups}"
+      read -rsp "${cyan}[USER]${blue} Password (leave empty for SSH key): ${reset}" sshpass
+      echo
+      [[ -n "$sshpass" ]] && \
+        e_pass=$(encrypt_password "$sshpass") || \
+        e_pass=""
+      ;;
+    local)
+      remote_enabled=false
+      read -rp "${cyan}[USER]${blue} Local backup path [/backups]: ${reset}" base_path
+      base_path="${base_path:-/backups}"
+      ;;
+    *)
+      error "Invalid profile type"
+      return
+      ;;
+  esac
+  cat >> "$profiles_file" <<EOF
+[$profile]
+TYPE=$type
+REMOTE_ENABLED=$remote_enabled
+HOST=${host:-}
+USER=${user:-}
+BASE_PATH=$base_path
+E_PASSWD=${e_pass:-}
+LAST_BACKUP=
+LAST_REMOTE_SYNC=
+LAST_SYNC_STATUS=
+
+EOF
+  success "Profile '$profile' successfully created"
+}
+profile_list() {
+  echo -e "\e[34m╔══════════════════════╦══════════════════════╦══════════════════════╗\e[0m"
+  echo -e "\e[34m║ Name                 ║ Host                 ║ Base Path            ║\e[0m"
+  echo -e "\e[34m╠══════════════════════╬══════════════════════╬══════════════════════╣\e[0m"
+  awk '
+    /^\[/ {name=substr($0,2,length($0)-2)}
+    /^HOST=/ {host=substr($0,6)}
+    /^BASE_PATH=/ {
+      base=substr($0,11)
+      printf "%-22s %-22s %-22s\n", name, host, base
+    }
+  ' "$profiles_file" | while read -r profile_name profile_host2 profile_base_path; do
+    printf "\e[34m║ %-20s ║ %-20s ║ %-20s ║\e[0m\n" "$profile_name" "$profile_host2" "$profile_base_path"
+  done
+  echo -e "\e[34m╚══════════════════════╩══════════════════════╩══════════════════════╝\e[0m"
+  read -rp "${cyan}[USER]${reset} Press Enter to continue"
+}
+profile_assign() {
+  local domain
+  domain="${1:-}"
+  if [[ -z "$domain" ]]; then
+    read -rp "${cyan}[USER]${blue} Please enter domain: " domain
+  fi
+  read -rp "${cyan}[USER]${blue} Please create a profile name: " profile
+  echo "$domain=$profile" > /tmp/map.tmp
+  echo "$profile" > "$current_profile_file"
+  grep -v "^$domain=" "$map_file" 2>/dev/null >> /tmp/map.tmp || true
+  mv -f /tmp/map.tmp "$map_file"
+  profile_add
+  success "$profile has been created" "$domain → $profile"
+  return 0
+}
+load_profile() {
+  local profile="$1"
+  profile_type=""
+  profile_host=""
+  profile_user=""
+  profile_base=""
+  profile_pass=""
+  remote_enabled=false
+  while IFS='=' read -r key value; do
+    case "$key" in
+      TYPE)
+        profile_type="$value"
+        ;;
+      REMOTE_ENABLED)
+        remote_enabled="$value"
+        ;;
+      HOST)
+        profile_host="$value"
+        ;;
+      USER)
+        profile_user="$value"
+        ;;
+      BASE_PATH)
+        profile_base="$value"
+        ;;
+      E_PASSWD)
+        profile_pass_enc="$value"
+        ;;
+    esac
+  done < <(
+    awk -v p="[$profile]" '
+      $0==p {f=1; next}
+      /^\[/ {f=0}
+      f
+    ' "$profiles_file"
+  )
+  [[ -z "$profile_type" ]] && {
+    error "Profile not found"
+    return
+  }
+  if [[ -n "$profile_pass_enc" ]]; then
+    profile_pass=$(decrypt_password "$profile_pass_enc")
+  fi
+  export profile_type
+  export remote_enabled
+  export profile_host
+  export profile_user
+  export profile_base
+  export profile_pass
+  return 0
+}
+mirror_backup() {
+  local domain="$1"
+  local backup_path="$2"
+  local timestamp="$3"
+  [[ "$remote_enabled" != "true" ]] && return 0
+  info "Replicating backup to remote profile..."
+  run_ssh "mkdir -p '$profile_base/$domain/$timestamp'"
+  run_rsync \
+    "$backup_path/" \
+    "${profile_user}@${profile_host}:${profile_base}/${domain}/${timestamp}/"
+
+  update_profile_field "$profile" "LAST_REMOTE_SYNC" "$timestamp"
+  update_profile_field "$profile" "LAST_SYNC_STATUS" "success"
+}
+update_profile_field() {
+  local profile="$1"
+  local field="$2"
+  local value="$3"
+  awk -v p="[$profile]" \
+      -v f="$field" \
+      -v v="$value" '
+    $0==p {in_section=1}
+    /^\[/ && $0!=p {in_section=0}
+    in_section && $0 ~ "^"f"=" {
+      print f"="v
+      updated=1
+      next
+    }
+    {print}
+    END {
+      if (in_section && !updated)
+        print f"="v
+    }
+  ' "$profiles_file" > /tmp/profiles.tmp
+  mv /tmp/profiles.tmp "$profiles_file"
+}
+resolve_profile() {
+  local domain="$1"
+  profile=$((grep "^$domain=" "$map_file" 2>/dev/null | cut -d'=' -f2) || true)
+  if [[ -z "$profile" ]]; then
+    warn "No profile assigned to $domain. Using default"
+    info "Please assign a profile to $domain"
+    profile="local-default"
+  fi
+  load_profile "$profile" || return 1
+  export profile
+}
+assign_profile_to_domain() {
+  local domain="$1"
+  echo "Available profiles:"
+  profile_list
+  read -rp "${cyan}[USER]${blue} Select profile: " profile
+  grep -v "^$domain=" "$map_file" 2>/dev/null > /tmp/map.tmp || true
+  echo "$domain=$profile" >> /tmp/map.tmp
+  mv -f /tmp/map.tmp "$map_file"
+  success "$domain → $profile"
+}
+ensure_local_profile() {
+  if ! grep -q "^\[local-default\]" "$profiles_file" 2>/dev/null; then
+    cat >> "$profiles_file" <<EOF
+[local-default]
+TYPE=local
+REMOTE_ENABLED=false
+LAST_BACKUP=
+LAST_REMOTE_SYNC=
+LAST_SYNC_STATUS=
+BACKUP_SIZE=
+
+EOF
+  fi
+}
+check_auth() {
+  use_sshpass=0
+  # ==== Local profiles do not require SSH ====
+  [[ "$remote_enabled" != "true" ]] && return 0
+  # ==== Missing transport metadata ====
+  [[ -z "$profile_host" || -z "$profile_user" ]] && {
+    error "Profile transport metadata incomplete"
+    return 1
+  }
+  if ssh \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=no \
+      -o ConnectTimeout=5 \
+      "${profile_user}@${profile_host}" \
+      "exit" >/dev/null 2>&1; then
+    use_sshpass=0
+  else
+    use_sshpass=1
+  fi
+  export use_sshpass
+  return 0
+}
+run_ssh() {
+  detect_auth_method || return 1
+  if [[ "$remote_enabled" != "true" ]]; then
+    error "Profile is not remote-enabled"
+    return 1
+  fi
+  if [[ "$use_sshpass" == "1" ]]; then
+    sshpass -p "$profile_pass" \
+      ssh \
+      -o StrictHostKeyChecking=no \
+      "${profile_user}@${profile_host}" \
+      "$1"
+  else
+    ssh \
+      -o StrictHostKeyChecking=no \
+      "${profile_user}@${profile_host}" \
+      "$1"
+  fi
+}
+run_rsync() {
+  detect_auth_method || return 1
+  if [[ "$remote_enabled" != "true" ]]; then
+    error "Profile is not remote-enabled"
+    return 1
+  fi
+  if [[ "$use_sshpass" == "1" ]]; then
+    sshpass -p "$profile_pass" \
+      rsync \
+      -az \
+      --progress \
+      -e "ssh -o StrictHostKeyChecking=no" \
+      "$@"
+  else
+    rsync \
+      -az \
+      --progress \
+      -e "ssh -o StrictHostKeyChecking=no" \
+      "$@"
+  fi
 }
 ###################################### DNS ###################################
 dns_api_root="/etc/one-click/dns"
@@ -5075,13 +5237,14 @@ dns_menu() {
 ################################# SITE REMOVAL ###############################
 delete_site() {
   local domain="$1"
-  web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) | head -1)
   detect_env
-  local type="${2:-wordpress}"
+  resolve_type "$domain"
+  web_user=$(stat -c '%U' "/etc/one-click/${type}/$domain" 2>/dev/null)
   local slice_name="one-click_${domain}.slice"
   local service_name="php-fpm@${domain}.service"
   local site_user
   [[ -z "$domain" ]] && { error "No domain provided"; return; }
+  warn "This will delete ALL $domain domains. Be careful if you have the same domain under different hosting types!"
   read -rp "${cyan}[USER]${red} WARNING: Delete $domain permanently? (y|n): ${reset}" confirm
   [[ "$confirm" != "y" ]] && { info "Cancelled"; return; }
   info "Tearing down $domain..."
@@ -5105,36 +5268,6 @@ delete_site() {
   rm -f "/etc/php/${domain}.conf"
   rm -f "/run/php${php_ver:-}-fpm-${domain}.sock") 2> /dev/null
   systemctl reload php-fpm 2>/dev/null || systemctl reload php*-fpm
-  # ==== Webserver ====
-  if [[ "$webserver" == "nginx" ]]; then
-    (rm -f "/etc/nginx/sites-available/$domain.conf"
-    rm -f "/etc/nginx/sites-enabled/$domain.conf"
-    rm -f "/etc/nginx/conf.d/$domain.conf") 2> /dev/null
-    systemctl reload nginx
-  else
-    (rm -f "/etc/apache2/sites-available/$domain.conf"
-    rm -f "/etc/httpd/conf.d/$domain.conf") 2> /dev/null
-    systemctl reload apache2 2>/dev/null || systemctl reload httpd
-  fi
-  # ==== Files ====
-  (rm -rf "/etc/one-click/wordpress/$domain"
-  rm -rf "/etc/one-click/sites/$domain"
-  # ==== Backups ====
-  rm -rf "/etc/one-click/wordpress/backups/$domain"
-  rm -rf "/etc/one-click/sites/backups/$domain"
-  rm -rf "/etc/one-click/wordpress/rollback/$domain"
-  rm -rf "/etc/one-click/sites/rollback/$domain"
-  # ==== Logs ====
-  rm -f /var/log/php-fpm-$domain.log
-  rm -f /var/log/nginx/$domain*.log 2>/dev/null
-  rm -f /var/log/httpd/$domain*.log 2>/dev/null
-  # ==== Redis ====
-  systemctl stop redis-${domain}
-  rm -f /etc/systemd/system/redis-${domain}.service
-  # ==== SSL ====
-  rm -rf "/etc/letsencrypt/live/$domain"
-  rm -rf "/etc/letsencrypt/archive/$domain"
-  rm -f "/etc/letsencrypt/renewal/$domain.conf") 2> /dev/null
   # ==== DB cleanup ====
   if [[ "$type" == "wordpress" && -n "$db_name" ]]; then
     read -rp "${cyan}[USER]${blue} Delete DB $db_name? (y|n): ${reset}" db_confirm
@@ -5151,21 +5284,68 @@ delete_site() {
       fi
     fi
   fi
+  # ==== Webserver ====
+  if [[ "$webserver" == "nginx" ]]; then
+    (rm -f "/etc/nginx/sites-available/$domain.conf"
+    rm -f "/etc/nginx/sites-enabled/$domain.conf"
+    rm -f "/etc/nginx/conf.d/$domain.conf") 2> /dev/null
+    systemctl reload nginx
+  else
+    (rm -f "/etc/apache2/sites-available/$domain.conf"
+    rm -f "/etc/httpd/conf.d/$domain.conf") 2> /dev/null
+    systemctl reload apache2 2>/dev/null || systemctl reload httpd
+  fi
+  # ==== Files ====
+  (rm -rf "/etc/one-click/${type}/$domain"
+  # ==== Backups ====
+  rm -rf "/etc/one-click/${type}/backups/$domain"
+  rm -rf "/etc/one-click/${type}/rollback/$domain"
+  # ==== Logs ====
+  rm -f /var/log/php-fpm-$domain.log
+  rm -f /var/log/nginx/$domain*.log 2>/dev/null
+  rm -f /var/log/httpd/$domain*.log 2>/dev/null
+  # ==== Redis ====
+  systemctl disable --now "redis-${domain}" 2>/dev/null
+  rm -f "/etc/systemd/system/redis-${domain}.service"
+  # ==== SSL ====
+  rm -rf "/etc/letsencrypt/live/$domain"
+  rm -rf "/etc/letsencrypt/archive/$domain"
+  rm -f "/etc/letsencrypt/renewal/$domain.conf") 2> /dev/null
   # ==== MISC LOST+FOUND ====
   warn "Stopping services owned by $domain"
-  sed -n '/\.service$/p' <(locate "$domain") | while read line; do
-    systemctl disable $(basename $line) --now
-  done
+  find /etc/systemd /usr/lib/systemd /lib/systemd \
+    -type f -name "*${domain}*.service" 2>/dev/null |
+    while read -r line; do
+     systemctl disable --now "$(basename "$line")"
+    done
   warn "Deleting all other associated files and directories for $domain"
-  (sed -n '\,/var/log,!p' <(locate "$domain") | while read line; do
-    rm -rf "$line"
-  done) 2> /dev/null
+  find / \
+  \( \
+    -path "/sys" -o \
+    -path "/proc" -o \
+    -path "/dev" -o \
+    -path "/run" -o \
+    -path "/boot" -o \
+    -path "/usr" -o \
+    -path "/lib" -o \
+    -path "/lib64" -o \
+    -path "/var/log" -o \
+    -path "/etc/one-click/wordpress/backups" -o \
+    -path "/etc/one-click/sites/backups" -o \
+    -path "/etc/one-click/apps/nodejs/backups" -o \
+    -path "/etc/one-click/wordpress/rollback" -o \
+    -path "/etc/one-click/sites/rollback" -o \
+    -path "/etc/one-click/apps/nodejs/rollback" -o \
+    -path "/etc/one-click/db-manager/secrets/db/" -o \
+    -path "/etc/one-click/db-manager/sites/" \
+  \) -prune \
+  -o -path "*$domain*" -exec rm -rf {} + 2>/dev/null
   # ==== Remove system user ====
   set +o pipefail
   info "Removing system user $site_user"
   if id "$site_user" &>/dev/null; then
     gpasswd -d "$webserver" "$site_user" 2>/dev/null
-    userdel "$site_user"
+    userdel -r "$site_user"
   fi
   set -o pipefail
   # ==== Systemd cleanup ====
@@ -5176,7 +5356,14 @@ delete_site() {
 }
 get_monitor_stats() {
   local domain="${1:-}"
-  monitor "$domain"
+  find /etc/one-click/{sites,wordpress,apps/nodejs}/ -maxdepth 1 \
+    | while read -r site_mon; do
+      if [[ "$site_mon" =~ \. ]]; then 
+        mon=$(basename $site_mon)
+        #monitor "$mon"
+        echo $mon
+      fi
+    done
   local profile_file="/etc/one-click/monitor/${domain}/${domain}.profile"
   local status_file="/etc/one-click/monitor/${domain}/monitor_status"
   local log_file="/var/log/${webserver}/${domain}/monitor.log"
@@ -5239,6 +5426,39 @@ monitor() {
   fi
 }
 ############################### DATABASE MANAGEMENT ############################
+resolve_site_database() {
+  local domain="$1"
+  local registry="/etc/one-click/db-manager/sites/${domain}.json"
+  local meta="/etc/one-click/${type}/${domain}/meta.conf"
+  db_enabled=false
+  # ==== Registry (authoritative) ====
+  if [[ -f "$registry" ]]; then
+    db_enabled=$(jq -r '.database.enabled // false' "$registry")
+    if [[ "$db_enabled" == "true" ]]; then
+      db_engine=$(jq -r '.database.engine // empty' "$registry")
+      db_host=$(jq -r '.database.host // localhost' "$registry")
+      db_port=$(jq -r '.database.port // 3306' "$registry")
+      db_name=$(jq -r '.database.name // empty' "$registry")
+      db_user=$(jq -r '.database.user // empty' "$registry")
+      db_password_file=$(jq -r '.database.password_file // empty' "$registry")
+      [[ -n "$db_name" && -n "$db_user" ]] && return 0
+    fi
+  fi
+  # ==== Fallback meta ====
+  if [[ -f "$meta" ]]; then
+    unset db_name db_user db_password_file
+    source "$meta"
+    [[ -n "${db_name:-}" ]] || return 1
+    [[ -n "${db_user:-}" ]] || return 1
+    [[ -n "${db_password_file:-}" ]] || return 1
+    db_enabled=true
+    db_engine="mysql"
+    db_host="localhost"
+    db_port="3306"
+    return 0
+  fi
+  return 1
+}
 registry_exists() {
   local domain="$1"
   if [[ -z "$domain" ]]; then
@@ -6446,7 +6666,7 @@ registry_detect_wordpress() {
   local root
   wp_base="/etc/one-click/wordpress/$domain"
   if [[ ! -f "$wp_base" ]]; then
-    success "Static site detected for $domain"
+    success "Wordpress site detected for $domain"
     return
   fi
   if [[ -f skip_reg_check ]]; then
@@ -6812,12 +7032,36 @@ db_entry() {
  }
 ################################# CRON NAVIGATION ##############################
 if [[ "${1:-}" == "-wpback" ]]; then
+  info() {
+    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s\n"
+  }
+  success() {
+    printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
+  }
+  warn() {
+    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
+  }
+  error() {
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
+  }
   wp_backup "${2:-}"
 fi
 if [[ "${1:-}" == "-wprotate" ]]; then
   wp_backup_rotate "${2:-}"
 fi
 if [[ "${1:-}" == "-staticback" ]]; then
+  info() {
+    printf "$(tput setaf 4)[INFO]:$(tput sgr 0) %s\n"
+  }
+  success() {
+    printf "$(tput setaf 2)[SUCCESS]$(tput sgr 0) %s\n"
+  }
+  warn() {
+    printf "$(tput setaf 11)[WARN]:$(tput sgr 0) %s\n"
+  }
+  error() {
+    printf "$(tput setaf 1)[ERROR]:$(tput sgr 0)  %s\n"
+  }
   static_backup "${2:-}"
 fi
 if [[ "${1:-}" == "-staticrotate" ]]; then
