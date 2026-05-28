@@ -135,6 +135,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "$(tput smul)$(tput bold)Intrusion Detection$(tput sgr0)$(tput rmul)" \
     "  audit scan              Run a lightweight file integrity and malware scan." \
     "  audit scan --deep       Perform a deeper filesystem inspection." "" \
+    "  audit scan --remediate  Authorize IDS to autoheal." "" \
     "$(tput bold)Examples$(tput sgr0)" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  one-click net-repair" \
@@ -838,7 +839,7 @@ _one_click() {
     cmds["rule-engine:'sensitive-remove:"]=
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
-    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
+    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -863,7 +864,7 @@ _one_click() {
     cmds["engine:'sensitive-remove:"]=
     cmds["engine:'from"]=
     cmds["engine:'to"]=
-    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
+    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["engine:--dry-run"]=""
 
     cmds["migrate:'export' 'export to' 'import'"]=""
@@ -964,7 +965,7 @@ _one_click() {
     cmds["rule-engine:'sensitive-remove:"]=
     cmds["rule-engine:'from"]=
     cmds["rule-engine:'to"]=
-    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
+    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["rule-engine:--dry-run"]=""
 
     cmds["engine:'open filter' 'open mangle' 'open raw'"]=
@@ -991,7 +992,7 @@ _one_click() {
     cmds["engine:'from"]=
     cmds["engine:'to"]=
     cmds["engine:audit"]=
-    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail'"]=
+    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["engine:--dry-run"]=""
 
     cmds["migrate:'export' 'export to' 'import'"]=""
@@ -1209,21 +1210,124 @@ if [[ $# -gt 0 ]]; then
       ;;
     -u|--uninstall)
       if command -v one-click >/dev/null 2>&1; then
+        keep_file="$(mktemp)"
+        remove_file="$(mktemp)"
+        catch() {
+          rm -f "$keep_file" "$remove_file" 
+        }
+        trap catch EXIT
+        state_dir="${base}/state"
         warn "This will completely remove One-Click and all related files."
         read -rp "${cyan}Are you sure? ${yellow}[y|n]:${reset} " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
+          warn "Migrating sites and apps to /var/www. Please manually delete if data is no longer needed"
+          rsync -a "$base/wordpress/" /var/www/
+          rsync -a "$base/sites/" /var/www/
+          rsync -a "$base/apps/nodejs/" /var/www/
+          warn "Reinstating default webserver configs"
+          if [[ -d /etc/nginx ]]; then
+            if mv -f /etc/nginx/nginx.conf.one-click.bak /etc/nginx/nginx.conf &> /dev/null; then
+              info "Nginx default conf restored"
+            else 
+              error "Default conf file has been moved! Please manually replace"
+            fi
+          elif [[ -d /etc/apache2 ]]; then
+            if mv -f /etc/apache2/apache2.conf.one-click.bak /etc/apache2/apache2.conf &> /dev/null; then
+              info "Nginx default conf restored"
+            else 
+              error "Default conf file has been moved! Please manually replace"
+            fi
+          elif [[ -d /etc/httpd ]]; then
+            if mv -f /etc/httpd/httpd.conf.one-click.bak /etc/httpd/httpd.conf &> /dev/null; then
+              info "Nginx default conf restored"
+            else 
+              error "Default conf file has been moved! Please manually replace"
+            fi
+          fi
+          info "Loading protected paths from state files..."
+          find "$state_dir" -type f | while read -r state; do
+            while read -r line; do
+              [[ -z "$line" ]] && continue
+              for token in $line; do
+                if [[ "$token" == /* ]]; then
+                  add_keep_path "$token" "$keep_file"
+                fi
+              done
+            done < "$state"
+          done
+          add_keep_path "$base" "$keep_file"
+          add_keep_path "$state_dir" "$keep_file"
+          sort -u "$keep_file" -o "$keep_file"
+          info "Protected paths loaded: $(wc -l < "$keep_file")"
+          echo "Scanning One-Click managed areas..."
+          scan_paths=(
+            "/etc"
+            "/var"
+            "/run"
+            "/opt"
+            "/srv"
+          )
+          for root in "${scan_paths[@]}"; do
+            [[ ! -d "$root" ]] && continue
+            find "$root" \( \
+              -iname '*one-click*' -o \
+              -path '/etc/nginx/sites-enabled/*' -o \
+              -path '/etc/nginx/conf.d/*' -o \
+              -path '/etc/apache2/sites-enabled/*' -o \
+              -path '/etc/httpd/conf.d/*' \
+            \) 2>/dev/null >> "$remove_file"
+          done
+          sort -u "$remove_file" -o "$remove_file"
+          info "Filtering protected entries..."
+          filtered="$(mktemp)"
+          trap 'rm -f "$filtered"' EXIT
+          while read -r path; do
+            keep=0
+            while read -r protected; do
+              if [[ "$path" == "$protected" ]]; then
+                keep=1
+                break
+              fi
+            done < "$keep_file"
+            if [[ $keep -eq 0 ]]; then
+              printf "${magenta}[DELETE?]${green} %s\n" "$path" >> "$filtered"
+            fi
+          done < "$remove_file"
+          sort -u "$filtered" -o "$filtered"
+          printf '%s\n' \
+            "${magenta}=================================================" \
+            "${orange}[PREVIEW] ${yellow}Paths scheduled for removal" \
+            "${magenta}=================================================${reset}"
+          cat "$filtered"
+          echo
+          read -rp "${cyan}[USER]${reset} Proceed with deletion? (y|n): " confirm
+          confirm="${confirm,,}"
+          if [[ "$confirm" != "y" && "$confirm" != "yes" ]]; then
+            error "Aborted."
+          exit 0
+        fi
+        warn "Removing unmanaged One-Click artifacts..."
+        while read -r target; do
+          [[ -z "$target" ]] && continue
+            if [[ -e "$target" ]]; then
+              echo "[REMOVE] $target"
+              rm -rf --one-file-system "$target"
+            fi
+          done < "$filtered"
+          warn "Removing IDS Scanner"
           python3 /var/cache/one-click/scanner.py --uninstall
+          warn "Removing One-Click owned files and directories"
           if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
             rm -rf "$base" "$manpage" "$tab_complete" "/var/cache/one-click" "$(command -v one-click)"
           elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
-            rm -rf "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" "$(command -v one-click)"
+            rm -rf "$base" "$manpage" "$tab_complete2" "/var/cache/one-click" /etc/nginx/one-click "$(command -v one-click)"
           fi
           rm -rf "$base" "$manpage" "${tab_complete:-${tab_complete2:-}}" "/var/cache/one-click" "$(command -v one-click)"
           find /etc /var /run -type f -name '*one-click*' | while read line; do
             rm -f "$line"
           done
-          printf "${green}[SUCCESS]${reset}%s\n" "One-Click has been uninstalled."
+          success "One-Click has been uninstalled."
           complete -r one-click
           unset -f _one-click
           exit 0
@@ -1300,6 +1404,40 @@ if [[ $# -gt 0 ]]; then
     *)
       if [[ "$1" == "setup" ]]; then
         exit_code=0
+        preinstall_state="$base/state"
+        mkdir -p "$preinstall_state"
+        if [[ "$pkg_mgr" == "apt" ]]; then
+          dpkg-query -W > "$preinstall_state/packages.state"
+        else
+          rpm -qa > "$preinstall_state/packages.state"
+        fi
+        if [[ -d /etc/nginx ]]; then
+          find /etc/nginx -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+          > "$preinstall_state/nginx.state"
+        elif [[ -d /etc/apache2 ]]; then
+          find /etc/apache2 -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+          > "$preinstall_state/apache2.state"
+        elif [[ -d /etc/httpd ]]; then
+          find /etc/httpd -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+          > "$preinstall_state/httpd.state"
+        fi
+        systemctl list-unit-files > "$preinstall_state/services.state"
+        ls -1 /etc/systemd/system > "$preinstall_state/systemd_paths.state"
+        getent passwd > "$preinstall_state/users.state"
+        getent group > "$preinstall_state/groups.state"
+        crontab -l > "$preinstall_state/cron.state" || true
+        if command -v iptables &> /dev/null; then
+          iptables-save > "$preinstall_state/iptables.state"
+        fi
+        if command -v nft &> /dev/null; then
+          nft list ruleset > "$preinstall_state/nft.state"
+        fi
         printf '%s\n' \
 "  ___                 ____ _ _      _    
  / _ \ _ __   ___    / ___| (_) ___| | __
