@@ -168,44 +168,47 @@ rule_engine() {
   confirm="${confirm,,}"
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
     i=""
-    # ==== Take snapshot BEFORE applying rule ====
-    tmp_snapshot=$(mktemp /tmp/iptables_backup.XXXXXX)
-    "${fw_bin:-iptables}-save" > "$tmp_snapshot"
-    # ==== Launch background rollback timer (10s) ====
-    (
-      sleep 13
-      if [[ "$dry_run" -ne 1 ]]; then
-        if [[ ! -f /tmp/fw_confirmed ]]; then
-          warn "No confirmation received. Reverting firewall to previous state..."
-          if iptables-restore < "$tmp_snapshot"; then
-            success "Firewall successfully reverted to previous state."
-          else
-            error "Failed to revert firewall from snapshot!"
-          fi
-        fi
-      fi
-    ) &
-    rollback_pid=$!
+    fw_bin="${fw_bin:-iptables}"
+    save_cmd="${fw_bin}-save"
+    case "$fw_bin" in
+      ip6tables)
+        restore_cmd="ip6tables-restore"
+        ;;
+      *)
+        restore_cmd="iptables-restore"
+        ;;
+    esac
+    tmp_snapshot=$(mktemp /tmp/${fw_bin}_backup.XXXXXX)
+    confirm_file=$(mktemp /tmp/fw_confirmed.XXXXXX)
+    state_file=$(mktemp /tmp/fw_state.XXXXXX)
+    echo "APPLYING" > "$state_file"
+    trap '
+      rm -f "${tmp_snapshot:-}" "${confirm_file:-}" "${state_file:-}" 2>/dev/null
+    ' EXIT INT TERM
+    if ! "$save_cmd" > "$tmp_snapshot"; then
+      error "Failed to create firewall snapshot!"
+      exit 1
+    fi
     fail=()
     fatal=0
-    # ==== Dry-run preview ====
+    # ==== Dry Run ====
     if [[ "$dry_run" -eq 1 ]]; then
       dry_run "${unique_cmds[@]}" || {
-        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" "Dry run failed. Exiting without applying rules."
+        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" \
+          "Dry run failed. Exiting without applying rules."
         exit 1
       }
     fi
-    # ==== Real run ====
+    # ==== Apply Rules ====
     for cmd in "${unique_cmds[@]}"; do
       cmd="${cmd#raw: }"
-      # ==== Handle RAW Entries ====
       cmd=$(
         sed -E '
           s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
           s/input|output|forward|prerouting/\U&/g;
-      ' <<< "$cmd")
+        ' <<< "$cmd"
+      )
       read -r -a arr <<< "$cmd"
-       # ==== Execute Commands ====
       if "${arr[@]}"; then
         info "Rule applied: $cmd"
       else
@@ -214,15 +217,55 @@ rule_engine() {
         fatal=1
       fi
     done
-    if [[ "${fatal:-}" -eq 1 ]]; then
-      warn "The following commands failed to install:"
+    # ==== Rollback ====
+    rollback() {
+      warn "Rolling back firewall state..."
+      if "$restore_cmd" < "$tmp_snapshot"; then
+        success "Firewall restored successfully."
+        echo "ROLLED_BACK" > "$state_file"
+      else
+        error "CRITICAL: Restore failed!"
+        warn "Emergency recovery engaged..."
+        "${fw_bin}" -P INPUT ACCEPT
+        "${fw_bin}" -P OUTPUT ACCEPT
+        "${fw_bin}" -P FORWARD ACCEPT
+        "${fw_bin}" -F
+        "${fw_bin}" -X
+        if [[ -n "${real_ssh:-}" ]]; then
+          "${fw_bin}" -A INPUT -p tcp --dport "$real_ssh" -j ACCEPT
+        fi
+        "${fw_bin}" -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        echo "ROLLED_BACK" > "$state_file"
+      fi
+    }
+    if [[ "$fatal" -eq 1 ]]; then
+      warn "Rule application failures detected:"
       echo "========================================="
       for f in "${fail[@]}"; do
         error "${yellow}[][]${blue} $f ${yellow}[][]${reset}"
       done
       echo "========================================="
+      rollback
+      exit 1
+    fi
+    success "All rules successfully applied."
+    echo "PENDING_CONFIRM" > "$state_file"
+    # ==== Confirmation ====
+    echo
+    printf "${yellow}[SAFETY]:${reset} Firewall will auto-rollback in 10 seconds unless confirmed.\n"
+    confirmed=0
+    if read -t 10 -rp "$(printf "${cyan}[USER]:${reset} Confirm firewall is functional? (y|yes): ")" safety_confirm; then
+      safety_confirm="${safety_confirm,,}"
+      if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
+        confirmed=1
+      fi
+    fi
+    if [[ "$confirmed" -eq 1 ]]; then
+      echo "COMMITTED" > "$state_file"
+      success "Firewall changes confirmed and committed."
     else
-      success "All rules successfully applied."
+      warn "No confirmation received. Reverting..."
+      rollback
     fi
   else
     warn "No changes applied."
@@ -230,21 +273,22 @@ rule_engine() {
   fi
   echo
   echo "${yellow}[SAFETY]:${reset} Firewall configuration will rollback in 10 seconds if not confirmed functional!"
-  if ! read -t 10 -rp "${cyan}[USER]:${reset} Confirm rule is safe? (y|yes to keep): " safety_confirm ; then
+  safety_confirm=""
+  if ! read -t 10 -rp "${cyan}[USER]:${reset} Confirm rule is safe? (y|yes to keep): " safety_confirm; then
     safety_confirm=""
   fi
   safety_confirm="${safety_confirm,,}"
   echo
   if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
-    touch /tmp/fw_confirmed
-    kill "$rollback_pid" 2>/dev/null
+    echo "COMMITTED" > "$state_file"
     success "Rule confirmed and persisted in memory."
     info "Please save your rules with ${cyan}one-click engine backup${reset}"
     sleep 1
     success "Firewall rules persisted."
-    rm -f "$tmp_snapshot" /tmp/fw_confirmed
+    rm -f "$tmp_snapshot" "$confirm_file"
   else
-    wait "$rollback_pid"
+    warn "Confirmation not received. Triggering rollback..."
+    rollback   # <-- IMPORTANT: call function, not PID logic
     warn "No changes applied"
   fi
 }
