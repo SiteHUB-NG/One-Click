@@ -1093,6 +1093,113 @@ Improper spacing may cause the parser to interpret the command as natural langua
 
 Use `raw:` when you need full control over advanced match extensions.
 
+### Dry Run
+
+The dry-run engine executes firewall logic in a parallel simulation namespace that never touches live iptables state.
+It evaluates:
+
+- sensitive port impact
+- service reachability
+- administrative lockout risk
+before allowing execution into the live transaction layer.
+
+#### Dry-Run Flow
+
+```
+INPUT → SIMULATION → RISK ANALYSIS → DECISION → (ALLOW / BLOCK)
+```
+
+#### Example safe rule usage and output
+```
+one-click engine --dry-run "allow nginx"
+```
+```
+╔════════════════════════════ [ CRITICAL WARNING ] ════════════════════════════╗
+║ [DRY-RUN] Action: DROP detected on Port 443 (HTTPS (Web Traffic)).           ║
+║ [DRY-RUN] This is a CORE SERVICE. Proceeding may cause connectivity issues!  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+[DRY-RUN] The following commands will be executed:
+[DRY-RUN] iptables -t filter -A INPUT -p tcp -m multiport --dports 80,443 -j DROP
+[DRY-RUN]: Apply ALL rules? (y|n): y
+[DRY-RUN] Preparing dry run isolated environment for safe testing...
+[DRY-RUN] Verifying system accessibility...
+[DRY-RUN][SUCCESS] Service sshd (Port 22) remains accessible.
+[DRY-RUN][SUCCESS] Service mariadbd (Port 3306) remains accessible.
+[DRY-RUN][SUCCESS]  Port 443 (nginx) will successfully remain filtered/blocked.
+
+[DRY-RUN][SUCCESS] Service node (Port 5000) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5001) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5002) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5003) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5004) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5005) remains accessible.
+[DRY-RUN][SUCCESS]  Port 80 (nginx) will successfully remain filtered/blocked.
+
+[DRY-RUN][SUCCESS] Rules passed dry-run test.
+Would you like to apply these rules now? (y|n): y
+[INFO]: Rule applied: iptables -t filter -A INPUT -p tcp -m multiport --dports 80,443 -j DROP
+[SUCCESS]: All rules successfully applied.
+
+[SAFETY]: Firewall will auto-rollback in 10 seconds unless confirmed.
+[USER]: Confirm firewall is functional? (y|yes): y
+[SUCCESS]: Firewall changes confirmed and committed.
+
+[SAFETY]: Firewall configuration will rollback in 10 seconds if not confirmed functional!
+[USER]: Confirm rule is safe? (y|yes to keep): y
+
+[SUCCESS]: Rule confirmed and persisted in memory.
+[INFO]: Please save your rules with one-click engine backup
+[SUCCESS]: Firewall rules persisted.
+```
+
+#### Example dangerous rule usage and output
+```
+one-click engine --dry-run 'drop ssh'
+```
+```
+[DRY-RUN] Initializing security simulation namespace...
+[DRY-RUN] Loading sensitive port profile...
+
+╔════════════════════════════ [ CRITICAL WARNING ] ════════════════════════════╗
+║ [DRY-RUN] Action: DROP detected on Port 22 (SSH (Remote Access)).            ║
+║ [DRY-RUN] This is a CORE SERVICE. Proceeding may cause connectivity issues!  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+[DRY-RUN] The following commands will be executed:
+[DRY-RUN] iptables -t filter -A INPUT -p tcp --dport 22 -j DROP
+[DRY-RUN]: Apply ALL rules? (y|n): y
+[DRY-RUN] Preparing dry run isolated environment for safe testing...
+[DRY-RUN] Verifying system accessibility...
+[DRY-RUN][FAIL] FATAL: sshd (Port 22) will be BLOCKED! This will cause a lockout if applied.
+
+[DRY-RUN][SUCCESS] Service mariadbd (Port 3306) remains accessible.
+[DRY-RUN][SUCCESS] Service nginx (Port 443) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5000) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5001) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5002) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5003) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5004) remains accessible.
+[DRY-RUN][SUCCESS] Service node (Port 5005) remains accessible.
+[DRY-RUN][SUCCESS] Service nginx (Port 80) remains accessible.
+[DRY-RUN][FAIL] Firewall rules failed dry-run test.
+[DRY-RUN] Dry run failed. Exiting without applying rules.
+```
+#### Rule-Engine Security Model
+
+This system enforces a three-layer safety architecture:
+
+1. Simulation Layer (Dry Run)
+- No live firewall changes
+- Full risk prediction
+- Service impact analysis
+2. Transaction Layer (Apply)
+- Snapshot before changes
+- Controlled execution
+- Temporary unsafe state allowed
+3. Confirmation Layer (Rollback Protection)
+- Time-bound validation window
+- Automatic rollback if not confirmed
+- Manual override possible
+
 ### Security Considerations
 
 - Root privileges are required to modify firewall rules.
