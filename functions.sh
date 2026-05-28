@@ -1662,7 +1662,7 @@ backup_firewall() {
   timestamp="$(date +%Y-%m-%d-%H%M%S)"
   case "$backend" in
     nft)       ext="nft-$timestamp.backup"; nft list ruleset > "${engine_backup_dir}${ext}" 2>/dev/null || return 1     ;;
-    iptables)  ext="iptables-$timestamp.backup";iptables-save > "${engine_backup_dir}${ext}" 2>/dev/null || return 1    ;;
+    iptables)  ext="iptables-$timestamp.backup";${fw_bin:-iptables}-save > "${engine_backup_dir}${ext}" 2>/dev/null || return 1    ;;
     ufw)       ext="ufw-$timestamp.backup"; ufw status verbose > "${engine_backup_dir}${ext}" 2>/dev/null || return 1   ;;
     firewalld) ext="firewalld-$timestamp.backup"; firewall-cmd --runtime-to-permanent >/dev/null 2>&1
                firewall-cmd --permanent --list-all --zone=public > "${engine_backup_dir}${ext}" 2>/dev/null || return 1 ;;
@@ -1765,7 +1765,7 @@ restore_firewall() {
         nft -f "$selected" || return 1
         ;;
       iptables)
-        iptables-restore < "$selected" || return 1
+        ${fw_bin:-iptables}-restore < "$selected" || return 1
         ;;
       ufw)
         ufw disable >/dev/null 2>&1
@@ -2120,7 +2120,7 @@ show_rules() {
         done <<< "$table_output"
       done 3< <(nft list tables)
     fi
-    tables=($(iptables-save 2>/dev/null | grep '^*' | cut -d'*' -f2))
+    tables=($(${fw_bin:-iptables}-save 2>/dev/null | grep '^*' | cut -d'*' -f2))
 	set +o pipefail
     printf '%s\n' \
       "${blue}╔══════════════════════════════╗" \
@@ -2297,7 +2297,7 @@ get_existing_rules() {
       nft list ruleset
       ;;
     iptables)
-      iptables-save
+      ${fw_bin:-iptables}-save
       ;;
     ufw)
       ufw status numbered
@@ -2390,7 +2390,7 @@ clean_duplicate_rules() {
   tmpfile=$(mktemp)
   cleanfile=$(mktemp)
   # ==== Save Rules ====
-  iptables-save | sed '/^\[.*\]$/d' > "$tmpfile"
+  ${fw_bin:-iptables}-save | sed '/^\[.*\]$/d' > "$tmpfile"
   # ==== Extract Duplicate ====
   { grep '^-A' "$tmpfile" || true; } | sort | uniq -c | awk '$1 > 1' > "$cleanfile"
   cnt=$(awk '{print $1}' "$cleanfile" | head -1)
@@ -2435,7 +2435,7 @@ clean_duplicate_rules() {
     { print }
   ' "$tmpfile" > "${tmpfile}.deduped"
   # ==== Attempt Restore ====
-  iptables-restore < "${tmpfile}.deduped" || {
+  ${fw_bin:-iptables}-restore < "${tmpfile}.deduped" || {
     warn "Restore failed." "Firewall has not been changed."
     rm -f "$tmpfile" "$cleanfile" "${tmpfile}.deduped"
     return 1
@@ -3297,14 +3297,14 @@ parse_firewall_command() {
   if (( ${#udp_ports[@]} > 0 )); then
     local udp_args=$(build_port_args "udp" udp_ports)
     local cmd=("$fw_bin" -t "$table" "$mode" "$chain" -p udp $udp_args)
-    [[ -n "$in_interface" ]] && cmd+=("-i" "$in_interface")
+    [[ -n "${in_interface:-}" ]] && cmd+=("-i" "${in_interface:-}")
     [[ -n "$src_ip" ]] && { [[ -n "$src_neg" ]] && cmd+=("!"); cmd+=("-s" "$src_ip"); }
     [[ -n "$dst_ip" ]] && cmd+=("-d" "$dst_ip")
     [[ -n "$conn_state" ]] && cmd+=("-m" "state" "--state" "$conn_state")
     [[ -n "$action" ]] && cmd+=("-j" "$action")
     generated_cmds+=("${cmd[*]}")
   fi
-}  
+}
 # =========================================== End Of Rule Engine ================================================== #
 # ===================================== Display Table For Boot Recovery =============================================
 print_blue_table() {
