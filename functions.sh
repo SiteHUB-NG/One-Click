@@ -258,6 +258,14 @@ install_self() {
   fi
   install -m 0755 "$0" "$target" 
 }
+add_keep_path() {
+  local path="$1"
+  local keep="$2"
+  [[ -z "$path" ]] && return 0
+  path="$(readlink -f "$path" 2>/dev/null || true)"
+  [[ -z "$path" ]] && return 0
+  echo "$path" >> "$keep_file"
+}
 # ==== End Immediate Initialization ==== #
 # ==== Plain Text Security ====
 init_secret_key() {
@@ -2628,6 +2636,10 @@ parse_firewall_command() {
   fi
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--deep$ ]]; then
     python3 /var/cache/one-click/scanner.py --deep
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--remediate$ ]]; then
+    python3 /var/cache/one-click/scanner.py --remediate
 	exit 0
   fi
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?([[:space:]]+(--deep))?[[:space:]]+-y$ ]]; then
