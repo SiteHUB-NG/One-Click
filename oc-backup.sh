@@ -591,18 +591,12 @@ configure_backup() {
       if [[ "$source" == "q" ]]; then
         return 1
       fi
-      #if [[ -d "$source" ]]; then
-      #  tree -I "$tree_ignore" "$source" | less -RFX
-        break
-      #else
-      #  echo -e "${red}Error: Invalid Directory${reset}"
-      #  sleep 1.5
-      #fi
+      break
     done
   }
   source_dir
   echo
-  read -rp "${cyan}[USER]${reset} Use rclone backup? (y/n): " use_rclone
+  read -rp "${cyan}[USER]${reset} Use rclone backup? (y|n): " use_rclone
   use_rclone=${use_rclone,,}
   if [[ "$use_rclone" == "y" || "$use_rclone" == "yes" ]]; then
     read -rp "${cyan}[USER]${reset} rclone remote name (e.g. remote:): " r_remote
@@ -616,7 +610,10 @@ configure_backup() {
       read -rp "Endpoint: " rclone_endpoint
     fi
     rclone_config
-  else
+  fi
+  read -rp "${cyan}[USER]${reset} Would you like to configure a remote backup location via ssh (y|n): " ssh_backups
+  ssh_backups="${ssh_backups,,}"
+  if [[ "$ssh_backups" == "y" || "$ssh_backups" == "yes" ]]; then
     read -rp "${cyan}[USER]${reset} Please enter the IP of the destination server: " backup_ip
     until is_ipv4 "$backup_ip"; do
       error "The IP is ${red}INVALID${reset}! Please try again."
@@ -645,11 +642,13 @@ configure_backup() {
     fi
     read -rp "${cyan}[USER]${reset} SSH port [22]: " ssh_port
     ssh_port=${ssh_port:-22}
+    read -rp "${cyan}[USER]${reset} Directory on destination server to save backups to: " dst_dir
+    dst_dir="${dst_dir%/}"
+    read -rp "${cyan}[USER]${reset} Enter a descriptive name for this backup (optional): " backup_label
+    backup_label="${backup_label// /_}"
+  else
+    dst_dir=Undefined
   fi
-  read -rp "${cyan}[USER]${reset} Directory on destination server to save backups to: " dst_dir
-  dst_dir="${dst_dir%/}"
-  read -rp "${cyan}[USER]${reset} Enter a descriptive name for this backup (optional): " backup_label
-  backup_label="${backup_label// /_}"
   warn "Confirming SSH Credentials"
   if [[ "$use_rclone" != "y" ]]; then
     if [[ "${req:-}" == "y" || "${req:-}" == "yes" ]]; then
@@ -711,6 +710,10 @@ EOF
 }
 restore_remote_backs() {
   # ==== Restore from remote backup ====
+  if [[ "$dst_dir" == "undefined" ]]; then
+    error "Remote destination not configured"
+    return 1
+  fi
   info "Available remote backups:"
   remote_base="$dst_dir/rsync"
   if [[ "$req" == "y" || "$req" == "yes" ]]; then
