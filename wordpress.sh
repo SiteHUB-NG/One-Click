@@ -572,8 +572,22 @@ install_wp_cli() {
   fi
 }
 # ==== Configure DB ====
+configure_nc_db() {
+  local nc_db="one_click:${domain//./-}:$(openssl rand -hex 4):$nc_db_user"
+  echo "DB_NAME=$nc_db" >> /etc/one-click/nextcloud/$domain/meta.conf
+  systemctl enable mariadb --now
+  mysql -e "CREATE DATABASE IF NOT EXISTS \`$nc_db\`;"
+  user_exists=$(mysql -sN -e "SELECT 1 FROM mysql.user WHERE user='$nc_db_user' AND host='localhost'")
+  if [[ "$user_exists" == "1" ]]; then
+    warn "Database user '$nc_db_user' already exists. Reusing existing user."
+  else
+    info "Creating database user '$nc_db_user'"
+    mysql -e "CREATE USER '$nc_db_user'@'localhost' IDENTIFIED BY '$nc_db_pass';"
+  fi
+  mysql -e "GRANT ALL PRIVILEGES ON \`$nc_db\`.* TO '$nc_db_user'@'localhost'; FLUSH PRIVILEGES;"
+}
 configure_db() {
-  db="one_click:${domain}:$(openssl rand -hex 4):$dbuser"
+  local db="one_click:${domain}:$(openssl rand -hex 4):$dbuser"
   echo "DB_NAME=$db" >> /etc/one-click/wordpress/$domain/meta.conf
   systemctl enable mariadb --now
   mysql -e "CREATE DATABASE IF NOT EXISTS \`$db\`;"
@@ -1154,14 +1168,16 @@ wp_rollback_menu() {
 install_webserver() {
   local mode
   mode="$1"
+  domain="${2:-}"
   if [[ "$mode" == "wordpress" ]]; then
     mode_ver="$mode"
   elif [[ "$mode" == "nodejs" ]]; then
     mode_ver="apps/nodejs"
+  elif [[ "$mode" == "nextcloud" ]]; then
+    mode_ver="nextcloud"
   else
     mode_ver="sites"
   fi
-  domain="${2:-}"
   site_dir="${3:-}"
   if [[ "$pkg_mgr" == "apt" ]]; then
     if [[ "$webserver" == "nginx" ]]; then
@@ -1434,6 +1450,24 @@ start_screen() {
   if [[ "$mode" == "wordpress" ]]; then
     default_site="ONE-CLICK WORDPRESS INSTALLER"
     site=wordpress
+  elif [[ "$mode" == "nextcloud" ]]; then
+    default_site="ONE-CLICK NEXTCLOUD INSTALLER"
+    site=nextcloud
+    wp_title=$(cat <<'EOF'
+  ___                    ____ _ _      _    
+ / _ \ _ __   ___       / ___| (_) ___| | __
+| | | | '_ \ / _ \_____| |   | | |/ __| |/ /
+| |_| | | | |  __/_____| |___| | | (__|   < 
+ \___/|_| |_|\___|      \____|_|_|\___|_|\_\
+                                            
+ _   _           _    ____ _                 _ 
+| \ | | _____  _| |_ / ___| | ___  _   _  __| |
+|  \| |/ _ \ \/ / __| |   | |/ _ \| | | |/ _` |
+| |\  |  __/>  <| |_| |___| | (_) | |_| | (_| |
+|_| \_|\___/_/\_\\__|\____|_|\___/ \__,_|\__,_|
+                                               
+EOF
+  )
   else
     default_site="ONE-CLICK STATIC INSTALLATION"
     site="html site"
@@ -1575,20 +1609,35 @@ install_letsencrypt() {
         4)
           info "Installing self signed certificate"
           if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
+            dir="/etc/one-click/wordpress/$domain"
             site="/etc/one-click/wordpress/${domain}/www"
+            cert_dir="/etc/one-click/wordpress/${domain}/cert"
           elif [[ -d "/etc/one-click/sites/${domain}" ]]; then
             site="/etc/one-click/sites/$domain/www"
+            dir="/etc/one-click/sites/$domain"
+            cert_dir="/etc/one-click/sites/${domain}/cert"
+          elif [[ -d "/etc/one-click/nextcloud/${domain}" ]]; then
+            site="/etc/one-click/nextcloud/$domain/www"
+            dir="/etc/one-click/nextcloud/$domain"
+            cert_dir="/etc/one-click/nextcloud/${domain}/cert"
+          elif [[ -d "/etc/one-click/apps/nodejs/${domain}" ]]; then
+            site="/etc/one-click/apps/nodejs/$domain/www"
+            dir="/etc/one-click/apps/nodejs/$domain"
+            cert_dir="/etc/one-click/apps/nodejs/${domain}/cert"
           fi
-          web_user=$(awk '/www/{print $3}' <(ls -l "$site"))
-          webserver_user=$(awk '/www/{print $4}' <(ls -l "$site"))
+          . "${dir}/meta.conf"
+          mkdir -p "$cert_dir"
+          chmod 755 "$cert_dir"
+          web_user="$SITE_USER"
+          webserver_user="$SITE_GROUP"
           openssl req -x509 -nodes -days 365 \
             -newkey rsa:4096 \
-            -keyout ${site}-oneclick_selfsigned-privkey.key \
-            -out ${site}-oneclick_selfsigned-fullchain.pem \
+            -keyout ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key \
+            -out ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem \
             -subj "/C=NG/ST=Lagos/L=Lagos/O=Site/CN=$domain"
-          chmod 640 ${domain}-oneclick_selfsigned-privkey.pem
-          chmod 644 ${domain}-oneclick_selfsigned-fullchain.pem
-          chown "$web_user":"$webserver_user" "${site}-oneclick_selfsigned-fullchain.pem" "${site}-oneclick_selfsigned-privkey.key"
+          chown "$web_user":"$webserver_user" "${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem" "${cert_dir}/${domain}-oneclick_selfsigned-privkey.key"
+          chmod 640 ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key
+          chmod 644 ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem
           if [[ "$webserver" == "nginx" ]]; then
             if [[ "$pkg_mgr" == "apt" ]]; then
               nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
@@ -1601,7 +1650,7 @@ install_letsencrypt() {
                 h;
                 n;
                 G;
-                s,se.*,return 301 https://\$host\$request_uri;\n}\n\nserver {\n    listen 443 ssl; #Managed By One-Click\n    server_name $domain www.${domain};\n\n    ssl_certificate ${site}-oneclick_selfsigned-fullchain.pem;\n    ssl_certificate_key ${site}-oneclick_selfsigned-privkey.key;\n,
+                s,se.*,return 301 https://\$host\$request_uri;\n}\n\nserver {\n    listen 443 ssl; #Managed By One-Click\n    server_name $domain www.${domain};\n\n    ssl_certificate ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem;\n    ssl_certificate_key ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key;\n,
               };
             "  "$nginx_conf_file"
           else
@@ -1617,7 +1666,7 @@ install_letsencrypt() {
                 h;
                 n;
                 G;
-                s,D.*,SSLEngine on\n    SSLCertificateFile ${site}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${site}-oneclick_selfsigned-privkey.key\n,
+                s,D.*,SSLEngine on\n    SSLCertificateFile ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key\n,
               }
             " "$ssl_apache_conf"
           fi
@@ -1821,6 +1870,10 @@ run_script() {
   done
   proceed="${proceed,,}"
   echo
+  if [[ "$proceed" == "n" || "$proceed" == "no" ]]; then
+    warn "Deployment cancelled"
+    exit 1
+  fi
   # ==== Install Dependancies ====
   if [[ "$proceed" == "y" || "$proceed" == "yes" ]]; then
     info "Updating System"
@@ -3344,14 +3397,15 @@ setup_repos() {
 }
 install_php() {
   local ver="${1:-}"
-  setup_repos
   info "Installing PHP $ver and common extensions..."
-  if [[ "${os_family:-}" == "debian" ]]; then
-    $pkg_mgr install -y "php-fpm php$ver-fpm" "php$ver-cli" "php$ver-mysql" "php$ver-xml" "php$ver-mbstring" "php$ver-gd" "php$ver-curl" "php$ver-zip" "php$ver-gd" || return 1
-    fpm_service="php$ver-fpm"
-    v=$(sed -En '/PHP/s/^[^0-9]*([0-9]\.).*/\1/p' <(php -v))
-    cp /usr/sbin/php-fpm${v}* /usr/sbin/php-fpm
-  else
+  setup_repos
+  v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
+  "$pkg_mgr" install -y php${v}-fpm
+  $pkg_mgr install -y php-fpm "php$v-fpm" "php$v-cli" "php$v-mysql" "php$v-xml" "php$v-mbstring" "php$v-gd" "php$v-curl" "php$v-zip" "php$v-gd" || return 1
+  fpm_service="php$v-fpm"
+  if [[ "${webserver:-}" =~ apache || "$webserver" == "httpd" ]]; then
+    a2enmod proxy_fcgi setenvif || true
+    a2enconf php${v}-fpm || true
     $pkg_mgr module reset php -y
     $pkg_mgr module enable "php:remi-$ver" -y
     $pkg_mgr install -y php php-fpm php-mysqlnd php-xml php-mbstring php-gd php-curl php-zip "php$ver-xml" php-gd || return 1
@@ -3359,7 +3413,7 @@ install_php() {
   fi
   $pkg_mgr stop "php$ver-fpm" 2>/dev/null || true
   $pkg_mgr disable "php$ver-fpm" 2>/dev/null || true
-  success "PHP $ver is installed and running."
+  success "PHP $v is installed and running."
 }
 site_tune_php() {
   set_domain_context
@@ -3522,14 +3576,20 @@ select_domain() {
       list_domains() {
         ls /etc/one-click/sites | sed -n '/\./p'
       }
-    elif [[ "$used_app" == "nodejs" ]]; then
+    fi
+  elif [[ -n "${used_app:-}" ]]; then
+    if [[ "$used_app" == "nodejs" ]]; then
       list_domains() {
         ls /etc/one-click/apps/nodejs | sed -n '/\./p'
+      }
+    elif [[ "$used_app" == "nextcloud" ]]; then
+      list_domains() {
+        ls /etc/one-click/nextcloud | sed -n '/\./p'
       }
     fi
   else
     list_domains() {
-      ls /etc/one-click/wordpress /etc/one-click/sites /etc/one-click/apps/nodejs 2> /dev/null | sed -n '/\./p'
+      ls /etc/one-click/nextcloud /etc/one-click/wordpress /etc/one-click/sites /etc/one-click/apps/nodejs 2> /dev/null | sed -n '/\./p'
     }
   fi
   mapfile -t domains < <(list_domains)
@@ -3598,11 +3658,15 @@ create_isolated_php_runtime() {
   local site_user="$3"
   local webserver="$4"
   local type="$5"
-  if [[ -f "/usr/sbin/php-fpm$php_ver" ]]; then
-    php_bin="/usr/sbin/php-fpm$php_ver"
-  else
-    php_bin="/usr/sbin/php-fpm"
-  fi
+  #if [[ -f "/usr/sbin/php-fpm$php_ver" ]]; then
+  #  php_bin="/usr/sbin/php-fpm$php_ver"
+  #else
+  #  php_bin="/usr/sbin/php-fpm"
+  #fi
+  v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
+  "$pkg_mgr" install -y php${v}-fpm
+  $pkg_mgr install -y php-fpm "php$v-fpm" "php$v-cli" "php$v-mysql" "php$v-xml" "php$v-mbstring" "php$v-gd" "php$v-curl" "php$v-zip" "php$v-gd" || return 1
+  php_bin="/usr/sbin/php-fpm${v}"
   local base_conf="/etc/one-click/php/$domain"
   local run_dir="/run/one-click/$domain"
   local log_dir="/var/log/one-click/$domain"
@@ -3689,6 +3753,7 @@ EOF
   else
     error "PHP $php_ver runtime for $domain failed to start!"
     journalctl -u "php-fpm@$domain" --no-pager | tail -20
+    return 1
   fi
 }
 ########################### ROLLBACK ########################
@@ -5231,6 +5296,494 @@ dns_menu() {
         0)
           break
           ;;
+    esac
+  done
+}
+################################### NEXTCLOUD ################################
+install_nextcloud() {
+  start_screen nextcloud
+  local version="latest"
+  local php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+  # ==== Meta Data ====
+  while true; do
+    local br=0
+    read -rp "${cyan}[USER]${reset} Please provide the domain name you would like to use for this installation: " domain
+    if ! [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+      echo "Invalid domain name"
+      br=1
+    fi
+    if [[ -n "$domain" && "$br" -ne 1 ]]; then
+      export domain
+      break
+    fi
+    echo "Domain cannot be empty!"
+  done
+
+  while true; do
+    read -rp "${cyan}[USER]${reset} Please provide a NextCloud User: " nc_user
+    [[ -n "$nc_user" ]] && break
+  done
+
+  while true; do
+    read -rsp "${cyan}[USER]${reset} Please provide a password for $nc_user: " nc_pass
+    echo
+    if [[ ${#nc_pass} -lt 12 ]]; then
+      echo "Password too short! Must be at least 12 characters."
+      continue
+    fi
+    if ! [[ "$nc_pass" =~ [A-Z] ]]; then
+      echo "Password must contain at least one uppercase letter."
+      continue
+    fi
+    if ! [[ "$nc_pass" =~ [a-z] ]]; then
+      echo "Password must contain at least one lowercase letter."
+      continue
+    fi
+    if ! [[ "$nc_pass" =~ [0-9] ]]; then
+      echo "Password must contain at least one number."
+      continue
+    fi
+    read -rsp "${cyan}[USER]${blue} Confirm Password: " pass_confirm
+    echo
+    if [[ "$nc_pass" != "$pass_confirm" ]]; then
+      echo "Passwords do not match. Try again."
+      continue
+    fi
+    break
+  done
+  pass_confirm=
+  while true; do
+    read -rp "${cyan}[USER]${reset} Please provide the Database User: " nc_db_user
+    [[ -n "$nc_db_user" ]] && break
+  done
+  while true; do
+    read -rsp "${cyan}[USER]${reset} Please provide the Database Password: " nc_db_pass
+    echo
+    if [[ ${#nc_db_pass} -lt 12 ]]; then
+      echo "Password too short! Must be at least 12 characters."
+      continue
+    fi
+    if ! [[ "$nc_db_pass" =~ [A-Z] ]]; then
+      echo "Password must contain at least one uppercase letter."
+      continue
+    fi
+    if ! [[ "$nc_db_pass" =~ [a-z] ]]; then
+      echo "Password must contain at least one lowercase letter."
+      continue
+    fi
+    if ! [[ "$nc_db_pass" =~ [0-9] ]]; then
+      echo "Password must contain at least one number."
+      continue
+    fi
+    read -rsp "${cyan}[USER]${blue} Confirm Password: " pass_confirm
+    echo
+    if [[ "$nc_db_pass" != "$pass_confirm" ]]; then
+      echo "Passwords do not match. Try again."
+      continue
+    fi
+    break
+  done
+  while true; do
+    read -rp "${cyan}[USER]${reset} Please provide the Admin Email: " email
+    [[ -n "$email" ]] && break
+  done
+  nc_root="/etc/one-click/nextcloud/$domain"
+  nc_webroot="$nc_root/www"
+  nc_data="$nc_root/data"
+  nc_logs="$nc_root/logs"
+  mkdir -p \
+    "$nc_webroot" \
+    "$nc_data" \
+    "$nc_logs" \
+    "$nc_root/backups" \
+    "$nc_root/config"
+  chmod 750 "$nc_root"
+  warn "Creating web owner"
+  web_user="${nc_user:4}_$(echo -n "$domain" | sha1sum | cut -c1-8)"
+  id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
+  echo
+  # ==== REDIS? ====
+  if [[ "$centos_ver" -lt 10 ]]; then
+    while true; do
+      read -rp "${cyan}[USER]${reset} Enable Redis (y|n): " enable_redis
+      if [[ "$enable_redis" =~ ^[Yy](es)?|[Nn]o?$ ]]; then
+        break
+      fi
+      warn "Please enter y or n"
+    done
+  else
+    warn "CentOS $centos_ver does not support redis"
+    enable_redis=n
+  fi
+  printf '%s\n' "Which webserver would you like to configure?" \
+    "[1] Nginx" \
+    "[2] Apache"
+  while true; do
+    read -rp "${cyan}[USER]${reset} Select Web Server (1|2): " webserver
+    [[ -n "$webserver" ]] && break
+  done
+  case "$webserver" in
+    1)
+      webserver="nginx"
+      if command -v apt &> /dev/null; then
+        webserver_user="www-data"
+      else
+        webserver_user="nginx"
+      fi
+      ;;
+    2)
+      webserver="apache"
+      if command -v apt &> /dev/null; then
+        webserver_user="www-data"
+      else
+        webserver_user="apache"
+      fi
+      ;;
+    *)
+      echo "Invalid selection"
+      ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
+  esac
+  echo "SITE_USER=$web_user" >> "$nc_root/meta.conf"
+  echo "SITE_DIR=$nc_webroot" >> "$nc_root/meta.conf"
+  echo "SITE_GROUP=$webserver_user" >> "$nc_root/meta.conf"
+  echo "WEBSERVER=$webserver" >> "$nc_root/meta.conf"
+  echo "NC_USER=$nc_user" >> "$nc_root/meta.conf"
+  echo "NC_PASS=$nc_pass" >> "$nc_root/meta.conf"
+  echo "DB_PASS=$nc_db_pass" >> "$nc_root/meta.conf"
+  echo "DB_USER=$nc_db_user" >> "$nc_root/meta.conf"
+  # ==== Selection Summary Confirmation ====
+  [[ "$enable_redis" =~ ^[Nn] ]] && redis=No || redis=Yes
+  printf "${blue}%s${reset}\n" \
+    "┌──────────────────────────────────────────────────────┐" \
+    "│                        ${yellow}CONFIRMATION DETAILS${blue}          │" \
+    "├──────────────────────────────────────────────────────┤"
+  printf "${blue}│ %-19s : %-40s │\n" \
+    "Domain Name" "${yellow}${domain}${blue}" \
+    "Site User" "${yellow}${nc_user}${blue}" \
+    "SSL Email" "${yellow}${email}${blue}" \
+    "Database User" "${yellow}${nc_db_user}${blue}" \
+    "Database Password" "${yellow}$(sed -E ':a;s/([[:alnum:]]([[:alnum:]*]+)?)[][:alnum:]!"%£+=_&^@$.-[]/\1*/;ta' <<< "$nc_db_pass")${blue}" \
+    "Use Redis" "${yellow}${redis}${blue}" \
+    "Webserver" "${yellow}${webserver}${blue}"
+  printf '%s\n' "└──────────────────────────────────────────────────────┘${reset}"
+  while true; do
+    read -rp "${cyan}[USER]${reset} Are these details correct? (y|n): " proceed
+    [[ -n "$proceed" ]] && break
+  done
+  proceed="${proceed,,}"
+  echo
+  if [[ "$proceed" == "n" || "$proceed" == "no" ]]; then
+    warn "Deployment cancelled"
+    exit 1
+  fi
+  info "Installing Nextcloud"
+  curl -LO https://download.nextcloud.com/server/releases/latest.tar.bz2
+  curl -LO https://download.nextcloud.com/server/releases/latest.tar.bz2.sha256
+  grep 'latest.tar.bz2$' latest.tar.bz2.sha256 | sha256sum -c - || {
+    error "Nextcloud checksum failed"
+    return 1
+  }
+  if [[ ! $(sed -En '/# One-Click Routing/p' /etc/hosts) == "# One-Click Routing" ]]; then
+    echo "# One-Click Routing" >> /etc/hosts
+  elif [[ ! $(cat /etc/hosts) =~ 127.0.0.1.*"$domain" ]]; then
+    sed -Ei.one-click_bak -e "/# One-Click/{a\127.0.0.1\t${domain}" -e '}' /etc/hosts
+  fi
+  tar -xjf latest.tar.bz2
+  rsync -a nextcloud/ "$nc_webroot/"
+  chmod o+x /etc/one-click
+  chmod o+x /etc/one-click/nextcloud
+  chmod o+x /etc/one-click/nextcloud/$domain
+  chown -R "$web_user:$webserver_user" "$nc_root"
+  rm -f latest*
+  info "Installing $webserver"
+  install_webserver nextcloud "$domain" "$nc_webroot"
+  info "Creating resource slice for $domain"
+  info "Configuring PHP-FPM"
+  create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "nextcloud"
+  info "Enabling PHP"
+  systemctl enable php-fpm@${domain}.service --now
+  info "Configuring MariaDB"
+  configure_nc_db
+  dns_check
+  info "Configuring Nextcloud"
+  . "$nc_root/meta.conf"
+  nc_db="$DB_NAME"
+  sudo -u "$web_user" php \
+    "$nc_webroot/occ" maintenance:install \
+    --database "mysql" \
+    --database-name "$nc_db" \
+    --database-user "$nc_db_user" \
+    --database-pass "$nc_db_pass" \
+    --admin-user "$nc_user" \
+    --admin-pass "$nc_pass" \
+    --database-host "127.0.0.1" \
+    --data-dir "$nc_data"
+  sudo -u "$web_user" php "$nc_webroot/occ" \
+    config:system:set trusted_domains 1 \
+    --value="$domain"
+  sudo -u "$web_user" php "$nc_webroot/occ" \
+    config:system:set overwriteprotocol \
+    --value="https"
+  if [[ "$enable_redis" == "y" ]]; then
+    info "Installing and configuring Redis"
+    if [[ "$pkg_mgr" == "apt" ]]; then
+      $pkg_mgr install -y redis-server php-redis
+      systemctl enable redis-server --now
+      local service="redis-${domain}"
+      redis_conf="/etc/redis/redis.conf"
+      php_user="$webserver"
+    else
+      redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
+      dnf -y module enable redis:$redis_ver
+      $pkg_mgr install -y redis php-pecl-redis
+      systemctl enable redis --now
+      local service="redis-${domain}"
+      redis_conf="/etc/redis/redis.conf"
+      php_user="$webserver"
+    fi
+    redis_pw=$(openssl rand -base64 32)
+    local sock="/run/redis/redis-${domain}.sock"
+    if ! redis-cli ping &>/dev/null; then
+      error "Redis failed to install"
+      return 1
+    fi
+    setup_redis "$domain"
+    redis_service "$domain"
+    usermod -aG redis "$webserver_user"
+    usermod -aG redis "$web_user"
+    systemctl daemon-reexec
+    systemctl enable "${service}" --now
+    for i in {1..10}; do
+      if [[ -S "$sock" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ ! -S "$sock" ]]; then
+      error "Socket /run/redis-${domain}.sock was never created. Check: journalctl -u redis-${domain}"
+      return 1
+    else
+      success "Isolated redis socket created"
+    fi
+    chown redis:$web_user "$sock"
+    mkdir -p /etc/systemd/system/php-fpm@${domain}.service.d/
+    cat > /etc/systemd/system/php-fpm@${domain}.service.d/${domain}-redis.conf <<EOF
+[Service]
+ReadWritePaths=/run/redis/
+EOF
+    systemctl daemon-reload
+    systemctl restart php-fpm@${domain}.service
+    sudo -u "$web_user" php "$nc_webroot/occ" \
+      config:system:set redis host --value="$sock"
+    success "Redis installed and configured."
+  fi
+  info "Opening firewall ports 80 and 443"
+  one-click engine "allow $webserver"
+  info "Configuring SSL"
+  install_letsencrypt wordpress
+  set +o pipefail
+  if [[ "${manual_install:-}" -eq 1 ]]; then
+    webroot_nginx_template
+  fi
+  systemctl restart "$webserver"
+  echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site $domain > /dev/null 2>&1" > "/etc/cron.d/one-click_wp-web-monitor_nc_$domain"
+  info "Fixing permissions"
+  sleep 1
+  check_permissions "$domain"
+  systemctl reload "$webserver"
+  success " Suit has now been installed!"
+  info "Access the site from ${magenta}https://${domain}${reset}"
+}
+toggle_maintenance() {
+  state=$(sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --on 2>&1)
+  if grep -qi enabled <<< "$state"; then
+    info "Maintenance enabled"
+  else
+    sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --off
+    info "Maintenance disabled"
+  fi
+}
+occ_console() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  info "Enter OCC command"
+  read -rp "${cyan}[USER]${reset} occ> " occ_cmd
+  sudo -u "$web_user" php "$nc_webroot/occ" $occ_cmd
+}
+reset_nextcloud_password() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  sudo -u "$web_user" php "$nc_webroot/occ" \
+    user:resetpassword "$nc_user"
+}
+backup_nextcloud_instance() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  nc_db="$DB_NAME"
+  timestamp=$(date +%F-%H%M%S)
+  backup_root="/etc/one-click/nextcloud/${domain}/backups/${timestamp}"
+  mkdir -p \
+    "$backup_root/files" \
+    "$backup_root/data" \
+    "$backup_root/db"
+  info "Enabling maintenance mode"
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --on
+  info "Dumping database"
+  mysqldump "$nc_db" > \
+    "$backup_root/db/database.sql"
+  info "Syncing application files"
+  rsync -a \
+    "$nc_webroot/" \
+    "$backup_root/files/"
+  info "Syncing data directory"
+  rsync -a \
+    "$data/" \
+    "$backup_root/data/"
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --off
+  success "Backup complete"
+}
+restore_nextcloud_backup() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  backup=$(find \
+    "/etc/one-click/nextcloud/${domain}/backups" \
+    -mindepth 1 -maxdepth 1 \
+    | fzf)
+  [[ -z "$backup" ]] && return 1
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --on
+  rsync -a --delete \
+    "$backup/files/" \
+    "$nc_webroot/"
+  rsync -a --delete \
+    "$backup/data/" \
+    "$data/"
+  mysql "$nc_db" < \
+    "$backup/db/database.sql"
+  sudo -u "$wen_user" php "$nc_webroot/occ" maintenance:repair
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --off
+}
+repair_nextcloud_instance() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  info "Running Nextcloud repair"
+  harden_nextcloud
+  info "Validating OCC"
+  php "$nc_webroot/occ" status || {
+    error "OCC validation failed"
+    return 1
+  }
+  info "Running maintenance repair"
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:repair
+  info "Repairing mimetypes"
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mimetype:update-db
+  info "Repairing indexes"
+  sudo -u "$web_user" php "$nc_webroot/occ" db:add-missing-indices
+  info "Repairing columns"
+  sudo -u "$web_user" php "$nc_webroot/occ" db:add-missing-columns
+  info "Repairing primary keys"
+  sudo -u "$web_user" php "$nc_webroot/occ" db:add-missing-primary-keys
+  info "Restarting PHP-FPM"
+  systemctl restart php-fpm@£domain
+  info "Validating HTTP"
+  curl -Ik "https://${domain}" || {
+    error "HTTP validation failed"
+    return 1
+  }
+  success "Repair complete"
+}
+update_nextcloud_instance() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  backup_nextcloud_instance
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --on
+  curl -LO \
+    https://download.nextcloud.com/server/releases/latest.tar.bz2
+  tar -xjf latest.tar.bz2
+  rsync -a \
+    --exclude=config \
+    --exclude=data \
+    nextcloud/ \
+    "$nc_webroot/"
+  sudo -u "$web_user" php "$nc_webroot/occ" upgrade
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --off
+  repair_nextcloud_instance
+}
+nextcloud_status() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  sudo -u "$web_user" php "$nc_webroot/occ" status
+  echo
+  systemctl status php-fpm@$domain --no-pager
+  echo
+  df -h "$data"
+}
+remove_nextcloud_instance() {
+  . /etc/one-click/nextcloud/${domain}/meta.conf
+  web_user="$SITE_USER"
+  nc_webroot="$SITE_DIR"
+  nc_db="$DB_NAME"
+  nc_db_user="$DB_USER"
+  nc_root="/etc/one-click/nextcloud/${domain}"
+  read -rp \
+    "${cyan}[USER]${reset} Destroy ${domain}? This is irreversible (y|n): " confirm
+  [[ "$confirm" != "yes" ]] && return 1
+  systemctl stop php-fpm@${domain}
+  rm -rf "$nc_root"
+  mysql <<EOF
+DROP DATABASE ${nc_db};
+DROP USER '${nc_db_user}'@'localhost';
+EOF
+  userdel "$web_user"
+  rm -f \
+    "/etc/nginx/conf.d/${domain}.conf"
+  rm -f \
+    "/etc/one-click/db-manager/sites/${domain}.conf"
+  if [[ "$webserver" == "nginx" ]]; then
+    systemctl reload nginx
+  elif [[ "$webserver" == "httpd" ]]; then
+    systemctl reload httpd
+  else
+    systemctl reload apache2
+  fi
+}
+nextcloud_menu() {
+  used_app="nextcloud"
+  select_domain
+  domain="$(normalize_domain "$domain")"
+  type="nextcloud"
+  while true; do
+    printf "${blue}%s${reset}\n" \
+      "╔════════════════════════════════════════════════════════════╗" \
+      "║                ${yellow}ONE-CLICK NEXTCLOUD${blue}                          ║" \
+      "╠════╦═══════════════════════════════════════════════════════╣" \
+      "║ ${magenta}1${blue}  ║ ${green}Maintenance Mode${blue}                                      ║" \
+      "║ ${magenta}2${blue}  ║ ${green}OCC Console${blue}                                           ║" \
+      "║ ${magenta}3${blue}  ║ ${green}Reset Password${blue}                                        ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Repair Instance${blue}                                       ║" \
+      "║ ${magenta}5${blue}  ║ ${green}View Logs${blue}                                             ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Repair Instance${blue}                                       ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Restart PHP-FPM${blue}                                       ║" \
+      "║ ${magenta}8${blue}  ║ ${green}Update Nextcloud${blue}                                      ║" \
+      "║ ${magenta}9${blue}  ║ ${green}Backup Instance${blue}                                       ║" \
+      "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                                  ║" \
+      "╚════╩═══════════════════════════════════════════════════════╝${reset}"
+    read -rp "${cyan}[USER]${reset} Select option [0-4]: " choice
+    case "$choice" in
+      1) toggle_maintenance         ;;
+      2) occ_console                ;;
+      3) reset_nextcloud_password   ;;
+      4) repair_nextcloud_instance  ;;
+      5) tail_nextcloud_logs        ;;
+      6) restart_nextcloud_services ;;
+      7) update_nextcloud_instance  ;;
+      8) backup_nextcloud_instance  ;;
+      0) break                      ;;
     esac
   done
 }
@@ -7013,7 +7566,7 @@ db_entry() {
     info "$domain was found in both wordpress and static site directories."
     echo "${cyan}[USER]${reset} Select site type:"
     while true; do
-      printf "${cyan}[USER${reset}%s${cyan}]${reset} %s\n" \
+      printf "${cyan}[USER]${reset}%s${cyan}]${reset} %s\n" \
         "1" "WordPress" \
         "2" "Static Site"
       read -rp "${cyan}[USER]${reset}Choice: " choice
@@ -7025,6 +7578,10 @@ db_entry() {
     done
   elif [[ -d /etc/one-click/wordpress/${domain}/ ]]; then
     type="wordpress"
+  elif [[ -d /etc/one-click/apps/nodejs/${domain}/ ]]; then
+    type="nodejs"
+  elif [[ -d /etc/one-click/nextcloud/${domain}/ ]]; then
+    type="nextcloud"
   else
     type="sites"
   fi
