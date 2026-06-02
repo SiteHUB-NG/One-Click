@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Initialization ==== 
 export TERM="${TERM:-xterm}"
@@ -44,8 +44,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  migrate                 Migrate system settings, configurations and cron tasks." \
     "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
     "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
+    "  fleet                   Run remote commands to your fleet of registered servers" \
     "  reinstall               Perform a full operating system reinstallation." \
-    "  net-repair                  Diagnose and repair network configuration issues." \
+    "  net-repair              Diagnose and repair network configuration issues." \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
     "  --web-admin             Create a backup of selected static site." \
@@ -55,6 +56,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --wp-create             Install Wordpress with either nginx or apache." \
     "  --nodejs-admin          Start, stop and manage app." \
     "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
+    "  --nextcloud-create      Create a new instance of an isolated Nextcloud" \
+    "  --nextcloud-admin       Manage Nextcloud instances" \
+    "  --dns                   Manage DNS with Cloudflare" \
     "  --db-admin              Manage Databases and create temp front UI." \
     "  --ssl                   Install SSL for wordpress or any other virtual host." \
     "  --php                   Manage system-wide or per site php settings." \
@@ -151,7 +155,25 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  one-click engine 'audit scan --init'" \
     "  one-click migrate export" \
     "  one-click migrate export to 1.2.3.4" \
-    "  one-click migrate import <backup>" "" 
+    "  one-click migrate import <backup>" "" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  fleet                   Fleet is a lightweight, centralized server orchestration and automation" \
+    "                          engine built directly into One-Click." \
+    "                          Fleet uses Ansible as its foundational execution engine" ""\
+    "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
+    "  init                    Initialize fleet configuration, directory trees, and SSH keys." \
+    "  add <ip> <host> [port]  Register a new remote server to the fleet tracking configuration." \
+    "  remove | rm <host>      Deletes a server profile from the fleet tracking environment." \
+    "$(tput smul)$(tput bold)Orchestration Commands$(tput sgr0)$(tput rmul)" \
+    "  verify                  Test SSH connectivity on all tracked targets via an Ansible ping check." \
+    "  update                  Run 'one-click update' simultaneously across the active fleet." \
+    "  audit                   Gather real-time hardware architecture profiles and save locally as JSON." \
+    "  bench                   Execute async hardware benchmarks across hosts and fetch result payloads." \
+    "$(tput smul)$(tput bold)Operational Commands$(tput sgr0)$(tput rmul)" \
+    "  dir <host> <directory>  List remote fleet members directories" \
+    "  put <host> <src> <dest> Upload a local file or directory up to a target remote host." \
+    "  get <host> <src> <dest> Download a target file away from a remote host down to your machine." \
+    "  raw <host> '<command>'  Execute direct shell commands instantly inside a remote login shell." ""
 exit 0
 fi
 # ==== Confirm Package Manager ====
@@ -282,42 +304,6 @@ install_dependancies() {
     esac
   done
 }
-check_for_updates() {
-  local version_check current_version 
-  current_version="$version"
-  version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
-  remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
-  if [[ -z "$remote_version" ]]; then
-    error "Could not detect master version"
-    return
-  fi
-  if [[ "$(printf '%s\n%s' "$current_version" "$remote_version" | sort -V | head -n1)" = "$current_version" ]] && [[ "$current_version" != "$remote_version" ]]; then
-    printf "${yellow}%s${reset}\n" \
-      "                  ╔══════════════════════════════════════════════════════════════════╗" \
-      "                  ║ [UPDATE] A newer version ($remote_version) is available!                   ║" \
-      "                  ║ Run 'one-click update' to get the latest features.               ║" \
-      "                  ╚══════════════════════════════════════════════════════════════════╝" " "
-  fi
-}
-check_for_updates
-if [[ ! -f "/etc/one-click/backup/guard/system_baseline.json" ]]; then
-  printf "${yellow}%s${reset}\n" \
-    "                  ╔══════════════════════════════════════════════════════════════════╗" \
-    "                  ║ ${red}[${yellow}SECURITY${red}]${blue} Your IDS Scanner has not been initialized.            ${yellow}║" \
-    "                  ║ ${blue}Run $(tput setaf 63)one-click engine 'audit scan --init'${blue} to enable.${yellow}              ║" \
-    "                  ╚══════════════════════════════════════════════════════════════════╝"
-fi
-if [[ ! -f "$deps_ok" ]]; then
-  install_dependancies
-  mkdir -p "$base"
-  touch "$deps_ok"
-fi
-# ==== End Of Dependancies ==== #
-# ==== Load Source Body ====
-warn() {
-  printf "$yellow[WARN]:$reset %s\n" "$@" >&2;
-  _log_write "$yellow[WARN]$reset $*" >&2;
-}
 # ==== Loader Body ====
 load_body() {
   local url backup cache_dir cache_file ttl cache_age
@@ -386,6 +372,42 @@ $sysbench_geek
 $priv1 " > "$pub2"
   chmod 600 "$pub2"
 fi
+check_for_updates() {
+  local version_check current_version 
+  current_version="$version"
+  version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
+  remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
+  if [[ -z "$remote_version" ]]; then
+    error "Could not detect master version"
+    return
+  fi
+  if [[ "$(printf '%s\n%s' "$current_version" "$remote_version" | sort -V | head -n1)" = "$current_version" ]] && [[ "$current_version" != "$remote_version" ]]; then
+    printf "${yellow}%s${reset}\n" \
+      "                  ╔══════════════════════════════════════════════════════════════════╗" \
+      "                  ║ [UPDATE] A newer version ($remote_version) is available!                   ║" \
+      "                  ║ Run 'one-click update' to get the latest features.               ║" \
+      "                  ╚══════════════════════════════════════════════════════════════════╝" " "
+  fi
+}
+check_for_updates
+if [[ ! -f "/etc/one-click/backup/guard/system_baseline.json" ]]; then
+  printf "${yellow}%s${reset}\n" \
+    "                  ╔══════════════════════════════════════════════════════════════════╗" \
+    "                  ║ ${red}[${yellow}SECURITY${red}]${blue} Your IDS Scanner has not been initialized.            ${yellow}║" \
+    "                  ║ ${blue}Run $(tput setaf 63)one-click engine 'audit scan --init'${blue} to enable.${yellow}              ║" \
+    "                  ╚══════════════════════════════════════════════════════════════════╝"
+fi
+if [[ ! -f "$deps_ok" ]]; then
+  install_dependancies
+  mkdir -p "$base"
+  touch "$deps_ok"
+fi
+# ==== End Of Dependancies ==== #
+# ==== Load Source Body ====
+warn() {
+  printf "$yellow[WARN]:$reset %s\n" "$@" >&2;
+  _log_write "$yellow[WARN]$reset $*" >&2;
+}
 # ==== None Essential Modules ====
 # ==== Network Repair ====
 load_net_repair() {
@@ -746,12 +768,198 @@ if [[ $1 == "menu" ]]; then
   one_click_menu
   exit 0
 fi
+# ==== Fleet Bench ====
+if [[ "$1" == "flbench" ]]; then
+  build_vars
+  flbench_launch
+  exit 0
+fi
+if [[ "$1" == "fl" ]]; then
+  build_vars
+  load_ocb
+  cpu_sys
+  exit 0
+fi
 # ==== DB Admin ====
 if [[ "$1" == "--db-admin" ]]; then
   build_vars
   load_wordpress
   db_entry
   exit 0
+fi
+# ==== Fleet ====
+if [[ "$1" == "fleet" ]]; then
+  build_vars
+  if [[ "$2" == "--init" ]]; then
+    if [[ -d "$base"/fleet ]]; then
+      error "Init has already been run!"
+      exit 1
+    fi
+    fleet_init
+    exit 0
+  fi
+  if [[ "$2" == "add" ]]; then
+    if [[ ! -d "$base"/fleet ]]; then
+      error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+    fleet_add "$3" "$4"
+    exit 0
+  fi
+  if [[ "$2" == "remove" || "$2" == "rm" || "$2" == "del" || "$2" == "delete" ]]; then
+    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
+      | while read l; do 
+        basename ${l//.*}
+      done | while read l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          touch /tmp/fleet_token
+          break
+        fi
+      done
+    if [[ ! -f "/tmp/fleet_token" ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+    rm -f /tmp/fleet_token
+    fleet_remove "$3"
+    exit 0
+  fi
+  if [[ "$2" == "list" ]]; then
+    fleet_list
+    exit 0
+  fi
+  if [[ "$2" == "verify" ]]; then
+    fleet_verify 
+    exit 0
+  fi
+  if [[ "$2" == "update" ]]; then
+    fleet_update
+    exit 0
+  fi
+  if [[ "$2" == "audit" ]]; then
+    fleet_audit
+    exit 0
+  fi
+  if [[ "$2" == "bench" ]]; then
+    fleet_bench
+    exit 0
+  fi
+  if [[ "$2" == "status" ]]; then
+    fleet_status
+    exit 0
+  fi
+  if [[ "$2" == "get" ]]; then
+    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
+      | while read l; do 
+        basename ${l//.*}
+      done | while read l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          touch /tmp/fleet_token
+          break
+        fi
+      done
+    if [[ ! -f "/tmp/fleet_token" ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+    rm -f /tmp/fleet_token
+    fleet_get "$3" "$4" "$5"
+    exit 0
+  fi
+  if [[ "$2" == "put" ]]; then
+    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
+      | while read l; do 
+        basename ${l//.*}
+      done | while read l; do
+      if [[ "$3" == "$l" ]]; then
+        success "$3 found in inventory"
+        touch /tmp/fleet_token
+        break
+      fi
+    done
+    if [[ ! -f "/tmp/fleet_token" ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+    rm -f /tmp/fleet_token
+    fleet_put "$3" "$4" "$5"
+    exit 0
+  fi
+  if [[ "$2" == "dir" ]]; then
+    fleet_dir "$3" "$4"
+    exit 0
+  fi
+  if [[ "$2" == "raw" ]]; then
+    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
+      | while read l; do 
+        basename ${l//.*}
+      done | while read l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          touch /tmp/fleet_token
+          break
+        fi
+      done
+    if [[ ! -f "/tmp/fleet_token" ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+    rm -f /tmp/fleet_token
+    fleet_raw "$3" "$4"
+    exit 0
+  fi
+  if [[ -n "$2" ]]; then
+     error "Unknown command: $2"
+     exit 1
+  fi
+  exit
+fi
+# ==== Auto Update ====
+if [[ "$1" == "update-y" ]]; then
+  if command -v one-click >/dev/null 2>&1; then
+    mkdir -p /etc/one-click/upgrade-staging/modules
+    warn "This will update one-click to the latest version $remote_version"
+    update_version=y
+    if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
+      mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
+      mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
+      cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
+      rm -rf /var/cache/one-click
+      if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
+        if [[ ! -s "$manpage" ]]; then
+          wget -P "$man_dir" "$one_click_1" &> /dev/null
+          mandb -q &> /dev/null
+        fi
+        if [[ ! -f /usr/local/bin/one-click ]]; then
+          error "Upgrade failed"
+          warn "Reverting old version"
+          mkdir -p /var/cache/one-click/
+          mv -f /etc/one-click/upgrade-staging/modules/ /var/cache/one-click/ 2>/dev/null
+          mv -f /usr/localbin/one-click/one-click /etc/one-click/upgrade-staging/
+          mv -f /etc/one-click/upgrade-staging$(basename "$manpage") "$manpage"
+          exit 1
+        fi
+        success "Successfully updated to $remote_version"
+        chmod +x /usr/local/bin/one-click 
+        rm -rf /etc/one-click/upgrade-staging/
+        exit 0
+      else
+        error "Upgrade Failed. Reverting changes"
+        mv -f /etc/one-click/upgrade-staging/one-click /usr/local/bin/one-click
+        cp -R /etc/one-click/upgrade-staging/var/ /var
+        mv -f /etc/one-click/upgrade-staging/$(basename "$manpage") "$manpage"
+        success "Revert successful"
+      fi
+    else
+      warn "Version update has been cancelled." "Please update at your nearest opportunity"
+    fi
+  fi
 fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
@@ -798,10 +1006,12 @@ _one_click() {
     cmds["sys-info"]=""
     cmds["system-info"]=""
     cmds["logs"]=""
+    cmds["fleet"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
     cmds["menu"]=""
-    cmds["migrate"]=""
+    cmds["migrate:'export'"]=""
+    cmds["migrate:'import'"]=""
     cmds["uninstall"]=""
     cmds["--version"]=""
     cmds["--wp-create"]=""
@@ -816,6 +1026,8 @@ _one_click() {
     cmds["--nodejs-create"]=""
     cmds["--nodejs-admin"]=""
     cmds["--dns"]=""
+    cmds["--nextcloud-create"]=""
+    cmds["--nextcloud-admin"]=""
 
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -841,6 +1053,19 @@ _one_click() {
     cmds["rule-engine:'to"]=
     cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["rule-engine:--dry-run"]=""
+    cmds["fleet:'init'"]=
+    cmds["fleet:'add'"]=
+    cmds["fleet:'remove'"]=
+    cmds["fleet:'list'"]=
+    cmds["fleet:'verify'"]=
+    cmds["fleet:'update'"]=
+    cmds["fleet:'audit'"]=
+    cmds["fleet:'bench'"]=
+    cmds["fleet:'put'"]=
+    cmds["fleet:'get'"]=
+    cmds["fleet:'raw'"]=
+    cmds["fleet:'status'"]=
+    cmds["fleet:'dir'"]=
 
     cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -925,6 +1150,7 @@ _one_click() {
     cmds["logs"]=""
     cmds["log-browser"]=""
     cmds["help"]=""
+    cmds["fleet"]=""
     cmds["menu"]=""
     cmds["migrate"]=""
     cmds["uninstall"]=""
@@ -941,6 +1167,8 @@ _one_click() {
     cmds["--nodejs-create"]=""
     cmds["--nodejs-admin"]=""
     cmds["--dns"]=""
+    cmds["--nextcloud-create"]=""
+    cmds["--nextcloud-admin"]=""
     
     cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
     cmds["engine:'show alias'"]=
@@ -967,6 +1195,19 @@ _one_click() {
     cmds["rule-engine:'to"]=
     cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["rule-engine:--dry-run"]=""
+    cmds["fleet:'init'"]=
+    cmds["fleet:'add'"]=
+    cmds["fleet:'remove'"]=
+    cmds["fleet:'list'"]=
+    cmds["fleet:'verify'"]=
+    cmds["fleet:'update'"]=
+    cmds["fleet:'audit'"]=
+    cmds["fleet:'bench'"]=
+    cmds["fleet:'put'"]=
+    cmds["fleet:'get'"]=
+    cmds["fleet:'raw'"]=
+    cmds["fleet:'status'"]=
+    cmds["fleet:'dir'"]=
 
     cmds["engine:'open filter' 'open mangle' 'open raw'"]=
     cmds["engine:'show alias'"]=
@@ -995,7 +1236,7 @@ _one_click() {
     cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
     cmds["engine:--dry-run"]=""
 
-    cmds["migrate:'export' 'export to' 'import'"]=""
+    cmds["migrate:'export to'"]=""
     
     _complete_tree() {
       local path="$1"
@@ -1031,31 +1272,33 @@ fi
 map_one_click() {
   for i in "$@"; do
     case "$i" in
-      backup)           echo "--backup"      ;;
-      bench)            echo "--bench"       ;;
-      bench-sys)        echo "-bench-cpu"    ;;
-      engine)           echo "$i"            ;;
-      migrator)         echo "--migrator"    ;;
-      net-repair)       echo "--repair"      ;;
-      reinstall)        echo "--reinstall"   ;;
-      recovery)         echo "--recovery"    ;;
-      rule-engine)      echo "$i"            ;;
-      cron)             echo "--cron"        ;;
-      logs)             echo "--log"         ;;
-      log-browser)      echo "--log"         ;;
-      uninstall)        echo "--uninstall"   ;;
-      update)           echo "--update"      ;;
-      --wp-admin)       echo "-wm"           ;;
-      --wp-create)      echo "-wp"           ;;
-      --ssl)            echo "-ssl"          ;;
-      --wp)             echo "-backup"       ;;
-      --web-create)     echo "-st"           ;;
-      --web-admin)      echo "-st-backup"    ;;
-      --php)            echo "-php"          ;;
-      --nodejs-create)  echo "-nodejs"       ;;
-      --nodejs-admin)   echo "-njs-admin"    ;;
-      --dns)            echo "-dns"          ;;
-      *)                echo "$i"            ;;
+      backup)             echo "--backup"      ;;
+      bench)              echo "--bench"       ;;
+      bench-sys)          echo "-bench-cpu"    ;;
+      engine)             echo "$i"            ;;
+      migrator)           echo "--migrator"    ;;
+      net-repair)         echo "--repair"      ;;
+      reinstall)          echo "--reinstall"   ;;
+      recovery)           echo "--recovery"    ;;
+      rule-engine)        echo "$i"            ;;
+      cron)               echo "--cron"        ;;
+      logs)               echo "--log"         ;;
+      log-browser)        echo "--log"         ;;
+      uninstall)          echo "--uninstall"   ;;
+      update)             echo "--update"      ;;
+      --wp-admin)         echo "-wm"           ;;
+      --wp-create)        echo "-wp"           ;;
+      --web-create)       echo "-st"           ;;
+      --web-admin)        echo "-st-backup"    ;;
+      --php)              echo "-php"          ;;
+      --nodejs-create)    echo "-nodejs"       ;;
+      --nodejs-admin)     echo "-njs-admin"    ;;
+      --dns)              echo "-dns"          ;;
+      --nextcloud-create) echo "-nextcloud"    ;;
+      --nextcloud-admin)  echo "-next-admin"   ;;
+      --ssl)              echo "-ssl"          ;;
+      --wp)               echo "-backup"       ;;
+      *)                  echo "$i"            ;;
     esac
   done
 }
@@ -1178,19 +1421,29 @@ if [[ $# -gt 0 ]]; then
     --cron) cron_menu        ;;
     -r|--update) 
       if command -v one-click >/dev/null 2>&1; then
-        mkdir -p /etc/one-click/upgrade-staging/
+        mkdir -p /etc/one-click/upgrade-staging/modules
         warn "This will update one-click to the latest version $remote_version"
-        read -rp "Please confirm you are happy to proceed? (y|n): " update_version
+        read -rp "${cyan}[USER]${reset} Please confirm you are happy to proceed? (y|n): " update_version
         update_version="${update_version,,}"
+        rm -f /tmp/skip_prompt
         if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
           mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
           mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
-          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/ 2>/dev/null
+          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
           rm -rf /var/cache/one-click
           if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
             if [[ ! -s "$manpage" ]]; then
               wget -P "$man_dir" "$one_click_1" &> /dev/null
               mandb -q &> /dev/null
+            fi
+            if [[ ! -f /usr/local/bin/one-click ]]; then
+              error "Upgrade failed"
+              warn "Reverting old version"
+              mkdir -p /var/cache/one-click/
+              mv -f /etc/one-click/upgrade-staging/modules/ /var/cache/one-click/ 2>/dev/null
+              mv -f /usr/localbin/one-click/one-click /etc/one-click/upgrade-staging/
+              mv -f /etc/one-click/upgrade-staging$(basename "$manpage") "$manpage"
+              exit 1
             fi
             success "Successfully updated to $remote_version"
             chmod +x /usr/local/bin/one-click
@@ -1381,6 +1634,15 @@ if [[ $# -gt 0 ]]; then
       apps_menu nodejs
       exit 0
       ;;
+    -nextcloud)
+      load_wordpress
+      install_nextcloud
+      ;;
+    -next-admin)
+      load_wordpress
+      used_app=nextcloud
+      nextcloud_menu
+      ;;
     -ssl)
       load_wordpress
       install_letsencrypt
@@ -1470,7 +1732,8 @@ if [[ $# -gt 0 ]]; then
         "  menu                    Central menu with direct access to most tools." \
         "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
-        "  net-repair                  Repair network (Includes snapshots and backup of network files)" \
+        "  fleet                   Run remote commands to your fleet of registered servers" \
+        "  net-repair              Repair network (Includes snapshots and backup of network files)" \
         "  (system|sys-info)       System Information" \
         "  (log-browser|logs)      System Log File Browswer" \
         "  cron                    Configure a cron job" \
@@ -1483,7 +1746,10 @@ if [[ $# -gt 0 ]]; then
         "  --wp-create             Install Wordpress with either nginx or apache." \
         "  --nodejs-admin          Start, stop and manage app." \
         "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
+        "  --nextcloud-create      Create a new instance of an isolated Nextcloud" \
+        "  --nextcloud-admin       Manage Nextcloud instances" \
         "  --db-admin              Manage Databases and create temp front end if needed." \
+        "  --dns                   Manage DNS with Cloudflare" \
         "  --ssl                   Install SSL for wordpress or any other virtual host." \
         "  --php                   Manage system-wide or per site php settings." \
         "  --version               Check version" \
