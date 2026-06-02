@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 mkdir -p "${log_dir:-}"
 touch "${log_error_file:-}" "${log_file:-}"
@@ -33,6 +33,7 @@ build_vars() {
   snaps_dir="$base_dir/snapshots"
   config_dir="$base_dir/configuration"
   service_restore="$base_dir/service.restore"
+  fleet_root="/etc/one-click/fleet"
   cron_flag="$base_dir/.cron_installed"
   nrepair_log_file="/var/log/one-click/network-repair.log"
   log_dir="/var/log/one-click"
@@ -722,12 +723,13 @@ geekbench_table() {
   fi
   single=$(jq -r '.benchmark.single' <<< "$api_response")
   multi=$(jq -r '.benchmark.multi' <<< "$api_response")
-  # ==== Build Config File ====
-  printf '%s=%s\n' \
-    "single" "$single" \
-	"multi" "$multi" \
-	"gb_id" "$gb_id"  > /etc/one-click/ocb/temp.conf
   timestamp=$(date '+%F %T')
+  # ==== Build Config File ====
+    echo "single=$single" > /etc/one-click/ocb/meta.conf
+	echo "multi=$multi" >> /etc/one-click/ocb/meta.conf
+	echo "gb_id=$gb_id" >> /etc/one-click/ocb/meta.conf
+	echo "gb_url=$test_url" >> /etc/one-click/ocb/meta.conf
+	echo "timestamp=\"$timestamp\"" >> /etc/one-click/ocb/meta.conf
   if [[ ! -f "$results_file" || ! -s "$results_file" ]]; then
     first_run=1
     echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
@@ -788,24 +790,17 @@ geekbench_table() {
     multi="Results blocked by Cloudflare"
   fi
   printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
-    "Single Core" "GB$version" "$single"
-  printf "${blue}│${green}%-20s %-20s %-56s${blue}│${reset}\n" \
-    "Multi Core" "GB$version" "$multi"
-  printf "${blue}│${cyan}%-20s %-20s %-56s${blue}│${reset}\n" \
+    "Single Core" "GB$version" "$single" \
+    "Multi Core" "GB$version" "$multi" \
     "Result URL" "GB$version" "$test_url"
   if (( first_run == 0 )); then
     printf "${blue}│${magenta}%-20s %-20s %-56s${blue}│${reset}\n" \
-      "Previous Test" "GB$version" "$old_date"
-    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
-      "Prev Single Core" "GB$version" "$old_single"
-    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
-      "Prev Multi Core" "GB$version" "$old_multi"
-    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
+      "Previous Test" "GB$version" "$old_date" \
+      "Prev Single Core" "GB$version" "$old_single" \
+      "Prev Multi Core" "GB$version" "$old_multi" \
       "Single Trend" "GB$version" \
-      "$single_trend (${single_symbol}${single_diff}, ${single_symbol}${single_pct}%)"
-    printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
-      "Multi Trend" "GB$version" \
-      "$multi_trend (${multi_symbol}${multi_diff}, ${multi_symbol}${multi_pct}%)"
+      "$single_trend (${single_symbol}${single_diff}, ${single_symbol}${single_pct}%)" \
+      "Multi Trend" "GB$version" "$multi_trend (${multi_symbol}${multi_diff}, ${multi_symbol}${multi_pct}%)"
   fi
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
@@ -1166,6 +1161,7 @@ total_time() {
   inner_width=$((total_width - 2))
   border=$(printf '─%.0s' $(seq 1 "$inner_width"))
   time_taken=$(( end_time - start_time ))
+  echo "time_taken=$time_taken" >> /etc/one-click/ocb/meta.conf
   msg1="One-Click Bench completed in ${time_taken} sec"
   msg2="Publish URL: $result"
   if (( ${time_taken} > 60 )); then
@@ -1188,6 +1184,683 @@ total_time() {
   fi
 }
 # ============================================= End One-Click Bench ========================================= #
+# ================================================= Fleet =================================================== #
+fleet_init() {
+  install_dep "bc" "command -v bc" "bc" "$pkg_mgr" true
+  info "Initialising Fleet..."
+  mkdir -p \
+    "$fleet_root/state" \
+    "$fleet_root/playbooks" \
+    "$fleet_root/keys" \
+    "$fleet_root/audits" \
+    "$fleet_root/benchmarks"
+  if ! command -v ansible >/dev/null 2>&1; then
+    info "Installing Ansible"
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y ansible
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y ansible
+    else
+      error "Unsupported package manager"
+	  return 1
+    fi
+  fi
+  [[ -f "$fleet_root/.initialized" ]] && return
+  if [[ ! -f "$fleet_root/keys/id_ed25519" ]]; then
+    ssh-keygen \
+      -t ed25519 \
+      -N "" \
+      -f "$fleet_root/keys/id_ed25519"
+  fi
+  fleet_write_inventory
+  fleet_write_playbooks
+  touch "$fleet_root/.initialized"
+}
+flbench_launch() {
+  rm -f \
+    /etc/one-click/ocb/benchmarks/COMPLETE \
+    /etc/one-click/ocb/benchmarks/job.state \
+    /etc/one-click/ocb/benchmarks/latest.json
+	cat > /etc/one-click/flbench.sh << EOF
+#!/bin/bash
+sudo nohup /bin/bash -c "/usr/local/bin/one-click fl" >/dev/null 2>&1 &
+echo "STARTED" | sudo tee /etc/one-click/ocb/benchmarks/job.state
+EOF
+  sudo chmod +x /etc/one-click/flbench.sh
+  sudo bash /etc/one-click/flbench.sh &
+  sleep 1
+  sudo rm -f /etc/one-click/flbench.sh
+}
+fleet_write_inventory() {
+  local inventory="$fleet_root/inventory.yml"
+  cat > "$inventory" <<EOF
+all:
+  vars:
+    ansible_user: oneclick
+    ansible_become: true
+    ansible_ssh_private_key_file: $fleet_root/keys/id_ed25519
+
+  hosts:
+EOF
+  for file in "$fleet_root"/state/*.conf; do
+    [[ ! -f "$file" ]] && continue
+    local host ip port
+    host=$(grep '^HOSTNAME=' "$file" | cut -d= -f2-)
+    ip=$(grep '^IP=' "$file" | cut -d= -f2-)
+    port=$(grep '^PORT=' "$file" | cut -d= -f2-)
+    [[ -z "$port" ]] && port=22
+    cat >> "$inventory" <<EOF
+    $host:
+      ansible_host: $ip
+      ansible_port: $port
+EOF
+    done
+}
+fleet_write_playbooks() {
+  # ==== Update Playbook ====
+  cat > "$fleet_root/playbooks/update.yml" <<'EOF'
+- hosts: all
+  become: true
+  tasks:
+    - name: Update One-Click
+      shell: /bin/bash -lc "one-click update-y"
+EOF
+  # ==== Audit Playbook
+    cat > "$fleet_root/playbooks/audit.yml" <<'EOF'
+- hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Create temp manifest
+      copy:
+        content: |
+          {
+            "hostname": "{{ inventory_hostname }}",
+            "distribution": "{{ ansible_distribution | default('Linux') }}",
+            "version": "{{ ansible_distribution_version | default('Unknown') }}",
+            "kernel": "{{ ansible_kernel | default('Unknown') }}",
+            "cpus": "{{ ansible_processor_vcpus | default('?') }}",
+            "load_1m": "{{ ansible_loadavg.1 | default('0.00') }}",
+            "ram_total_gb": "{{ (ansible_memtotal_mb / 1024) | round(1) }}G",
+            "ram_free_gb": "{{ (ansible_memfree_mb / 1024) | round(1) }}G",
+            "disk_total_gb": "{{ (ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_total') | first / 1024 / 1024 / 1024) | round(1) }}G",
+            "disk_free_gb": "{{ (ansible_mounts | selectattr('mount', 'equalto', '/') | map(attribute='size_available') | first / 1024 / 1024 / 1024) | round(1) }}G"
+          }
+        dest: "/tmp/{{ inventory_hostname }}__audit.json"
+
+    - name: Pull payloads back to fleet control master
+      fetch:
+        src: "/tmp/{{ inventory_hostname }}__audit.json"
+        dest: "/etc/one-click/fleet/audits/{{ inventory_hostname }}.json"
+        flat: true
+
+    - name: Clean up remote transient audit files
+      file:
+        path: "/tmp/{{ inventory_hostname }}__audit.json"
+        state: absent
+EOF
+  # ==== OCB Playbook ====
+  cat > "$fleet_root/playbooks/bench.yml" <<'EOF'
+---
+- hosts: all
+  become: true
+  gather_facts: false
+  any_errors_fatal: false 
+  tasks:
+    - name: Remove stale benchmark state
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/one-click/ocb/benchmarks/COMPLETE
+        - /etc/one-click/ocb/benchmarks/job.state
+        - /etc/one-click/ocb/benchmarks/latest.json
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: Launch benchmark
+      command: one-click flbench 
+      ignore_unreachable: true
+      ignore_errors: true
+EOF
+
+  cat > "$fleet_root/playbooks/fetch_results.yml" <<'EOF'
+---
+- hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check if benchmark output files exist
+      stat:
+        path: /etc/one-click/ocb/benchmarks/COMPLETE
+      register: compl_file
+
+    - name: Verify benchmark job state
+      slurp:
+        src: /etc/one-click/ocb/benchmarks/job.state
+      register: bench_json
+      failed_when: false
+      changed_when: false
+
+    - name: Read benchmark results payload
+      slurp:
+        src: /etc/one-click/ocb/benchmarks/latest.json
+      register: bench_json
+      when: 
+        - compl_file.stat.exists
+        - bench_state.content is defined
+        - "'COMPLETE' in (bench_state.content | b64decode | string)"
+
+    - name: Ensure archive directory exists
+      delegate_to: localhost
+      file:
+        path: "{{ local_fleet_root }}/benchmarks/archive"
+        state: directory
+        mode: "0755"
+      when: bench_json is defined and bench_json.content is defined
+
+    - name: Check for existing result
+      delegate_to: localhost
+      stat:
+        path: "{{ local_fleet_root }}/benchmarks/{{ inventory_hostname }}.json"
+      register: existing_result
+      when: bench_json is defined and bench_json.content is defined
+
+    - name: Archive previous result
+      delegate_to: localhost
+      command: >
+        mv
+        {{ local_fleet_root }}/benchmarks/{{ inventory_hostname }}.json
+        {{ local_fleet_root }}/benchmarks/archive/{{ inventory_hostname }}-{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}.json
+      when: 
+        - bench_json is defined and bench_json.content is defined
+        - existing_result.stat is defined and existing_result.stat.exists
+
+    - name: Pull results to local controller
+      delegate_to: localhost
+      copy:
+        content: "{{ bench_json.content | b64decode }}"
+        dest: "{{ local_fleet_root }}/benchmarks/{{ inventory_hostname }}.json"
+      when: 
+        - bench_json is defined 
+        - bench_json.content is defined
+
+    
+EOF
+}
+fleet_add() {
+  local ip="$1"
+  local host="$2"
+  local port="${3:-22}"
+  [[ -z "$ip" || -z "$host" ]] && {
+    error "Usage: fleet add <ip> <hostname> [port]"
+    return 1
+  }
+  fleet_init
+  cat > "$fleet_root/state/$host.conf" <<EOF
+HOSTNAME=$host
+IP=$ip
+PORT=$port
+EOF
+
+    fleet_write_inventory
+    info "Added $host"
+
+    cat <<EOF
+This tool will allow the micro management and overview of your remote fleet.
+You can run mass updates of the One-Click tool with a single click ${yellow}:)${reset}.
+You can also run OCB benchmark on your fleet and poll the results for a single view.
+
+Please follow the following guide and run on the remote host to set up the trust:
+
+======================================================================================
+useradd -m -s /bin/bash oneclick
+mkdir -p /home/oneclick/.ssh
+
+echo '$(cat "$fleet_root/keys/id_ed25519.pub")' >> /home/oneclick/.ssh/authorized_keys
+
+chown -R oneclick:oneclick /home/oneclick/.ssh
+chmod 700 /home/oneclick/.ssh
+chmod 600 /home/oneclick/.ssh/authorized_keys
+
+echo 'oneclick ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/oneclick
+chmod 440 /etc/sudoers.d/oneclick
+======================================================================================
+Thank you for choosing One-Click
+
+EOF
+}
+fleet_remove() {
+  local host="$1"
+  [[ -z "$host" ]] && {
+    error "Usage: fleet remove <hostname>"
+    return 1
+  }
+  if [[ ! -f "$fleet_root/state/$host.conf" ]]; then
+    echo "$host already removed"
+    return
+  fi
+  rm -f "$fleet_root/state/$host.conf"
+  fleet_write_inventory
+  info "Removed $host"
+}
+fleet_list() {
+  printf "%-20s %-18s %-5s\n" ${blue}HOSTNAME ${blue}IP ${blue}PORT${reset}
+  printf "%-20s %-18s %-5s\n" ${magenta}-------- ${green}-- ${yellow}----${reset}
+  for file in "$fleet_root"/state/*.conf; do
+    [[ ! -f "$file" ]] && continue
+    local host ip port
+    host=$(grep '^HOSTNAME=' "$file" | cut -d= -f2-)
+    ip=$(grep '^IP=' "$file" | cut -d= -f2-)
+    port=$(grep '^PORT=' "$file" | cut -d= -f2-)
+    [[ -z "$port" ]] && port=22
+    printf "%-20s %-18s %-5s\n" "${magenta}$host" "${green}$ip" "${yellow}$port${reset}"
+  done
+}
+fleet_verify() {
+  fleet_init
+  (ANSIBLE_HOST_KEY_CHECKING=False ansible localhost \
+    -c local \
+    -m ping 2> /dev/null | sed -En "
+      /success/I {
+        s/[=>{}]//g;
+        s/[^|]*/${magenta}&${reset}/;
+        s/(\|)(.*)/\1${green}\2${reset}/p
+      };
+      /unreachable/I {
+        s/[=>{}]//g;
+        s/[^|]*/${magenta}&${reset}/;
+        s/(\|)(.*)/\1${green}\2${reset}/p
+      }
+    "
+    ANSIBLE_HOST_KEY_CHECKING=False ansible all \
+      -i "$fleet_root/inventory.yml" \
+      -m ping 2> /dev/null | sed -En "
+        /success/I {
+          s/[=>{}]//g;
+          s/[^|]*/${magenta}&${reset}/;
+          s/(\|)(.*)/\1${green}\2${reset}/p
+        };
+        /unreachable/I {
+          s/[=>{}]//g;
+          s/[^|]*/${orange}&${reset}/;
+          s/(\|)(.*)/\1${red}\2${reset}/p
+        }
+      "
+  ) | column -t
+}
+fleet_update() {
+  fleet_init
+  tmux new-session -d -s "oneclick-update-local" "/usr/local/bin/one-click update-y"
+  echo "${green}ok: [localhost]${reset}"
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    "$fleet_root/playbooks/update.yml" 2> /dev/null | sed -Eun "
+      {
+        s/^(ok[^]]*\]):.*/${green}\1${reset}/
+      };
+      {
+        s/^(fatal[^]]*\]):.*/${red}\1${reset}/p
+      };
+    "
+}
+fleet_audit() {
+  fleet_init
+  rm -f "$fleet_root"/audits/*.json
+  info "Auditing localhost..."
+  (
+    local cpus_count
+    cpus_count=$(nproc 2>/dev/null || echo "?")
+    local l_load
+    l_load=$(uptime | awk -F'load average:' '{print $2}' | cut -d, -f1 | xargs)
+    local os_name version_id kernel_release
+    [[ -f /etc/os-release ]] && source /etc/os-release
+    os_name="${NAME:-Linux}"
+    version_id="${VERSION_ID:-Unknown}"
+    kernel_release=$(uname -r)
+    local r_total_mb r_free_mb d_total_kb d_free_kb
+    r_total_mb=$(awk '/MemTotal/ {print $2/1024}' /proc/meminfo)
+    r_free_mb=$(awk '/MemFree/ {print $2/1024}' /proc/meminfo)
+    d_total_kb=$(df / | awk 'NR==2 {print $2}')
+    d_free_kb=$(df / | awk 'NR==2 {print $4}')
+    local r_total r_free d_total d_free
+    r_total=$(printf "%.1f" "$(echo "$r_total_mb / 1024" | bc -l)")
+    r_free=$(printf "%.1f" "$(echo "$r_free_mb / 1024" | bc -l)")
+    d_total=$(printf "%.1f" "$(echo "$d_total_kb / 1024 / 1024" | bc -l)")
+    d_free=$(printf "%.1f" "$(echo "$d_free_kb / 1024 / 1024" | bc -l)")
+    cat > "$fleet_root/audits/localhost.json" <<EOF
+{
+  "hostname": "localhost",
+  "distribution": "$os_name",
+  "version": "$version_id",
+  "kernel": "$kernel_release",
+  "cpus": "$cpus_count",
+  "load_1m": "$l_load",
+  "ram_total_gb": "${r_total}G",
+  "ram_free_gb": "${r_free}G",
+  "disk_total_gb": "${d_total}G",
+  "disk_free_gb": "${d_free}G"
+}
+EOF
+  )
+  info "Auditing remote fleet cluster..."
+  fleet_init
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    "$fleet_root/playbooks/audit.yml" &> /dev/null || true
+  echo "${blue}=============================================== ${orange}FLEET AUDIT REPORT${blue} ==================================================${reset}"
+  (
+    echo -e "${yellow}HOSTNAME\tOS_DISTRO\tVERSION\tKERNEL\tCPUS\tLOAD_1M\tRAM(USED/TOTAL)\tDISK(USED/TOTAL)${reset}"
+    echo -e "${blue}========\t=========\t=======\t======\t====\t=======\t===============\t================${reset}"
+    for json_file in "$fleet_root"/audits/*.json; do
+      [[ ! -f "$json_file" ]] && continue
+      jq -r '[
+        .hostname,
+        .distribution,
+        .version,
+        .kernel,
+        .cpus,
+        .load_1m,
+        "\(.ram_free_gb)/\(.ram_total_gb)",
+        "\(.disk_free_gb)/\(.disk_total_gb)"
+      ] | @tsv' "$json_file"
+      done
+    ) | column -t -s $'\t'
+    echo
+}
+fleet_bench() {
+  fleet_init
+  info "Spawning background benchmark on localhost..."
+  rm -f /etc/one-click/ocb/benchmarks/COMPLETE \
+    /etc/one-click/ocb/benchmarks/job.state \
+    /etc/one-click/ocb/benchmarks/latest.json
+  nohup /bin/bash -lc "one-click fl" && cp "/etc/one-click/ocb/benchmarks/latest.json" "$fleet_root/benchmarks/localhost.json" &> /dev/null &
+  info "Spawning background benchmarks across remote fleet..."
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+  "$fleet_root/playbooks/bench.yml" &> /dev/null &
+  info "All benchmark jobs dispatched successfully!" \
+    "Run ${orange}'one-click fleet status'${reset} to check on progress or find logs in '$fleet_root/benchmarks/'"
+}
+fleet_put() {
+  local host="$1"
+  local src="$2"
+  local dest="$3"
+  [[ -z "$host" || -z "$src" || -z "$dest" ]] && {
+    error "Usage: fleet put <hostname> <local_src> <remote_dest>"
+    return 1
+  }
+  fleet_init
+  info "Transferring '$src' to '$host:$dest'..."
+  ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    -m copy \
+    -a "src=$src dest=$dest owner=oneclick group=oneclick mode=preserve" 2> /dev/null | sed -En "
+      /\| changed/I {
+        s,([^{]*).*,${orange}\1${reset},;
+        s,$,${green}SUCCESS ${orange}=>${green} $src exported to $dest on ${host}${reset},;
+        s/^/${magenta}[EXEC]${reset} /gp
+      };
+      /\| success/I {
+        s,([^{]*).*,${green}\1${reset},;
+        s,$,${orange}EXISTS ${green}=>${orange} $dest already exists and is unchanged.${reset},;
+        s/^/${magenta}[EXEC]${reset} /gp
+      }
+    "
+}
+fleet_get() {
+  local host="$1"
+  local src="$2"
+  local dest="$3"
+  [[ -z "$host" || -z "$src" || -z "$dest" ]] && {
+    error "Usage: fleet get <hostname> <remote_src> <local_dest>"
+    return 1
+  }
+  fleet_init
+  info "Fetching '$host:$src' to '$dest'..."
+  ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    -m fetch \
+    -a "src=$src dest=$dest flat=yes" 2> /dev/null | sed -En "
+      /\| changed/I {
+        s/^/${magenta}[EXEC]${reset} /;
+        s,([^{]*).*,${orange}\1${reset},;
+        s,$,${green}SUCCESS ${orange}=>${green} $src imported to $dest from ${host}${reset},;
+        s/^/${magenta}[EXEC]${reset} /gp
+      };
+      /\| success/I {
+        s,([^{]*).*,${green}\1${reset},;
+        s,$,${orange}EXIST ${green}=>${orange} $dest already exist and is unchanged.${reset},;
+        s/^/${magenta}[EXEC]${reset} /gp
+      }
+    "
+}
+fleet_dir() {
+  local host="$1"
+  local dir="$2"
+  [[ -z "$host" || -z "$dir" ]] && {
+    error "Usage: fleet list <hostname> <remote_directory>"
+    return 1
+  }
+  fleet_init
+  info "Listing '$host:$dir'..."
+  ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    -m shell \
+    -a "find '$dir' -maxdepth 1 -printf '%M %u %g %10s %TY-%Tm-%Td %TH:%TM %f\n' 2>/dev/null | sort" \
+    2>/dev/null
+}
+fleet_raw() {
+  local host="$1"
+  local cmds="$2"
+  [[ -z "$host" || -z "$cmds" ]] && {
+    error "Usage: fleet raw <hostname> '<commands>'"
+    return 1
+  }
+  fleet_init
+  info "Executing raw command on '$host'..."
+  ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    -m shell \
+    -a "/bin/bash -lc '$cmds'"
+}
+fleet_status() {
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -vvvv \
+        -i "$fleet_root/inventory.yml" \
+        -u oneclick \
+        -e "local_fleet_root=$fleet_root" \
+        "$fleet_root/playbooks/fetch_results.yml" &> /dev/null
+  printf "${magenta}%-20s ${magenta}%-15s ${magenta}%s\n" "HOSTNAME" "JOB STATUS" "RESULT FILE${reset}"
+  printf "${blue}%-20s ${blue}%-15s ${blue}%s\n" "--------" "----------" "-----------${reset}"
+    local local_status="RUNNING"
+    ll_status="${orange}"
+    local local_file="-"
+  if [[ -f "$fleet_root/benchmarks/localhost.json" ]]; then
+    local_status="COMPLETE"
+    ll_status="${green}"
+    local_file="$fleet_root/benchmarks/localhost.json"
+  elif [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+    local_status=$(cat /etc/one-click/ocb/benchmarks/job.state 2>/dev/null)
+    [[ "$local_status" == "FAILED" ]] && ll_status="${red}"
+  elif [[ -f /etc/one-click/ocb/benchmarks/COMPLETE ]]; then
+    local_status="COMPLETE"
+    ll_status="${green}"
+  fi
+  printf "$(tput setaf 227)%-20s ${ll_status}%-15s ${ll_status}%s\n" "localhost" "$local_status" "$local_file${reset}"
+  for file in "$fleet_root"/state/*.conf; do
+    [[ ! -f "$file" ]] && continue
+    local host
+    host=$(grep '^HOSTNAME=' "$file" | cut -d= -f2-)
+    local remote_check
+    remote_check=$(ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" -i "$fleet_root/inventory.yml" -m shell -a "cat /etc/one-click/ocb/benchmarks/job.state" 2>/dev/null || echo "FAILED")
+    local status="RUNNING"
+    local res_file="-"
+	cl_status="${orange}"
+    if echo "$remote_check" | grep -q "COMPLETE"; then
+      status="COMPLETE"
+	  cl_status="${green}"
+      if [[ -f "$fleet_root/benchmarks/${host}.json" ]]; then
+        res_file="$fleet_root/benchmarks/${host}.json"
+      fi
+    elif echo "$remote_check" | grep -q "FAILED"; then
+      status="FAILED"
+	  cl_status="${red}"
+    fi
+	printf "$(tput setaf 227)%-20s ${cl_status}%-15s ${cl_status}%s\n" "$host" "$status" "$res_file${reset}"
+  done
+  echo
+  echo -e "${magenta}================================================================================ ${orange}FLEET BENCHMARK STATUS REPORT${magenta} ================================================================================${reset}"
+  echo
+    (
+	  echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
+      echo -e "${magenta}FLEET\tHOSTNAME\tSTATUS\tSINGLE_CORE\tMULTI_CORE\tTOTAL_TIME\tTIMESTAMP\tONE-CLICK URL\tGEEKBENCH URL${reset}"
+      echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
+	if [[ -f "$fleet_root/benchmarks/localhost.json" ]]; then
+    jq -r --arg f_name "${HOSTNAME}" '[
+		"localhost",
+		$f_name,
+        .status,
+        ."Single Core Score",
+        ."Multi Core Score",
+        ."Total Time Taken",
+        .timestamp,
+        ."One-Click Results",
+        ."GeekBench Results"
+      ] | @tsv' "$fleet_root/benchmarks/localhost.json"
+    else
+      echo -e "localhost\tRUNNING/PENDING\t-\t-\t-\t-\t-\t-"
+    fi
+    for host_conf in "$fleet_root"/state/*.conf; do
+      [[ ! -f "$host_conf" ]] && continue
+      source "$host_conf"
+	  local_json="$fleet_root/benchmarks/${HOSTNAME}.json"
+	  if [[ -f "$local_json" ]]; then
+        jq -r --arg f_name "$HOSTNAME" '[
+	      $f_name,
+          .hostname,
+          .status,
+          ."Single Core Score",
+          ."Multi Core Score",
+          ."Total Time Taken",
+          .timestamp,
+		  ."One-Click Results",
+		  ."GeekBench Results"
+        ] | @tsv' "$local_json"
+      else
+        echo -e "${HOSTNAME}\tRUNNING/PENDING\t-\t-\t-\t-\t-\t-"
+      fi
+    done
+	echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
+  ) | column -t -s $'\t'
+  echo
+}
+fleet_site_export() {
+  local domain="$1"
+  [[ -z "$domain" ]] && {
+    error "Usage: fleet site-export <domain>"
+    return 1
+  }
+  local bundle_root="/tmp/fleet-site-$domain"
+  local archive="/tmp/${domain}.tar.gz"
+  rm -rf "$bundle_root"
+  mkdir -p "$bundle_root"
+  info "Collecting site data for $domain"
+  cp -a "/etc/one-click/sites/$domain" \
+    "$bundle_root/site"
+  [[ -f "/etc/one-click/db-manager/sites/$domain.json" ]] && \
+    cp "/etc/one-click/db-manager/sites/$domain.json" \
+    "$bundle_root/registry.json"
+  [[ -f "/etc/nginx/sites-available/$domain.conf" ]] && \
+    cp "/etc/nginx/sites-available/$domain.conf" \
+    "$bundle_root/nginx.conf"
+  if [[ -f "/etc/one-click/sites/$domain/meta.conf" ]]; then
+    cp "/etc/one-click/sites/$domain/meta.conf" \
+      "$bundle_root/meta.conf"
+      source "/etc/one-click/sites/$domain/meta.conf"
+      if [[ -n "$DB_USER" ]]; then
+        db_name=$(jq -r '.database.primary.name' \
+          "/etc/one-click/db-manager/sites/$domain.json" 2>/dev/null)
+        mysqldump \
+          --single-transaction \
+          "$db_name" \
+          > "$bundle_root/database.sql"
+      fi
+  fi
+  tar -czf "$archive" -C "$bundle_root" .
+  rm -rf "$bundle_root"
+  success "Export created:"
+  echo "$archive"
+}
+fleet_site_import() {
+  local archive="$1"
+  [[ ! -f "$archive" ]] && {
+    error "Archive not found"
+    return 1
+  }
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  tar -xzf "$archive" -C "$tmpdir"
+  domain=$(basename "$archive" .tar.gz)
+  info "Restoring site $domain"
+  cp -a "$tmpdir/site" \
+    "/etc/one-click/sites/$domain"
+  [[ -f "$tmpdir/registry.json" ]] && \
+  cp "$tmpdir/registry.json" \
+    "/etc/one-click/db-manager/sites/$domain.json"
+  [[ -f "$tmpdir/nginx.conf" ]] && {
+  cp "$tmpdir/nginx.conf" \
+    "/etc/nginx/sites-available/$domain.conf"
+  ln -sf \
+    "/etc/nginx/sites-available/$domain.conf" \
+    "/etc/nginx/sites-enabled/$domain.conf"
+  }
+  if [[ -f "$tmpdir/meta.conf" ]]; then
+    source "$tmpdir/meta.conf"
+    if [[ -n "$DB_USER" ]]; then
+      db_name=$(jq -r '.database.primary.name' \
+        "/etc/one-click/db-manager/sites/$domain.json")
+      mysql -e "CREATE DATABASE IF NOT EXISTS \`$db_name\`"
+      mysql "$db_name" < "$tmpdir/database.sql"
+    fi
+  fi
+  nginx -t && systemctl reload nginx
+  rm -rf "$tmpdir"
+  success "Site restored"
+}
+fleet_clone_site() {
+  local domain="$1"
+  local host="$2"
+  [[ -z "$domain" || -z "$host" ]] && {
+    error "Usage: fleet clone-site <domain> <hostname>"
+    return 1
+  }
+  local archive
+  archive=$(fleet_site_export "$domain" | tail -n1)
+  info "Uploading archive"
+  fleet_put \
+    "$host" \
+    "$archive" \
+    "/tmp/$(basename "$archive")"
+  info "Importing on remote host"
+  ANSIBLE_HOST_KEY_CHECKING=False ansible "$host" \
+    -i "$fleet_root/inventory.yml" \
+    -u oneclick \
+    -b \
+    -m shell \
+    -a "
+      one-click fleet site-import /tmp/$(basename "$archive")
+    "
+  success "$domain cloned to $host"
+}
+# ================================================ End Of Fleet ============================================== #
 # ============================================== Directory Listing ============================================
 ls_table() {
   set +u
@@ -1916,11 +2589,7 @@ start_journal_dispatcher() {
 		  kill "$line"
 		  rm "$pid_file"
 		done
-	  #else
-      # return
 	  fi
-    else
-      rm "$pid_file"
     fi
   fi
   if [[ -f /etc/redhat-release ]]; then
@@ -3579,3 +4248,4 @@ remove_service() {
         sudo systemctl daemon-reload
     fi
 }
+
