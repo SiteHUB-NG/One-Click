@@ -17,6 +17,7 @@ collect_sysinfo
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
+install_dep "openssl" "type openssl" "openssl" "$pkg_mgr" true
 mkdir -p /etc/one-click/ocb/benchmarks
 # ==== Check System Resources ====
 clear
@@ -38,6 +39,7 @@ else
   warn "Token unavailable. Will not be able to publish results"
 fi
 no_gb=0
+bench_dir=/etc/one-click/ocb/benchmarks
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
 cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
@@ -170,7 +172,6 @@ print_table() {
   print_row "$key_width" "$val_width" "Connectivity" "$ipv4 / $ipv6"
   print_row "$key_width" "$val_width" "ISP" "$ip_upstream"
   print_row "$key_width" "$val_width" "ASN" "${ip_asn:-Unknown}"
-  print_row "$key_width" "$val_width" "Hostname" "$HOSTNAME"
   print_row "$key_width" "$val_width" "Location" "$location"
   print_row "$key_width" "$val_width" "Country" "$country"
   printf "${blue}└%s┘${reset}\n" "$border"
@@ -239,10 +240,11 @@ run_sysbench() {
   min_time=$(awk -F: '/min:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
   avg_time=$(awk -F: '/avg:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
   max_time=$(awk -F: '/max:/ {gsub(/ /,"",$2); print $2}' <<< "$cpu_output")
+  timestamp=$(date '+%F %T')
   # ==== Config ====
-  printf '%s=%s\n' \
-    "avg_time" "$avg_time" \
-    "max_time" "$max_time" > /etc/one-click/ocb/temp.conf
+    echo "avg_time=$avg_time" >> /etc/one-click/ocb/meta.conf
+    echo "time_taken=$total_time" >> /etc/one-click/ocb/meta.conf
+    echo "max_time=$max_time" >> /etc/one-click/ocb/meta.conf
   # ==== PRINT TABLE ====
   printf "${blue}%s${reset}\n" \
     "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐"
@@ -285,18 +287,33 @@ run_ocb() {
   fio_disk_benchmark
   ram_bench
   iperf_run
+  set +e
   if (( no_gb == 1 )); then
     run_sysbench 
   else
     geekbench_table "${version:-6}" "$gb_path" 
   fi
+  set -e
 }
 run_ocb_pipe() {
+  bench_fail() {
+    cat > "$bench_dir/latest.json" <<EOF
+{
+  "status":"FAILED",
+  "hostname":"$(hostname)",
+  "timestamp":"$(date -u +%FT%TZ)"
+}
+EOF
+    echo "FAILED" > "$bench_dir/job.state"
+    touch "$bench_dir/COMPLETE"
+  }
+  trap bench_fail ERR
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
   gb_check
   if (( no_gb == 1 )); then
     bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').sysbench"
+    echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
     run_ocb | tee -a "$bench_result"
     sed -Ei '
       s/^[^├└T┌│]*//g;
@@ -304,7 +321,7 @@ run_ocb_pipe() {
       /Preparing Geekbench/d
     ' "$bench_result"
     end=$(date +%s)
-    source /etc/one-click/ocb/temp.conf
+    source /etc/one-click/ocb/meta.conf
     if [[ -n "$key" ]]; then
       raw=$(base64 -w 0 "$bench_result")
       response=$(
@@ -335,8 +352,9 @@ run_ocb_pipe() {
     fi
   else
     bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-6}"
+    echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
     run_ocb | tee -a "$bench_result"
-    source /etc/one-click/ocb/temp.conf
+    source /etc/one-click/ocb/meta.conf
     sed -Ei '
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
@@ -377,18 +395,51 @@ run_ocb_pipe() {
     fi
   fi
   total_time "$start" "$end" "$url" "$key"
-  rm -f /etc/one-click/ocb/temp.conf
+  . /etc/one-click/ocb/meta.conf
+  cat > "/etc/one-click/ocb/benchmarks/latest.json" <<EOF
+{
+  "status":"COMPLETE",
+  "Single Core Score":"${single:-}",
+  "Multi Core Score":"${multi:-}",
+  "GeekBench Results":"${gb_url:-}",
+  "One-Click Results":"$url",
+  "Total Time Taken":"$time_taken",
+  "hostname":"$(hostname)",
+  "timestamp":"$(date -u +%FT%TZ)"
+}
+EOF
+  echo "COMPLETE" > "/etc/one-click/ocb/benchmarks/job.state"
+  touch "/etc/one-click/ocb/benchmarks/COMPLETE"
+  rm -f /etc/one-click/ocb/meta.conf
   exit 0
 }
 geek() {
   header_notice "$ocb_header" "$ocb_banner" "3" "62"
   if (( no_gb == 1 )); then
+    init
+    expand_country "${country:-}"
+    print_table
     run_sysbench
   else
+    init
+    expand_country "${country:-}"
+    print_table
     geekbench_table "${version:-6}" "$gb_path"
   fi
 }
 cpu_sys() {
+  bench_fail() {
+    cat > "$bench_dir/latest.json" <<EOF
+{
+  "status":"FAILED",
+  "hostname":"$(hostname)",
+  "timestamp":"$(date -u +%FT%TZ)"
+}
+EOF
+    echo "FAILED" > "$bench_dir/job.state"
+    touch "$bench_dir/COMPLETE"
+  }
+  trap bench_fail ERR
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
   mkdir -p /etc/one-click/ocb
@@ -396,6 +447,7 @@ cpu_sys() {
   if (( no_gb == 1 )); then
     bench_ext="bench_$(date +'%F-%T').sysbench"
     bench_result="/etc/one-click/ocb/benchmarks/$bench_ext"
+    echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
     geek | tee -a "$bench_result"
     sed -Ei '
       s/^[^├└T┌│]*//g;
@@ -403,7 +455,7 @@ cpu_sys() {
       /Preparing Geekbench/d
     ' "$bench_result"
     end=$(date +%s)
-    source /etc/one-click/ocb/temp.conf
+    source /etc/one-click/ocb/meta.conf
     if [[ -n "$key" ]]; then
       raw=$(base64 -w 0 "$bench_result")
       response=$(
@@ -449,6 +501,7 @@ cpu_sys() {
     else
       return
     fi
+    echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
     geek | tee -a "$bench_result"
     sed -Ei '
       s/\x1B\[[0-9;]*[mK]//g;
@@ -457,7 +510,7 @@ cpu_sys() {
       /Preparing Geekbench|Initializing Fio|Running (read|write) test/d;
       s/(hostname[^│]*│ ).*/\1ONE-CLICK REDACTED/I
     '  "$bench_result"
-    source /etc/one-click/ocb/temp.conf
+    . /etc/one-click/ocb/meta.conf
     end=$(date +%s)
     if [[ -n "$key" ]]; then
       raw=$(base64 -w 0 "$bench_result")
@@ -489,6 +542,21 @@ cpu_sys() {
     fi
   fi
   total_time "$start" "$end" "$url" "$key"
-  rm -f /etc/one-click/ocb/temp.conf
+  . /etc/one-click/ocb/meta.conf
+  cat > "/etc/one-click/ocb/benchmarks/latest.json" <<EOF
+{
+  "status":"COMPLETE",
+  "Single Core Score":"${single:-}",
+  "Multi Core Score":"${multi:-}",
+  "GeekBench Results":"${gb_url:-}",
+  "One-Click Results":"$url",
+  "Total Time Taken":"$time_taken",
+  "hostname":"$(hostname)",
+  "timestamp":"$(date -u +%FT%TZ)"
+}
+EOF
+  echo "COMPLETE" > "/etc/one-click/ocb/benchmarks/job.state"
+  touch "/etc/one-click/ocb/benchmarks/COMPLETE"
+  rm -f /etc/one-click/ocb/meta.conf
   exit 0
 }
