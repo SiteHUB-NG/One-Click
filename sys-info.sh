@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.5 === #
 # ====== One-Click ====== #
 # ==== System information widget ====
 build_vars
@@ -18,14 +18,29 @@ hide_mode=true
 cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
-x_site_ip="$(sed -En '/wg0/,$ {/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s))"
-x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0 2> /dev/null))"
+if [[ -f /etc/wireguard/wg0.conf ]]; then
+  if ip link show wg0 &>/dev/null; then
+    x_site_ip="$(sed -En '{/inet /s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s wg0))"
+    x_site_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51820.*/\1/Ip' <(wg showconf wg0 2> /dev/null))"
+  else
+    x_site_ip="OFFLINE (Interface Down)"
+    x_site_gw="N/A"
+  fi
+fi
+if [[ -f /etc/wireguard/one-click.conf ]]; then
+  if ip link show one-click &>/dev/null; then
+    fleet_ip="$(sed -En '{/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s one-click))"
+  else
+    fleet_ip="OFFLINE"
+  fi
+fi
 who_ipv6="$whois_ipv6"
-who_ip="$whois_ip"
+sys_ipd="$sys_ip"
 ipv6_gwd="$ipv6_gw"
 sys_gwd="$sys_gw"
 x_site_gwd="$x_site_gw"
 x_site_ipd="$x_site_ip"
+fleet_ipd="$fleet_ip"
 st=$(date +%s)
 virt=$(systemd-detect-virt || true)
 if ! vnstat -i "$nic" 2>&1 /dev/null; then 
@@ -51,7 +66,7 @@ sys_info() {
       echo "CLEAN (Residential/Other)"
     fi
   }
-  ip_status=$(check_ip_status "$whois_ip")
+  ip_status=$(check_ip_status "$sys_ip")
   center_block() {
     strip_ansi | awk -v w="$term_width" '
     {
@@ -65,19 +80,21 @@ sys_info() {
   whois_ip="$(echo "$whois_ip" | tail -1)"
   hidden() {
     if [[ "$hide_mode" == true ]]; then
-      whois_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ip")
+      sys_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_ip")
       whois_ipv6=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ipv6")
       ipv6_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$ipv6_gw")
       sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_gw")
       x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_ip")
       x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_gw")
+      fleet_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$fleet_ip")
     else
-      whois_ip="$who_ip"
+      sys_ip="$sys_ipd"
       whois_ipv6="$who_ipv6"
       ipv6_gw="$ipv6_gwd"
       sys_gw="$sys_gwd"
       x_site_ip="$x_site_ipd"
       x_site_gw="$x_site_gwd"
+      fleet_ip="$fleet_ipd"
     fi
   }
   hidden
@@ -102,7 +119,11 @@ sys_info() {
       "│ ${key_col}p ${blue}│${desc_col} Pause${blue}  │" \
       "│ ${key_col}r ${blue}│${desc_col} Resume${blue} │" \
       "│ ${key_col}h ${blue}│${desc_col} Hide${blue}   │" \
-      "│ ${key_col}u ${blue}│${desc_col} Unhide${blue} │" \
+      "│ ${key_col}u ${blue}│${desc_col} Unhide${blue} │" 
+    if ! which haveged &> /dev/null; then
+      printf '%s\n' "│ ${key_col}e ${blue}│${desc_col} Entropy${blue}│" 
+    fi
+    printf '%s\n' \
       "│ ${key_col}q ${blue}│${desc_col} Quit${blue}   │" \
       "├───┴────────┼──────────┐" \
       "│${key_col}System Time ${blue}│${desc_col} $(date +'%T')${blue} │" \
@@ -136,16 +157,19 @@ sys_info() {
     # ==== Build System Info ====
     print_section "==================== ${yellow}NETWORK INFO${blue} ==========================│" \
       | sed '1{s/├/┌/;s/┤/┐/;s/┴/─/}'
-    print_row "IP Address" "$whois_ip"
+    print_row "IP Address" "$sys_ip"
     print_row "IP Gateway" "$sys_gw"
     print_row "IP Status" "$ip_status"
     if grep -Eqi 'inet6.*global' <(ip a s "$nic") &> /dev/null; then
       print_row "IPv6 Address" "$whois_ipv6"
       print_row "IPv6 Gateway" "$ipv6_gw"
     fi
-    if command -v wg showconf wg0 &> /dev/null; then
+    if [[ -f /etc/wireguard/wg0.conf ]]; then
       print_row "Cross-Site IP" "$x_site_ip"
       print_row "Cross-Site Endpoint" "$x_site_gw"
+    fi
+    if [[ -f /etc/wireguard/one-click.conf ]]; then
+      print_row "One-Click Mesh IP" "$fleet_ip"
     fi
     expand_country $ip_country
     print_row "IP Country" "$country"
@@ -184,7 +208,6 @@ sys_info() {
   spinner_framess=('/' '|' '\' '-')
   i=0
   refresh=true
-  # ==== Main loop ====
   while true; do
     entropy=$(cat /proc/sys/kernel/random/entropy_avail)
     ent_val="$entropy"
