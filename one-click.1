@@ -2,7 +2,7 @@
 .TH ONE-CLICK 8 "@DATE@" "One-Click v@VERSION@" "One-Click Manual"
 
 .SH NAME
-one-click \- Modular server management, security auditing, and disaster recovery toolkit
+one-click \- Modular orchestration control panel, security auditing, and disaster recovery toolkit
 
 .SH SYNOPSIS
 .B one-click
@@ -21,10 +21,10 @@ Long-running operations execute within a
 session to ensure persistence against SSH disconnects.
 .IP \(bu 2
 .B Safety:
-Destructive operations (reinstall, migrate) require explicit confirmation and hardware-level validation.
+Destructive operations (reinstall, migrate, vps delete) require explicit confirmation and hardware-level validation.
 .IP \(bu 2
 .B Isolation:
-Web services and installers run in dedicated system slices and secured user environments.
+Web services, installers, and private VPS clusters run in dedicated system slices, secure hypervisor pools, and isolated WireGuard networks.
 
 .PP
 The toolkit is suitable for VPS, dedicated servers, and bare-metal systems. Operations may be interactive or fully automated.
@@ -43,10 +43,17 @@ backup | Create incremental or compressed backups locally or remotely.
 boot-recovery | Create or restore boot/root partition snapshots.
 repair | Repair or restore network configurations.
 migrator | Migrate entire systems using block-level or file-level methods.
-migrate | Migrate One-Click configuration files.
+migrate | Migrate One-Click configuration files or entire nodes.
 bench | Run the system benchmark suite (OCB).
 sys-info | Display live system statistics.
 cron | Configure scheduled automation tasks.
+fleet | Centrally orchestrate, audit, and benchmark server clusters via Ansible.
+--vps | Provision and manage KVM instances across fleet nodes or the controller.
+--proxy | Route public edge traffic via HAProxy into isolated NAT instances.
+--wireguard | Slice network mesh backplanes for client VPN access profiles.
+--ssh | Establish immediate SSH tunnels directly into NAT-isolated fleet members.
+clone-site | Clone static, WordPress, Nextcloud, or app instances across fleet peers.
+restore-site | Restore static, WordPress, Nextcloud, or app instances to fleet peers.
 --web-admin | Create a backup of a selected static site.
 --web-create | Install a blank static HTML or PHP website.
 --wp | Basic WordPress and cron management.
@@ -76,6 +83,26 @@ one-click rule-engine "audit scan --init"
 one-click --wp-create
 .RE
 
+.B Deploy KVM Instance on Remote Fleet Peer:
+.RS
+one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 1 --ram 1G --disk 6G --mode nat --password secretpass
+.RE
+
+.B Proxy Public Edge Web Traffic to Private VM:
+.RS
+one-click --proxy --target analytics-vm --website dashboard.internal.net --proto http
+.RE
+
+.B SSH Directly into an Isolated NAT Peer Node:
+.RS
+one-click --ssh peer-name
+.RE
+
+.B Clone an Application and Site Across Peers:
+.RS
+one-click clone-site example.com target-peer-node
+.RE
+
 .B System Migration:
 .RS
 one-click migrate to root@destination-server
@@ -96,11 +123,6 @@ one-click backup
 one-click repair
 .RE
 
-.B Migrate System:
-.RS
-one-click migrate
-.RE
-
 .B View System Information:
 .RS
 one-click sys-info
@@ -115,6 +137,195 @@ one-click cron
 .RS
 one-click uninstall
 .RE
+
+.SH FLEET MANAGER (Ansible Cluster Engine)
+
+The
+.B fleet
+sub-module provides a lightweight, centralized server orchestration and automation engine built directly into One-Click. 
+
+Using Ansible as its foundational execution engine, it enforces a highly secure "Hub-and-Spoke" mesh topology. All cluster nodes retain strict peer-to-peer communication channels, but public exposure is strictly limited: only the central controller maintains broad public access, while remaining target nodes are locked down completely on all non-essential administrative layers.
+
+.SS FLEET SUBCOMMANDS
+
+.TP
+.B init
+Initialize fleet configuration patterns, establish workspace directory trees, and safely generate localized SSH automation cryptographic keys.
+.TP
+.B add <ip> <host> [port]
+Register a new remote target system into fleet tracking configurations, passing administrative automation parameters.
+.TP
+.B remove | rm <host>
+Deletes a tracked remote server profile permanently from the fleet tracking environment.
+.TP
+.B verify
+Test multi-node SSH connectivity and runtime capability simultaneously on all tracked targets via an internal Ansible ping check execution block.
+.TP
+.B update-keys
+Gracefully rotate administration SSH communication keys on both the central controller and active fleet members synchronously without dropping management handles.
+.TP
+.B update
+Run the 'one-click update' execution block simultaneously across all active, reachable fleet targets.
+.TP
+.B audit
+Gather real-time hardware architecture, storage map profiles, and network footprint parameters across the cluster, serializing results locally into JSON payloads.
+.TP
+.B bench
+Execute asynchronous hardware stress benchmarks across multiple hosts simultaneously and fetch complete performance payload matrices back to the controller.
+.TP
+.B rule-engine | engine
+Orchestrate uniform or host-targeted firewall controls across the fleet using centralized security constraints.
+.TP
+.B dir <host> <directory>
+List remote filesystems and operational directory status on target fleet members.
+.TP
+.B put <host> <src> <dest>
+Upload a local file or complete workspace directory payload asynchronously from the controller up to a targeted remote host node.
+.TP
+.B get <host> <src> <dest>
+Download a file away from a remote host node down to the local controller tracking space.
+.TP
+.B raw <host> '<command>'
+Bypass playbooks to execute direct shell configurations instantly inside a secure remote login terminal wrapper.
+.TP
+.B clone-site <site> <peer>
+Clone static sites, WordPress setups, Nextcloud deployments, and application runtimes to a target fleet peer node using automated workflows under the hood.
+.TP
+.B restore-site <site> <peer>
+Restore static, WordPress, Nextcloud, and full application infrastructure deployments across selected fleet targets.
+
+.SH VIRTUAL PRIVATE SERVER (VPS) ENGINE
+
+Using the underlying fleet engine infrastructure, the
+.B --vps
+arm transforms the controller and its fleet members into an orchestrated hypervisor layer. It allows for rapid creation, configuration, and state management of KVM Virtual Machines. 
+
+Newly provisioned instances can be dynamically joined into the orchestration pool as managed endpoints. For targets deployed inside restricted NAT environments, secure access is bridged seamlessly using the built-in tunnel interface.
+
+.SS VPS MANAGEMENT INTERFACE
+
+.TP
+.B create
+Provision a new kernel-isolated KVM virtual machine inside the selected hypervisor peer node or localized controller context.
+.TP
+.B delete
+Gracefully wipe a KVM instance and purge its underlying block allocation mappings on the target hypervisor host.
+.TP
+.B edit
+Modify hardware profiles or runtime configuration values for an existing virtual machine instance.
+.TP
+.B reinstall
+Wipe and reinstall the operating system environment of a target fleet virtual machine peer node.
+.TP
+.B snapshot
+Create, list, restore, or discard point-in-time state captures of target guest virtual machines.
+.TP
+.B backup
+Create, restore, and discard local and remote backups of target guest virtual machines.
+.TP
+.B patch
+Apply operating system patches and platform level updates across target guest nodes or the entirety of your compute fleet.
+.TP
+.B migrate
+Live or cold migrate a running virtual instance off its current host machine onto a separate peer hypervisor node.
+.TP
+.B start
+Power on a stopped guest VPS instance.
+.TP
+.B stop
+Gracefully or forcefully halt a running guest VPS instance.
+.TP
+.B view
+Examine and list all active snapshots tracking against target virtual machines.
+
+.SS PARAMETERS & CAPABILITIES
+
+The following operational switches constrain core VPS behaviors:
+.TP
+.BI \-n, "\-\-name"
+Explicit handle identifier for the virtual instance.
+.TP
+.BI \-t, "\-\-target"
+Designate which active fleet member or hypervisor node to pin the virtualization workspace onto.
+.TP
+.BI \-m, "\-\-mode"
+Set network topology profile. Valid selections are
+.B nat
+(isolated wireguard overlay) or
+.B public
+(directly routable public address space).
+.TP
+.BI \-i, "\-\-image"
+Target ISO or cloud OS metadata image. The platform resolves shorthand labels (e.g., ubuntu24) automatically.
+.TP
+.BI \-d, "\-\-disk"
+Total block storage disk quota allocation string (e.g., 20G).
+.TP
+.BI \-c, "\-\-cpu"
+Count of virtualized vCPU cores pinned to the compute profile.
+.TP
+.BI \-r, "\-\-ram"
+System memory sizing string (e.g., 2G).
+.TP
+.BI \-p, "\-\-ip"
+Flag mapping instruction to assign and bind public-facing IP allocation routes directly to the interface.
+.TP
+.BI \-w, "\-\-password"
+Assign explicit passwords to administrative user environments during setup tasks.
+.TP
+.BI \-l, "\-\-language"
+Explicitly define regional localization settings for targeted Windows installations.
+
+.SS TUNNELING ACROSS NAT
+To establish clean terminal configurations into hypervisor targets restricted behind NAT mappings, execute:
+.IP
+.B one-click \-\-ssh <peer\-name>
+
+.SH PROXY ENGINE
+
+The
+.B \-\-proxy
+sub-system deploys and coordinates HAProxy configurations running directly at the edge of the hypervisor interface. It acts as an ingress layer, taking public traffic requests from the open internet and routing them securely across network constraints to backend nodes inside isolated, non-routable WireGuard NAT environments.
+
+.SS PROXY CONTROL OPTIONS
+
+.TP
+.BI \-t, "\-\-target"
+Define the destination namespace name representing the target NAT virtual machine.
+.TP
+.BI \-w, "\-\-website"
+The Fully Qualified Domain Name (FQDN) assigned to capture and route incoming public HTTP/HTTPS payloads.
+.TP
+.BI \-c, "\-\-proto"
+Traffic enforcement mechanism scheme (e.g., http, https, tcp).
+.TP
+.BI \-s, "\-\-source"
+The active local network port receiving applications listening inside the destination virtual guest environment.
+.TP
+.BI \-p, "\-\-port"
+The public-facing listener port bound onto the hypervisor host edge infrastructure to swallow and pass traffic.
+
+.SH WIREGUARD MESH ENGINE
+
+The
+.B \-\-wireguard
+sub-module manages secure internal networking. It carves an isolated /24 overlay subnet slice cleanly away from the backend mesh backplane, generating modern cryptographic tunnel configurations. This allows external customer environments and client devices to route securely into the isolated fleet array.
+
+.SS WIREGUARD MESH COMMANDS
+
+.TP
+.B add-user
+Create and register cryptographic key profile footprints to append a new client node device safely into the private mesh layer.
+.TP
+.B delete-user
+Revoke and purge a client profile footprint to instantly block mesh access paths.
+.TP
+.B view
+Examine real-time connections, peer tracking metadata, and health stats across active mesh profiles.
+
+.SH DNS MANAGER & REPLICATION
+
+The built-in DNS Manager facilitates naming resolution paths across the network topology. It orchestrates BIND server engines across all tracked fleet peers, providing zone configuration profiles and automating secure zone replication hooks across peers instantly whenever adjustments are recorded. This enables distributed naming availability across independent geographic clusters without risking master sync synchronization drifts.
 
 .SH WORDPRESS & WEB PROVISIONING ENGINE
 
@@ -323,6 +534,7 @@ Database creation rollback where possible
 Installation logs preserved for debugging
 .IP \(bu 2
 SSL failure does not block site deployment
+
 .SH RULE-ENGINE (Firewall Management)
 
 .B Rule-engine
@@ -712,7 +924,7 @@ disable icmp | Block ping responses
 --dry-run | Simulate rules without applying
 .TE
 
-.SS RULE-ENGINE FULL EXAMPLES
+.SH RULE-ENGINE FULL EXAMPLES
 
 These examples demonstrate real-world usage of the rule-engine across firewall control, auditing, intrusion response, and system management.
 
@@ -1730,6 +1942,7 @@ Review destructive commands before execution – especially
 .B reinstall,
 .B migrate,
 .B repair,
+.B \-\-vps delete,
 and
 .B uninstall
 
@@ -1766,7 +1979,11 @@ Chike Egbuna
 .BR top (1),
 .BR htop (1),
 .BR sgdisk (8),
-.BR parted (8)
+.BR parted (8),
+.BR haproxy (1),
+.BR wireguard (8),
+.BR named (8),
+.BR ansible (8)
 
 .SH HOMEPAGE
 
