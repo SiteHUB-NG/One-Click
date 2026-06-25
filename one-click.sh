@@ -10,9 +10,19 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.0 === #
 # ====== One-Click ====== #
 # ==== Initialization ==== 
+# ==== CONFIGURABLE CONFIGURATIONS ====
+# Enable the fleet VPS functionality of One-Click
+ENABLE_VPS=false # true or flase
+# Threshold that LVM will operate with. Default is 5GB
+ALLOC_THRESHOLD=5120
+# The location where the .img loop file is generated
+IMG_STORAGE_PATH="/etc/one-click/virtualization/storage"
+# Firewall monitoring and mitigation
+AUTO_MITIGATION=0 # Flag: 0 = passive, 1 = auto mitigation
+# ============================================
 export TERM="${TERM:-xterm}"
 set -euo pipefail
 shopt -u globstar nullglob
@@ -27,6 +37,7 @@ pub1="-----BEGIN PRIVATE KEY-----"
 base="/etc/one-click"
 deps_ok="${base}/.deps_ok"
 path="$(realpath "$0")"
+fleet_root="/etc/one-click/fleet"
 # ==== Help Menu ====
 if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   printf '%s\n' \
@@ -41,7 +52,6 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  help                    Display this help menu." \
     "  logs | log-browser      Browse and inspect system log files interactively." \
     "  menu                    Central menu with direct access to most tools." \
-    "  migrate                 Migrate system settings, configurations and cron tasks." \
     "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
     "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
     "  fleet                   Run remote commands to your fleet of registered servers" \
@@ -49,6 +59,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  net-repair              Diagnose and repair network configuration issues." \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
+    "  clone-site              Clone any website/app to any of your fleet peers" \
+    "  restore-site            Package and restore from a fleet peer remote site/app to localhost" \
+    "  mv                      Move directory and contents to fleet member." \
     "  --web-admin             Create a backup of selected static site." \
     "  --web-create            Install a blank static html or php website." \
     "  --wp                    Basic wordpress and cron management." \
@@ -58,10 +71,14 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
     "  --nextcloud-create      Create a new instance of an isolated Nextcloud" \
     "  --nextcloud-admin       Manage Nextcloud instances" \
-    "  --dns                   Manage DNS with Cloudflare" \
+    "  --wireguard             Enable external devices access to your secure internal mesh." \
+    "  --ssh <peer_name>       Connect directly to a peer via ssh." \
+    "  --dns                   Manage DNS with BIND, Cloudflare etc" \
     "  --db-admin              Manage Databases and create temp front UI." \
+    "  --proxy                 Routes public web traffic or custom TCP streams safely through the NAT fleet hypervisor" \
     "  --ssl                   Install SSL for wordpress or any other virtual host." \
     "  --php                   Manage system-wide or per site php settings." \
+    "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments." \
     "  --version               Check version" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -82,6 +99,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  restore                 Restore firewall rules from a previously saved backup." \
     "  raw <iptables cmd>      Execute raw iptables commands directly." \
     "                          Useful for advanced or unsupported rules." "" \
+    "  chain create <chain>    Create a custom firewall chain." \
     "$(tput smul)$(tput bold)Traffic Rules$(tput sgr0)$(tput rmul)" \
     "  allow <arg>             Accept incoming traffic." \
     "                          Example: allow 443" \
@@ -99,6 +117,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "                          Example: allow ssh from office" \
     "  to <destination>        Specify the destination IP or interface." \
     "                          Example: allow 443 to 10.0.0.5" "" \
+    "  <rule> chain <chain>    Pass rule via a custom chain" \
     "$(tput smul)$(tput bold)Protocol Control$(tput sgr0)$(tput rmul)" \
     "  enable icmp | echo      Enable ICMP echo requests (ping)." \
     "  disable icmp | echo     Disable ICMP echo requests." \
@@ -153,9 +172,6 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  one-click engine 'allow ssh from office and deny ssh from blacklist'" \
     "      Combine alias groups with rule chaining." "" \
     "  one-click engine 'audit scan --init'" \
-    "  one-click migrate export" \
-    "  one-click migrate export to 1.2.3.4" \
-    "  one-click migrate import <backup>" "" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  fleet                   Fleet is a lightweight, centralized server orchestration and automation" \
     "                          engine built directly into One-Click." \
@@ -166,14 +182,70 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  remove | rm <host>      Deletes a server profile from the fleet tracking environment." \
     "$(tput smul)$(tput bold)Orchestration Commands$(tput sgr0)$(tput rmul)" \
     "  verify                  Test SSH connectivity on all tracked targets via an Ansible ping check." \
+    "  update-keys             Rotate SSH Keys on controller and fleet" \
     "  update                  Run 'one-click update' simultaneously across the active fleet." \
     "  audit                   Gather real-time hardware architecture profiles and save locally as JSON." \
     "  bench                   Execute async hardware benchmarks across hosts and fetch result payloads." \
+    "  rule-engine | engine    Fleet firewall management via rule-engine" \
     "$(tput smul)$(tput bold)Operational Commands$(tput sgr0)$(tput rmul)" \
     "  dir <host> <directory>  List remote fleet members directories" \
     "  put <host> <src> <dest> Upload a local file or directory up to a target remote host." \
     "  get <host> <src> <dest> Download a target file away from a remote host down to your machine." \
-    "  raw <host> '<command>'  Execute direct shell commands instantly inside a remote login shell." ""
+    "  raw <host> '<command>'  Execute direct shell commands instantly inside a remote login shell." \
+    "  one-click clone-site <site> <peer>      Clone static, wordpress, nextcloud and apps easily with fleet under the hood" \
+    "  one-click restore-site <site> <peer>    Restore static, wordpress, nextcloud and apps easily" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  --vps                   Using the fleet engine, create KVM VPS on fleet members or the controller" \
+    "                          and add as additional fleet member for immediate easy mangement " \
+    "                          To ssh into NAT fleet members, use 'one-click --ssh <peer-name>'" \
+    "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
+    "  create                  Create a new KVM instance on the selected peer member" \
+    "  delete                  Delete a KVM instance on a selected peer hypervisor" \
+    "  edit                    Edit a VPS' configuration" \
+    "  reinstall               Reinstall the OS of a target fleet peer." \
+    "  snapshot                Create, delete and restore snapshots" \
+    "  backup                  Create, delete and restore backups" \
+    "  patch                   Patch a target node or entire fleet." \
+    "  migrate                 Migrate VPS instance to another hypervisor." \
+    "  start                   Start a VPS instance" \
+    "  stop                    Stop a VPS instance " \
+    "  view                    View available snapshots" \
+    "$(tput smul)$(tput bold)Core Command Options$(tput sgr0)$(tput rmul)" \
+    "    -n|--name             Instance name" \
+    "    -t|--target           Fleet member hypervisor to deploy to" \
+    "    -m|--mode             Instance mode, nat or public" \
+    "    -i|--image            ISO image to use. Will dynamically locate shorthand names" \
+    "    -d|--disk             Size of storage to create" \
+    "    -c|--cpu              Amount of vCPU cores to add to the instance" \
+    "    -r|--ram              Amount of RAM to add to the instance" \
+    "    -p|--ip               Add this flag when adding a public IP" \
+    "    -w|--password         Set the password for the oneclick admin user" \
+    "    -l|--language         Set the language for Windows installations." \
+    "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
+    "    one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 1 --ram 1G --disk 6G --mode nat --password <password>" \
+    "    one-click --vps snapshot create --target web1 --name backup_v1" \
+    "    one-click --vps migrate --target web1 --name <vm_name>" \
+    "    one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  --proxy                 The proxy engine configures HAProxy instances running at the hypervisor layer to safely bridge" \
+    "                          public internet requests into your isolated, non-routable WireGuard NAT private fleet." \
+    "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
+    "    -t|--target            The name of the destination NAT virtual machine." \
+    "    -w|--website           The Fully Qualified Domain Name (FQDN) assigned to handle traffic." \
+    "    -c|--proto             Traffic schema protocol constraint." \
+    "    -s|--source            The actual application port listening inside the destination VM." \
+    "    -p|--port              The public port opened up on the hypervisor edge to receive traffic." \
+    "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
+    "  Port:  one-click --proxy --target web1 --source 22 --port 8822" \
+    "  Web: one-click --proxy --target analytics-vm --website dashboard.internal.net --proto http" \
+    "────────────────────────────────────────────────────────────────────────────" \
+    "  --wireguard               The WireGuard user engine carves an isolated /24 network slice from your internal" \
+    "                            mesh backplane, dynamically provisioning secure cryptographic access profiles that allow" \
+    "                            external client devices (e.g., Windows) to securely route directly into your private fleet." \
+    "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
+    "    add-user                Add new device profiles to the secure mesh." \
+    "    delete-user             Delete stale profiles from accessing the mesh" \
+    "    view                    View active profiles" ""
 exit 0
 fi
 # ==== Confirm Package Manager ====
@@ -196,8 +268,9 @@ recovery_base="${base}/boot-recovery-tool"
 recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
+nic=$(echo "$nic" | head -n 1 | xargs)
 sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
-updated="March 2026"
+updated="June 2026"
 version="1.2.0"
 priv1="-----END PRIVATE KEY-----"
 service_name="resumable-rsync-$(date +%s)"
@@ -319,20 +392,20 @@ load_body() {
   if [[ ! -f "$cache_file" || $cache_age -gt $ttl ]]; then
     # ==== Try and pull from Github ====
     if curl -fsSL --connect-timeout 5 --max-time 10 \
-         "$url" -o "$cache_file.tmp" &> /dev/null; then
-        mv -f "$cache_file.tmp" "$cache_file"
-        chmod +x "$cache_file"
+        "$url" -o "$cache_file.tmp" &> /dev/null; then
+      mv -f "$cache_file.tmp" "$cache_file"
+      chmod +x "$cache_file"
     # ==== Try as214354 if primary fails ====
     elif [[ -n "$backup_url" ]] && \
-         curl -fsSL --connect-timeout 5 --max-time 10 \
-         "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
-        warn "Primary failed, loaded from backup mirror"
-        mv -f "$cache_file.tmp" "$cache_file"
+      curl -fsSL --connect-timeout 5 --max-time 10 \
+        "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
+      warn "Primary failed, loaded from backup mirror"
+      mv -f "$cache_file.tmp" "$cache_file"
     else
-        if [[ ! -f "$cache_file" ]]; then
-            error "Failed to download module (primary + backup) and no cache available"
-        fi
-        warn "Network unavailable, using cached module"
+      if [[ ! -f "$cache_file" ]]; then
+        error "Failed to download module (primary + backup) and no cache available"
+      fi
+      warn "Network unavailable, using cached module"
     fi
   fi
   # ==== Use cache if both mirrors unavailable ====
@@ -349,6 +422,13 @@ backup_scanner_url=""
 # ==== Alt Mirror ====
 #backup_scanner_url="https://as214354.network/scanner.py"
 scanner_cache_file="${cache_dir:-}/scanner.py"
+load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
+# ==== Guard ====
+scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/wordpress.sh"
+backup_scanner_url=""
+# ==== Alt Mirror ====
+#backup_scanner_url="https://as214354.network/wordpress.sh"
+scanner_cache_file="${cache_dir:-}/wordpress.sh"
 load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
 # ==== Functions ====
 func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
@@ -488,6 +568,7 @@ load_ocb() {
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
+# ==== One-Click Rule Engine ====
 load_rule_engine() {
   local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/rule_engine.sh"
   local backup_url=""
@@ -502,7 +583,6 @@ load_rule_engine() {
 if [[ "${1:-}" == "-s" || "${1:-}" == "--sys-info" || "${1:-}" == "sys-info" || "${1:-}" == "system-info" || "${1:-}" == "system" ]]; then
   load_system
   sys_info
-  shift
   exit 0
 fi
 profile_arg=""
@@ -524,248 +604,398 @@ if [ "$EUID" -ne 0 ]; then
 fi
 # ==== Firewall Rule Engine - Skip TMUX ====
 if [[ "${1:-}" == "rule-engine" || "${1:-}" == "engine" || "${1:-}" == "firewall" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    printf '%s\n' \
+    "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+    "${red}║${reset} ${cyan}Usage:${reset} one-click engine 'allow all from 1.2.3.4'       ${red}║${reset}" \
+    "${red}║${reset}        one-click engine 'enable icmp and allow nginx'  ${red}║${reset}" \
+    "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
   load_rule_engine
-  rule_engine "${2:-}" "${3:-}"
-  exit 0
-fi
-# ==== Migrate - Skip TMUX ====
-conf_export() {
-  rules_dir="${base}/rule-engine"
-  crontab_file="${migration_dir}/one-click-crontab.bak"
-  cron_file="${migration_dir}/one-click-cron.bak"
-  [[ -d "$rules_dir" ]] || mkdir -p "$rules_dir"
-  info "Backing up cron tasks"
-  crontab -l > "$crontab_file" 2>/dev/null
-  [[ -f /etc/cron.d/one-click-scanner ]] && cp /etc/cron.d/one-click-scanner "$cron_file"
-  if [[ "${1:-}" == "to" ]]; then
-    conf_migrate "${2:-}"
-  else
-    success "Configuration prepared for migration."
-  fi
-}
-conf_import() {
-  archive="${1:-}"
-  if [[ ! -f "$archive" ]]; then
-    error "Archive not found."
-    exit 1
-  fi
-  info "Removing default configuration"
-  [[ -d "$base" ]] && rm -rf "$base"
-  info "Extracting files and directories."
-  tar -xzf "$archive" -C /etc #&> /dev/null
-  info "Restoring cron tasks"
-  [[ -f "${migration_dir}/one-click-crontab.bak" ]] && {
-    (cat "${migration_dir}/one-click-crontab.bak"; crontab -l) | sort -u | crontab -
-    rm -f "${migration_dir}/one-click-crontab.bak"
-  }
-  [[ -f "${migration_dir}/one-click-cron.bak" ]] && {
-    cp "${migration_dir}/one-click-cron.bak" /etc/cron.d/one-click-scanner
-    rm -f "${migration_dir}/one-click-cron.bak"
-  }
-  chattr +i /etc/one-click/backup/guard/system_baseline.json
-  success "Migration import complete."
-}
-conf_migrate() {
-  target="${1:-}"
-  [[ -z "$target" ]] && {
-    error "No migration target specified."
-    exit 1
-  }
-  read -rsp "${target}'s password: " ssh_pass
-  echo
-  info "Sending configuration to $target"
-  sshpass -p "$ssh_pass" rsync -az --delete --info=progress2 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10" \
-    /etc/one-click/ "$target:/etc/one-click/"
-  sshpass -p "$ssh_pass" rsync -az --info=progress2 -e "ssh -o StrictHostKeyChecking=no" "$migration_dir/" "$target:$migration_dir/"
-  success "Configuration synced."
-  echo
-  success "Import to ${target#*@} complete."
-  info "You can complete the migration manually at a later time or allow this script to finish it."
-  read -rp "${cyan}[USER]${reset} Complete migration now (y|n): " migrate
-  migrate="${migrate,,}"
-  if [[ "$migrate" == "y" || "$migrate" == "yes" ]]; then
-    sshpass -p "$ssh_pass" ssh -t -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$target" "
-    
-      export PATH=\$PATH:/usr/local/bin
-      active_ser=1
-      echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Checking if one-click is available on ${target#*@}
-      if ! command -v one-click >/dev/null 2>&1; then
-        active=0
-        echo \$(tput setaf 11)[WARN]:\$(tput sgr 0) Installing one-click...
-        curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh
-        bash /tmp/one-click.sh peer from $sys_ip
-        rm -f /tmp/one-click.sh
-      else
-        echo \$(tput setaf 2)[SUCCESS]\$(tput sgr 0) one-click is already installed.
-      fi
-      echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Restoring cron tasks
-      if [[ -f ${migration_dir}/one-click-crontab.bak ]]; then
-        if (cat ${migration_dir}/one-click-crontab.bak; crontab -l) | sort -u | crontab -; then
-          tab=1
-        fi
-        rm -f ${migration_dir}/one-click-crontab.bak
-      fi
-      if [[ -f ${migration_dir}/one-click-cron.bak ]]; then
-        cp ${migration_dir}/one-click-cron.bak /etc/cron.d/one-click-scanner
-        rm -f ${migration_dir}/one-click-cron.bak
-      fi
-      if [[ -f /etc/cron.d/one-click-scanner && \$tab -eq 1 ]]; then
-        echo \$(tput setaf 2)[SUCCESS]\$(tput sgr 0) Cron tasks successfully restored
-      fi
-      if [[ -f /etc/one-click/backup/guard/system_baseline.json ]]; then
-        chattr +i /etc/one-click/backup/guard/system_baseline.json
-        echo \$(tput setaf 4)[INFO]:\$(tput sgr0) Immutable flag applied.
-      fi
-      if [[ \$active_ser -eq 1 ]]; then
-        one-click peer from $sys_ip
-      fi
-    "
-    success "Migration successful to ${target#*@}"
-    info "Please now use migrator to migrate your system and data"
-  fi
-}
-if [[ "${1:-}" == "migrate" ]]; then
-  if [[  "${4:-}" =~ @([0-9.a-fA-F:]+)$ ]]; then
-    migration_ip="${BASH_REMATCH[1]}"
-    if [[ ! "$migration_ip" =~ ([0-9]{1,3}\.){2}[0-9]+|([0-9a-fA-F]:)+ ]]; then
-      die "Invalid IP"
-    fi
-  fi
-  migration_dir="$base/migrate"
-  mkdir -p "$migration_dir"
-  case "${2:-}" in
-    export) conf_export "${3:-}" "${4:-}" ;;
-    import) conf_import "${3:-}"          ;;
-    *)
-      echo "Usage: one-click migrate {export|import <archive>|to <user@host>}"
-      exit 1
-      ;;
-  esac
+  rule_engine "$2" "${3:-}" "${4:-}"
   exit 0
 fi
 # ==== MAIN MENU ====
 one_click_menu() {
-  local rule int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
+  local rule int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net choice
   skip_check=0
-  out=$(ip -s link show "$nic")
+  out=$(ip -s link show "$nic" 2>/dev/null)
   isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
-  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
+  dns_time=$(awk '/Query time/{print $4}' <(dig google.com 2>/dev/null) || echo "0")
   if command -v netstat &> /dev/null; then
     retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
   elif command -v nstat &> /dev/null; then
-    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs 2>/dev/null))
   fi
   gw=$(awk '/default/{print $3}' <(ip r))
   dev=$(awk '/default/{print $5}' <(ip r))
-  gw6=$(awk '/default/{print $3}' <(ip -6 r))
-  dev6=$(awk '/default/{print $5}' <(ip -6 r))
-  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
-  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
+  gw6=$(awk '/default/{print $3}' <(ip -6 r 2>/dev/null))
+  dev6=$(awk '/default/{print $5}' <(ip -6 r 2>/dev/null))
+  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6" 2>/dev/null) | head -n 1)
+  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev" 2>/dev/null))
   rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
   rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
   tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
   tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
-  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  int=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
   while true; do
-    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}TOOL${blue}" "${yellow}COMMAND${blue}"
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
-      "${magenta}1${blue}"  "${blue}Rule Engine Dry Run${blue}" "${blue}one-click engine --dry-run${blue}" \
-      "${magenta}2${blue}"  "${blue}Rule Engine${blue}"         "${blue}one-click engine${blue}" \
-      "${magenta}3${blue}"  "${blue}Backups${blue}"             "${blue}one-click backup${blue}" \
-      "${magenta}4${blue}"  "${blue}Benchmark${blue}"           "${blue}one-click bench${blue}" \
-      "${magenta}5${blue}"  "${blue}Migrator${blue}"            "${blue}one-click migrator${blue}" \
-      "${magenta}6${blue}"  "${blue}Migrate${blue}"             "${blue}one-click migrate${blue}" \
-      "${magenta}7${blue}"  "${blue}Boot Recovery${blue}"       "${blue}one-click recovery${blue}" \
-      "${magenta}8${blue}"  "${blue}OS Reinstall${blue}"        "${blue}one-click reinstall${blue}" \
-      "${magenta}9${blue}"  "${blue}Network Repair${blue}"      "${blue}one-click net-repair${blue}" \
-      "${magenta}10${blue}"  "${blue}System Information${blue}"  "${blue}one-click system${blue}" \
-      "${magenta}11${blue}" "${blue}Cron Manager${blue}"        "${blue}one-click cron${blue}" \
-      "${magenta}12${blue}" "${blue}Log Browser${blue}"         "${blue}one-click logs${blue}"
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
-      "${magenta}13${blue}" "${blue}Security Audit${blue}" "${blue}one-click engine audit${blue}" \
-      "${magenta}14${blue}" "${blue}Security (IDS) Scan${blue}"     "${blue}one-click engine 'audit scan'${blue}" \
-      "${magenta}15${blue}" "${blue}Firewall Ban List${blue}"   "${blue}one-click engine 'audit banlist'${blue}" \
-      "${magenta}16${blue}" "${blue}Malicious DROP History${blue}" "${blue}one-click engine 'audit history'${blue}" \
-      "${magenta}17${blue}" "${blue}Drop IP${blue}"         "${blue}one-click engine 'audit drop <ID>'${blue}" 
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
-      "${magenta}18${blue}" "${blue}WordPress Installer${blue}" "${blue}one-click --wp-create${blue}" \
-      "${magenta}19${blue}" "${blue}WordPress Admin${blue}"     "${blue}one-click --wp-admin${blue}" \
-      "${magenta}20${blue}" "${blue}WordPress Manager${blue}"   "${blue}one-click --wp${blue}" \
-      "${magenta}21${blue}" "${blue}Static Web Installer${blue}" "${blue}one-click --web-create${blue}" \
-      "${magenta}22${blue}" "${blue}Web Manager${blue}"         "${blue}one-click --web-admin${blue}" \
-      "${magenta}23${blue}" "${blue}Issue SSL${blue}"         "${blue}one-click --ssl${blue}" \
-      "${magenta}24${blue}" "${blue}PHP Manager${blue}"         "${blue}one-click --php${blue}"
-     printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
-      "${magenta}25${blue}" "${blue}Network Health${blue}" "${blue}N/A${blue}" 
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
-      "${magenta}97${blue}" "${blue}How To Use${blue}"          "${blue}man one-click${blue}" \
-      "${magenta}98${blue}" "${blue}Update One-Click${blue}"    "${blue}one-click update${blue}" \
-      "${magenta}99${blue}" "${blue}Uninstall One-Click${blue}" "${blue}one-click uninstall${blue}" \
-      "${red}0${blue}"  "${blue}Exit Menu${blue}"           "${red}exit${blue}"
-    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    printf "${blue}┌────┬───────────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-43s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}SYSTEM CONTROL PLATFORM MAIN MENU${blue}" "${yellow}ROUTING DOMAIN${blue}"
+    printf "${blue}├────┼───────────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-43s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}System Utilities${blue}"      "${blue}System tools, OCB, Cron, Logs${blue}" \
+      "${magenta}2${blue}"  "${blue}Security${blue}"              "${blue}Rule Engine, IDS, Audit${blue}" \
+      "${magenta}3${blue}"  "${blue}Web & Applications${blue}"    "${blue}DB Manager, WordPress, SSL, DNS${blue}" \
+      "${magenta}4${blue}"  "${blue}Fleet Infrastructure${blue}"  "${blue}Hypervisors, Proxies, HA, Snapshots${blue}" \
+      "${magenta}5${blue}"  "${blue}Network Manager${blue}"       "${blue}Sys-stat, network recovery${blue}"
+    printf "${blue}├────┼───────────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-43s │ %-46s │${reset}\n" \
+      "${magenta}97${blue}" "${blue}How To Use${blue}"            "${blue}man one-click${blue}" \
+      "${magenta}98${blue}" "${blue}Update One-Click${blue}"      "${blue}one-click update${blue}" \
+      "${magenta}99${blue}" "${blue}Uninstall One-Click${blue}"   "${blue}one-click uninstall${blue}" \
+      "${red}0${blue}"      "${blue}Exit Menu${blue}"             "${red}exit${blue}"
+    printf "${blue}└────┴───────────────────────────────────┴──────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Enter option ${magenta}number${reset}: " choice
     case "$choice" in
-      1) 
-        read -rp "${cyan}[USER]:${reset} Enter what you would like the firewall to do: (e.g drop ssh)
-        ${orange}[RULE]:${reset}: " rule
-        rule="${rule,,}"
-        one-click engine --dry-run "$rule" ;;
-      2) 
-        read -rp "${cyan}[USER]:${reset} Enter what you would like the firewall to do: (e.g allow nginx from 1.2.3.4)
-        ${orange}[RULE]:${reset}: " rule
-        rule="${rule,,}"
-        one-click engine "$rule" ;;
-      3) one-click backup        ;;
-      4) one-click bench         ;;
-      5) one-click migrator      ;;
-      6) one-click migrate       ;;
-      7) one-click recovery      ;;
-      8) one-click reinstall     ;;
-      9) one-click net-repair    ;;
-      10) one-click system       ;;
-      11) one-click cron         ;;
-      12) one-click logs         ;;
-      13) one-click engine audit           ;;
-      14) one-click engine 'audit scan'    ;;
-      15) one-click engine 'audit banlist' ;;
-      16) one-click engine 'audit history' ;;
-      17) 
-        one-click engine 'audit ssh'
-        read -rp "${cyan}[USER]:${reset} Enter ID of IP to drop: " drop_ip
-        if [[ ! "$drop_ip" =~ [0-9] ]]; then
-          warn "Invalid ID!"
-          break
-        fi
-        one-click engine "audit drop $drop_ip"
-        ;;
-      18) one-click --wp-create  ;;
-      19) one-click --wp-admin   ;;
-      20) one-click --wp         ;;
-      21) one-click --web-create ;;
-      22) one-click --web-admin  ;;
-      23) one-click --ssl        ;;
-      24) one-click --php        ;;
-      25) 
-        load_net_repair
-        health_check menu        ;;
-      97) man one-click          ;;
-      98) one-click update       ;;
-      99) one-click uninstall    ;;
-      0) break                   ;;
-      *) echo "Invalid option"   ;;
+      1) show_core_menu        ;;
+      2) show_security_menu    ;;
+      3) show_web_menu         ;;
+      4) show_fleet_menu       ;;
+      5) show_network_menu     ;;
+      97) man one-click        ;;
+      98) one-click update     ;;
+      99) one-click uninstall  ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
     esac
     echo
+  done
+}
+show_network_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}NETWORK UTILITIES${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Network Status${blue}"          "${blue}N/A${blue}" \
+      "${magenta}2${blue}"  "${blue}Network Recovery${blue}"        "${blue}one-click net-repair${blue}" \
+      "${magenta}3${blue}"  "${blue}DNS Management${blue}"          "${blue}one-click --dns${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select core utility: " sub_ch
+    case "$sub_ch" in
+      1) load_net_repair && health_check menu ;;
+      2) one-click net-repair                 ;;
+      3) one-click --dns                      ;;
+      0) break                                ;;
+      *) echo "Invalid option"                ;;
+    esac
+  done
+}
+show_core_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}CORE UTILITIES${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}System Information${blue}"          "${blue}one-click system${blue}" \
+      "${magenta}2${blue}"  "${blue}OCB - Benchmark Node${blue}"        "${blue}one-click bench${blue}" \
+      "${magenta}3${blue}"  "${blue}Log Browser${blue}"                 "${blue}one-click logs${blue}" \
+      "${magenta}4${blue}"  "${blue}Cron Manager${blue}"                "${blue}one-click cron${blue}" \
+      "${magenta}5${blue}"  "${blue}Backups Manager${blue}"             "${blue}one-click backup${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select core utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click system      ;;
+      2) one-click bench       ;;
+      3) one-click logs        ;;
+      4) one-click cron        ;;
+      5) one-click backup      ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
+  done
+}
+show_security_menu() {
+  local rule drop_ip
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}SECURITY & FIREWALL${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Rule Engine Dry Run${blue}"          "${blue}one-click engine --dry-run${blue}" \
+      "${magenta}2${blue}"  "${blue}Commit Firewall Rule${blue}"         "${blue}one-click engine${blue}" \
+      "${magenta}3${blue}"  "${blue}View Server Security Audit${blue}"   "${blue}one-click engine audit${blue}" \
+      "${magenta}4${blue}"  "${blue}Run Security (IDS) Scan${blue}"      "${blue}one-click engine 'audit scan'${blue}" \
+      "${magenta}5${blue}"  "${blue}View Firewall Ban List${blue}"       "${blue}one-click engine 'audit banlist'${blue}" \
+      "${magenta}6${blue}"  "${blue}View DROP History${blue}"            "${blue}one-click engine 'audit history'${blue}" \
+      "${magenta}7${blue}"  "${blue}Drop Offending IP${blue}"           "${blue}one-click engine 'audit drop <ID>'${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select security utility: " sub_ch
+    case "$sub_ch" in
+      1)
+        read -rp "${cyan}[USER]:${reset} Enter rule target description (e.g., drop ssh): " rule
+        one-click engine --dry-run "${rule,,}" -y;;
+      2)
+        read -rp "${cyan}[USER]:${reset} Enter a firewall rule description (e.g., allow nginx from 1.2.3.4): " rule
+        one-click engine "${rule,,}"      ;;
+      3) one-click engine audit           ;;
+      4) one-click engine 'audit scan'    ;;
+      5) one-click engine 'audit banlist' ;;
+      6) one-click engine 'audit history' ;;
+      7)
+        one-click engine 'audit ssh'
+        read -rp "${cyan}[USER]:${reset} Enter ID of target IP to drop: " drop_ip
+        if [[ "$drop_ip" =~ ^[0-9]+$ ]]; then
+          one-click engine "audit drop $drop_ip"
+        else
+          echo "Invalid ID format."
+        fi                     ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
+  done
+}
+show_web_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}WEB, DB & APPLICATIONS ${blue}" "${yellow}PURPOSE${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}WordPress${blue}"             "${blue}Manage Wordpress Sites${blue}" \
+      "${magenta}2${blue}"  "${blue}Static Sites${blue}"          "${blue}Manage Static Sites${blue}" \
+      "${magenta}3${blue}"  "${blue}NextCloud${blue}"             "${blue}Manage NextCloud Installs${blue}" \
+      "${magenta}4${blue}"  "${blue}NodeJS${blue}"                "${blue}Manage NodeJS Installations${blue}" \
+      "${magenta}5${blue}"  "${blue}DB Manager${blue}"            "${blue}Manage DB and UI${blue}" \
+      "${magenta}6${blue}"  "${blue}PHP Manager${blue}"           "${blue}Manage PHP Pools and Isolation${blue}" \
+      "${magenta}7${blue}"  "${blue}Issue SSL Certificate${blue}" "${blue}Issue Let'sEncrypt SSL${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"     "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select application utility: " sub_ch
+    case "$sub_ch" in
+      1) show_wordpress_menu   ;;
+      2) show_static_menu      ;;
+      3) show_nextcloud_menu   ;;
+      4) show_nodejs_menu      ;;
+      5) one-click --db-admin  ;;
+      6) one-click --php       ;;
+      7) one-click --ssl       ;;
+      8) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
+  done
+}
+show_wordpress_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}WEB & APPLICATION SPACE${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}WordPress Installer${blue}"          "${blue}one-click --wp-create${blue}" \
+      "${magenta}2${blue}"  "${blue}WordPress Admin Panel${blue}"        "${blue}one-click --wp-admin${blue}" \
+      "${magenta}3${blue}"  "${blue}WordPress Core Manager${blue}"       "${blue}one-click --wp${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select application utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click --wp-create  ;;
+      2) one-click --wp-admin   ;;
+      3) one-click --wp         ;;
+      0) break                  ;;
+      *) echo "Invalid option"  ;;
+    esac
+  done
+}
+show_static_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}WEB & APPLICATION SPACE${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Static Web Installer${blue}"         "${blue}one-click --web-create${blue}" \
+      "${magenta}2${blue}"  "${blue}Static Web Admin${blue}"             "${blue}one-click --web-admin${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select application utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click --web-create ;;
+      2) one-click --web-admin  ;;
+      0) break                  ;;
+      *) echo "Invalid option"  ;;
+    esac
+  done
+}
+show_nextcloud_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}WEB & APPLICATION SPACE${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}NextCloud Installer${blue}"         "${blue}one-click --nextcloud-create${blue}" \
+      "${magenta}2${blue}"  "${blue}Nextcloud Admin${blue}"             "${blue}one-click --nextcloud-admin${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select application utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click --nextcloud-create ;;
+      2) one-click --nextcloud-admin  ;;
+      0) break                        ;;
+      *) echo "Invalid option"        ;;
+    esac
+  done
+}
+show_nodejs_menu() {
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}WEB & APPLICATION SPACE${blue}" "${yellow}COMMAND${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}NodeJS Installer${blue}"         "${blue}one-click --nodejs-create${blue}" \
+      "${magenta}2${blue}"  "${blue}NodeJS Admin${blue}"             "${blue}one-click --nodejs-admin${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"        "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select application utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click --nodejs-create ;;
+      2) one-click --nodejs-admin  ;;
+      0) break                     ;;
+      *) echo "Invalid option"     ;;
+    esac
+  done
+}
+show_fleet_menu() {
+  local target name proto src p_port action
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}List Fleet Members${blue}"          "${blue}one-click fleet list${blue}" \
+      "${magenta}3${blue}"  "${blue}Basic Fleet Management${blue}"      "${blue}one-click fleet patch <all|node>${blue}" \
+      "${magenta}2${blue}"  "${blue}VPS Cluster Management${blue}"      "${blue}one-click fleet stop <target>${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
+    case "$sub_ch" in
+      1) one-click fleet list  ;;
+      2) fleet_manager_menu    ;;
+      3) vps_manager_menu      ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
+  done
+}
+vps_manager_menu() {
+  local target name proto src p_port action
+  while true; do
+    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
+    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Start VM Instance${blue}"              "${blue}one-click --vps start <vm_name>${blue}" \
+      "${magenta}2${blue}"  "${blue}Stop VM Instance${blue}"               "${blue}one-click --vps stop <vm_name>${blue}" \
+      "${magenta}3${blue}"  "${blue}Cluster Node Patch${blue}"             "${blue}one-click --vps patch <all|vm_name> -f${blue}" \
+      "${magenta}4${blue}"  "${blue}NAT DNS Forwarder${blue}"              "${blue}one-click --proxy --target -s <port> -d <port>${blue}" \
+      "${magenta}5${blue}"  "${blue}Snapshot Manager${blue}"               "${blue}N/A${blue}" \
+      "${magenta}6${blue}"  "${blue}View Available Snapshots${blue}"       "${blue}one-click --vps view${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"              "${blue}return${blue}"
+    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
+    case "$sub_ch" in
+      1)
+        read -rp "${cyan}[USER]:${reset} Enter VM name to boot: " target
+        [[ -n "$target" ]] && one-click --vps "start" "$target" ;;
+      2)
+        read -rp "${cyan}[USER]:${reset} Enter VM name to halt: " target
+        [[ -n "$target" ]] && one-click --vps "stop" "$target" ;;
+      3)
+        read -rp "${cyan}[USER]:${reset} Target scope (type 'all' or specific host): " target
+        read -rp "${cyan}[USER]:${reset} Force complete dist-upgrade upgrade? (y/N): " choice
+        if [[ "${choice,,}" == "y" ]]; then
+          one-click --vps patch "$target" "-f"
+        else
+          one-click --vps patch "$target"
+        fi
+        ;;
+      4)
+        read -rp "${cyan}[USER]:${reset} Is this a website configuration? (y/N): " choice
+        read -rp "${cyan}[USER]:${reset} Enter Target VM Name: " target
+        if [[ "${choice,,}" == "y" ]]; then
+          read -rp "${cyan}[USER]:${reset} Enter FQDN Website Domain (e.g., example.com): " name
+          read -rp "${cyan}[USER]:${reset} Protocol (http/https): " proto
+          one-click --proxy --target "$target" --website "$name" --proto "${proto:-http}"
+        else
+          read -rp "${cyan}[USER]:${reset} Enter application port inside VM (e.g., 22): " src
+          read -rp "${cyan}[USER]:${reset} Enter exposed public port on Hypervisor: " p_port
+          one-click --proxy --target "$target" --source "$src" --port "$p_port"
+        fi
+        ;;
+      5)
+        while true; do
+          printf "${blue}┌────┬──────────────────────────────────────────────────────────────────────────────┐${reset}\n"
+          printf "${blue}│ %-12s │ %-76s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET VPS RECOVERY & SNAPSHOT MANAGEMENT${blue}"
+          printf "${blue}├────┼──────────────────────────────────────────────────────────────────────────────┤${reset}\n"
+          printf "${blue}│ %-12s │ %-76s │${reset}\n" \
+            "${magenta}1${blue}"  "${blue}View Snapshots${blue}" \
+            "${magenta}2${blue}"  "${blue}Create Snapshot${blue}" \
+            "${magenta}3${blue}"  "${blue}Restore VM State From Snapshot${blue}" \
+            "${magenta}4${blue}"  "${blue}Purge and Delete Snapshot from Cluster Node${blue}" \
+            "${magenta}5${blue}"  "${blue}Return to Fleet Infrastructure Menu${blue}"
+          printf "${blue}└────┴──────────────────────────────────────────────────────────────────────────────┘${reset}\n"
+          read -rp "${cyan}[USER]:${reset} Select snapshot action number: " snap_ch
+          
+          case "$snap_ch" in
+            1)
+              echo -e "\n${orange}--- CURRENT REGISTERED FLEET SNAPSHOTS ---${reset}"
+              one-click --vps view
+              ;;
+            2)
+              one-click --vps view
+              read -rp "${cyan}[USER]:${reset} Enter Target VM Name: " target
+              read -rp "${cyan}[USER]:${reset} Enter Snapshot Name: " name
+              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshot create --target "$target" --name "$name"
+              ;;
+            3)
+              echo -e "\n${orange}--- AVAILABLE RESTORATION VECTORS ---${reset}"
+              one-click --vps view
+              read -rp "${cyan}[USER]:${reset} Enter Target VM Name to Revert: " target
+              read -rp "${cyan}[USER]:${reset} Enter Snapshot Target Identifier to Apply: " name
+              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshot restore --target "$target" --name "$name"
+              ;;
+            4)
+              echo -e "\n${orange}--- REGISTERED ALLOCATION CHAINS AVAILABLE FOR PURGING ---${reset}"
+              one-click --vps view
+              read -rp "${cyan}[USER]:${reset} Enter Target VM Name: " target
+              read -rp "${cyan}[USER]:${reset} Enter Snapshot Name to Permanently Delete: " name
+              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshotn delete --target "$target" --name "$name"
+              ;;
+            5)
+              break
+              ;;
+            *)
+              echo "Invalid action selection."
+              ;;
+          esac
+          echo
+        done
+        ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
   done
 }
 if [[ $1 == "menu" ]]; then
   clear
   one_click_menu
+  exit 0
+fi
+# ==== Fleet SSH ====
+if [[ "$1" == "--ssh" ]]; then
+  found=0
+  fleet_ssh "$2"
   exit 0
 fi
 # ==== Fleet Bench ====
@@ -787,135 +1017,795 @@ if [[ "$1" == "--db-admin" ]]; then
   db_entry
   exit 0
 fi
+# ==== Fleet Start/Stop ====
+if [[ "$1" == "--proxy" ]]; then
+  shift
+  target_vm="" 
+  website="" 
+  proto="http" 
+  src_port="" 
+  dest_port=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--target)    target_vm="$2"; shift ;;
+      -w|--website)   website="$2"; shift   ;;
+      -c|--proto)     proto="$2"; shift     ;;
+      -s|--source)    src_port="$2"; shift  ;;
+      -p|--port)      dest_port="$2"; shift ;;
+      *) shift ;;
+    esac
+  done
+  fleet_proxy_provision "$target_vm" "${website:-}" "${proto-}" "${src_port:-}" "${dest_port:-}" 
+  exit 0
+fi
+# ==== Fleet Hypervisor ====
+if [[ "$1" == "--vps" ]]; then
+  action="${2:-}"
+  if [[ "$action" == "patch" ]]; then
+    if [[ -z "${3:-}" ]]; then
+      error "Usage: one-click --vps patch <all | host_name> [-f]"
+      return 1
+    fi
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
+    fleet_vps_patch "$3" "${4:-}"
+    exit 0
+  fi
+  shift 2
+  vps_name="" 
+  target_host="" 
+  network_mode="nat" 
+  base_image_name=""
+  disk_size="" 
+  vps_ram="2048" 
+  vps_cpu="2" 
+  public_ip=""
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      -n|--name)     vps_name="$2"        ; shift 2 ;;
+      -t|--target)   target_host="$2"     ; shift 2 ;;
+      -m|--mode)     network_mode="$2"    ; shift 2 ;;
+      -i|--image)    base_image_name="$2" ; shift 2 ;;
+      -d|--disk)     disk_size="$2"       ; shift 2 ;;
+      -w|--password) raw_password="$2"    ; shift 2 ;;
+      -r|--ram)      vps_ram="$2"         ; shift 2 ;;
+      -c|--cpu)      vps_cpu="$2"         ; shift 2 ;;
+      -p|--ip)       public_ip="$2"       ; shift 2 ;;
+      -l|--language) language="$2"        ; shift 2 ;;
+      create)        snap_action="create" ; shift 1 ;;
+      delete)        snap_action="delete" ; shift 1 ;;
+      restore)       snap_action="restore"; shift 1 ;;
+      -f|--full)     force_flag="$2"      ; shift 2 ;;
+      *) error "Unknown CLI argument parameter passed: $1"; exit 1 ;;
+    esac
+  done
+  case "$action" in
+    reinstall)
+      if [[ "${target_host}" == "all" ]]; then
+        die "Cannot target all peers for an OS reinstallation"
+      fi
+      if [[ -z "$vps_name" || -z "$base_image_name" || -z "$raw_password" ]]; then
+        error "Missing required parameters for creation loop."
+        echo "Usage: one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>"
+        exit 1
+      fi
+      found=0
+      while read -r l; do
+        if [[ "$vps_name" == "$l" ]]; then
+          success "$vps_name found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$vps_name not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+      fleet_vps_reinstall "$vps_name" "$base_image_name" "$raw_password" "${language:-}"
+      exit 0
+      ;;
+    backup)
+      if [[ "${target_host}" != "all" ]]; then
+        found=0
+        while read -r l; do
+          if [[ "$target_host" == "$l" ]]; then
+            success "$3 found in inventory"
+            found=1
+            break
+          fi
+          done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+          if [[ "$found" -eq 0 ]]; then
+            error "$target_host not found in inventory"
+            warn "Please use a valid fleet peer"
+            exit 1
+          fi
+        else
+        warn "Executing commands on all fleet members"
+      fi
+      fleet_vps_backup "$snap_action" "$target_host" "$vps_name"
+      ;;
+    snapshot)
+      if [[ "${target_host}" != "all" ]]; then
+        found=0
+        while read -r l; do
+          if [[ "$target_host" == "$l" ]]; then
+            success "$3 found in inventory"
+            found=1
+            break
+          fi
+          done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+          if [[ "$found" -eq 0 ]]; then
+            error "$target_host not found in inventory"
+            warn "Please use a valid fleet peer"
+            exit 1
+          fi
+        else
+        warn "Executing commands on all fleet members"
+      fi
+      fleet_vps_snapshot "$snap_action" "$target_host" "$vps_name"
+      exit 0
+      ;;
+    view)
+      fleet_snapshot_viewer
+      exit 0
+      ;;
+    migrate)
+      if [[ "${target_host}" != "all" ]]; then
+        found=0
+        while read -r l; do
+          if [[ "$target_host" == "$l" ]]; then
+            success "$3 found in inventory"
+            found=1
+            break
+          fi
+        done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+        if [[ "$found" -eq 0 ]]; then
+          error "$target_host not found in inventory"
+          warn "Please use a valid fleet peer"
+          exit 1
+        fi
+      else
+        warn "Executing commands on all fleet members"
+      fi
+      fleet_vps_migrate "$target_host" "$vps_name"
+      exit 0
+      ;;
+    create)
+      if [[ -z "$vps_name" || -z "$target_host" || -z "$base_image_name" || -z "$disk_size" ]]; then
+        error "Missing required parameters for creation loop."
+        echo "Usage: one-click --vps create -n <name> -t <target> -i <image> -d <disk_size> [-m nat|public] [-r ram_mb] [-c cpus] --password <password>"
+        exit 1
+      fi
+      if [[ "$network_mode" == "public" && -z "$public_ip" ]]; then
+        error "Public network bridge mode requested, but no valid manual external --ip argument was specified."
+        exit 1
+      fi
+      init_check_cmd="[ -d '/etc/one-click/virtualization/images' ]"
+      if [[ "$target_host" == "localhost" ]]; then
+        if ! eval "$init_check_cmd" &>/dev/null; then
+          info "Local environment uninitialized. Triggering virtualization engine setup..."
+          fleet_vps_init || exit 1
+        fi
+      else
+        if ! ansible "$target_host" -i /etc/one-click/fleet/inventory.yml -u oneclick --become -m shell -a "$init_check_cmd" &>/dev/null; then
+          info "Target node [$target_host] is uninitialized. Running remote cluster hypervisor orchestration..."
+          fleet_vps_init || exit 1
+        fi
+      fi
+      target_url=""
+      resolved_filename=""
+      case "${base_image_name,,}" in
+        ubuntu24|ubuntu-24)
+          target_url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+          resolved_filename="ubuntu24.img"
+          ;;
+        ubuntu22|ubuntu-22)
+          target_url="https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
+          resolved_filename="ubuntu22.img"
+          ;;
+        debian10|debian-10)
+          target_url="https://cloud.debian.org/images/cloud/buster/latest/debian-10-genericcloud-amd64.qcow2"
+          resolved_filename="debian10.img"
+          ;;
+        debian11|debian-11)
+          target_url="https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2"
+          resolved_filename="debian11.img"
+          ;;
+        debian12|debian-12)
+          target_url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+          resolved_filename="debian12.img"
+          ;;
+        debian13|debian-13)
+          target_url="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2"
+          resolved_filename="debian13.img"
+          ;;
+        rocky8|rocky-8|rockylinux8)
+          target_url="https://dl.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud.latest.x86_64.qcow2"
+          resolved_filename="rocky8.img"
+          ;;
+        rocky9|rocky-9|rockylinux9)
+          target_url="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2"
+          resolved_filename="rocky9.img"
+          ;;
+        rocky10|rocky-10|rockylinux10)
+          target_url="https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud.latest.x86_64.qcow2"
+          resolved_filename="rocky10.img"
+          ;;
+        alma8|alma-8|almalinux8)
+          target_url="https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"
+          resolved_filename="alma8.img"
+          ;;
+        alma9|alma-9|almalinux9)
+          target_url="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"
+          resolved_filename="alma9.img"
+          ;;
+        alma10|alma-10|almalinux10)
+          target_url="https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
+          resolved_filename="alma10.img"
+          ;;
+        fedora|fedora-latest)
+          target_url="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-44-1.1.qcow2"
+          resolved_filename="fedora.img"
+          ;;
+        *)
+          resolved_filename="$base_image_name"
+          ;;
+      esac
+      master_image_source="/etc/one-click/virtualization/images/${resolved_filename}"
+      if [[ ! -f "$master_image_source" ]]; then
+        if [[ -n "$target_url" ]]; then
+          info "Shorthand image profile alias detected. Auto-fetching target base cloud image..."
+          fleet_vps_image_fetch "$target_url" "$resolved_filename"
+          base_image_name="$resolved_filename"
+        else
+          warn "Image asset '$base_image_name' not cached and no cloud download URL exists."
+          info "Routing deployment to automated netboot.xyz pipeline."
+          base_image_name="netboot_${resolved_filename}"
+        fi
+      else
+        base_image_name="$resolved_filename"
+      fi
+      fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip"
+      exit 0
+      ;;
+    delete)
+      if [[ -z "$vps_name" ]]; then
+        error "Missing required arguments for de-provisioning loop."
+        echo "Usage: one-click vps delete -n <vps_name> -t <target_host>"
+        exit 1
+      fi
+      fleet_vps_destroy "$vps_name" "${target_host:-}"
+      exit 0
+      ;;
+    edit)
+      if [[ -z "$vps_name" || -z "$target_host" ]]; then
+        error "Missing instance targets for modifications."
+        echo "Usage: one-click --vps edit -n <vps_name> -t <target_host> [-r new_ram] [-c new_cpus] [-d expand_disk]"
+        exit 1
+      fi
+      fleet_vps_modify "$vps_name" "$target_host" "$vps_ram" "$vps_cpu" "$disk_size"
+      exit 0
+      ;;
+    start) 
+      if [[ -z "$vps_name" ]]; then
+        error "Missing instance name for modifications."
+        echo "Usage: one-click --vps start -n <vps_name>"
+        exit 1
+      fi
+      fleet_vps_power_control "start" "$vps_name" 
+      exit 0
+      ;;
+    stop)
+      if [[ -z "$vps_name" ]]; then
+        error "Missing instance name for modifications."
+        echo "Usage: one-click --vps stop -n <vps_name>"
+        exit 1
+      fi
+      fleet_vps_power_control "stop" "$vps_name"
+      exit 0
+      ;;
+    patch)
+      inventory_file="/etc/one-click/fleet/inventory.yml"
+      . "/etc/one-click/fleet/controller.env"
+      if [[ "${sys_ip:-}" != "${CONTROLLER_IP:-}" ]]; then
+        error "Security Violation: Patch operations can only be executed directly from the Controller."
+        return 1
+      fi
+      if [[ -z "$target_host" ]]; then
+        error "Usage: one-click --vps patch <all | host_name> [-f]"
+        return 1
+      fi
+      local ansible_target=""
+      if [[ "$target_host" == "all" ]]; then
+        ansible_target="all"
+        info "Preparing fleet-wide maintenance patch across all active clusters."
+      else
+        ansible_target="$target_host"
+        info "Patch will be carried out for [$ansible_target]."
+      fi
+      local patch_cmd=""
+      if [[ "$force_flag" == "-f" ]]; then
+        warn "FULL PATCH: This will patch the entire system."
+        patch_cmd="
+          if command -v apt-get &>/dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update && apt-get dist-upgrade -y -o Dpkg::Options::='--force-confold'
+          elif command -v dnf &>/dev/null; then
+            dnf upgrade -y
+          elif command -v yum &>/dev/null; then
+            yum update -y
+          fi
+        "
+      else
+        warn "SECURITY PATCH: Only security components will be patched."
+        patch_cmd="
+          if command -v apt-get &>/dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update && apt-get install -y unattended-upgrades && unattended-upgrade -v
+          elif command -v dnf &>/dev/null; then
+            dnf upgrade --security -y
+          elif command -v yum &>/dev/null; then
+            yum update --security -y
+          fi
+        "
+      fi
+      info "Transmitting payload to targeted infrastructure cluster..."
+      if ANSIBLE_HOST_KEY_CHECKING=False ansible "$ansible_target" \
+        -i "$inventory_file" \
+        -u oneclick --become \
+        -m shell -a "$patch_cmd" </dev/null &> /dev/null; then
+        success "Maintenance pipeline complete. Target scope [$target_scope] updated successfully."
+      else
+        error "Patch execution pipeline completed with unhandled host runtime exceptions."
+        return 1
+      fi
+      exit 0
+      ;;
+    *)
+      error "Invalid VPS subsystem operational action: $action"
+      echo "Available choices: create | delete | edit"
+      exit 1
+      ;;
+  esac
+fi
+# ==== External User WireGuard ====
+if [[ "${1:-}" == "--wireguard" ]]; then
+  case "${2:-}" in
+    add-user) fleet_wg_add_user       ;;
+    add-profile) fleet_wg_add_user    ;;
+    add-device) fleet_wg_add_user     ;;
+    del-user) fleet_wg_remove_user    ;;
+    remove-user) fleet_wg_remove_user ;;
+    rm-user) fleet_wg_remove_user     ;;
+    delete-user) fleet_wg_remove_user ;;
+    view) fleet_wg_list_users         ;;
+    *) error "Invalid option";return 1;;
+  esac
+  exit 0
+fi
+# ==== Site Migrations ====
+if [[ "${1:-}" == "clone-site" ]]; then
+  if [[ -z "$2" || -z "${3:-}" ]]; then
+    printf '%s\n' \
+    "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+    "${red}║${reset} ${cyan}Usage:${reset} one-click clone-site website peer               ${red}║${reset}" \
+    "${red}║${reset}        one-click clone-site one-click.com web1         ${red}║${reset}" \
+    "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
+  build_vars
+  rm -f /tmp/fleet_clone-site_token
+  if [[ "$3" != "all" ]]; then
+    found=0
+    while read -r l; do
+      if [[ "$3" == "$l" ]]; then
+        success "$3 found in inventory"
+        found=1
+        break
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    if [[ "$found" -eq 0 ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+  else
+    warn "Executing commands on all fleet members"
+  fi
+  clone_site "$2" "$3"
+  exit 0
+fi
+# ==== Packaging Engine ====
+if [[ "$1" == "site-export" ]]; then
+  build_vars
+  site_export "$2"
+  exit 0
+fi
+# ==== Site Restores ====
+if [[ "$1" == "restore-site" ]]; then
+  if [[ -z "$2" || -z "${3:-}" ]]; then
+    printf '%s\n' \
+    "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+    "${red}║${reset} ${cyan}Usage:${reset} one-click restore-site website peer             ${red}║${reset}" \
+    "${red}║${reset}        one-click restore-site testing-one.com web1     ${red}║${reset}" \
+    "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
+  build_vars
+  rm -f /tmp/fleet_restore-site_token
+  if [[ "$3" != "all" ]]; then
+    found=0
+    while read -r l; do
+      if [[ "$3" == "$l" ]]; then
+        success "$3 found in inventory"
+        found=1
+        break
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    if [[ "$found" -eq 0 ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+  else
+    warn "Executing commands on all fleet members"
+  fi
+  site_import "$2" "$3"
+  exit 0
+fi
+# ==== Migrate Directory ====
+if [[ "$1" == "mv" ]]; then
+  if [[ -z "${2:-}" || -z "${3:-}" || -z "${4:-}" ]]; then
+    printf '%s\n' \
+    "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+    "${red}║${reset} ${cyan}Usage:${reset} one-click fleet mv dir peer dest_dir            ${red}║${reset}" \
+    "${red}║${reset}        one-click fleet mv /backups web1 /remote_backup ${red}║${reset}" \
+    "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
+  build_vars
+  rm -f /tmp/fleet_mv_token
+  if [[ "$3" != "all" ]]; then
+    found=0
+    while read -r l; do
+      if [[ "$3" == "$l" ]]; then
+        success "$3 found in inventory"
+        found=1
+        break
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    if [[ "$found" -eq 0 ]]; then
+      error "$3 not found in inventory"
+      warn "Please use a valid fleet peer"
+      exit 1
+    fi
+  else
+    warn "Executing commands on all fleet members"
+  fi
+  migrate_dir "$2" "$3" "${4:-}"
+  exit 0
+fi
 # ==== Fleet ====
 if [[ "$1" == "fleet" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet <arg>                           ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet clone-site testing.com host1    ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+    exit 1
+  fi
   build_vars
   if [[ "$2" == "--init" ]]; then
-    if [[ -d "$base"/fleet ]]; then
+    if [[ -f "$fleet_root/.initialized" ]]; then
       error "Init has already been run!"
       exit 1
     fi
     fleet_init
     exit 0
   fi
-  if [[ "$2" == "add" ]]; then
+  if [[ "$2" == "engine" || "$2" == "rule-engine" ]]; then
+    if [[ -z "${3:-}" || -z "${4:-}" ]]; then
+      error "Usage: one-click fleet engine [all|<hostname>] \"<rule string>\""
+      echo -e "Example: one-click fleet engine all \"allow nginx from work1\""
+      exit 1
+    fi
     if [[ ! -d "$base"/fleet ]]; then
       error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
+    fleet_rule_engine "$3" "$4"
+    exit 0
+  fi
+  if [[ "$2" == "update-keys" ]]; then
+    if [[ ! -d "$base"/fleet ]]; then
+      error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+    fleet_update_keys
+    exit 0
+  fi
+  if [[ "$2" == "add" ]]; then
+    if [[ -z "${3:-}" || -z "${4:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet add 1.2.3.4 web1                ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet add 1.2.3.4                     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+      exit 1
+    fi
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
+    while read -r l; do
+      if [[ "$4" == "$l" ]]; then
+        warn "$4 is already a peer member"
+        exit 1
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    while read -r ip; do
+      if [[ "$3" == "$ip" ]]; then
+        warn "IP $ip is already a fleet member"
+        exit 1
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec sed -n 's/IP=//p' {} \;)
+    if [[ ! -d "$base"/fleet ]]; then
+      error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+    if ! is_any_ip "$3"; then
+      error "'$3' is neither a valid IPv4 nor IPv6 address."
       exit 1
     fi
     fleet_add "$3" "$4"
     exit 0
   fi
   if [[ "$2" == "remove" || "$2" == "rm" || "$2" == "del" || "$2" == "delete" ]]; then
-    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
-      | while read l; do 
-        basename ${l//.*}
-      done | while read l; do
-        if [[ "$3" == "$l" ]]; then
-          success "$3 found in inventory"
-          touch /tmp/fleet_token
-          break
-        fi
-      done
-    if [[ ! -f "/tmp/fleet_token" ]]; then
-      error "$3 not found in inventory"
-      warn "Please use a valid fleet peer"
+    if [[ -z "${3:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet remove web1                     ${red}║--dns${reset}" \
+      "${red}║${reset}        one-click fleet remove peer                     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"--dns
       exit 1
     fi
-    rm -f /tmp/fleet_token
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
     fleet_remove "$3"
     exit 0
   fi
   if [[ "$2" == "list" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_list
     exit 0
   fi
   if [[ "$2" == "verify" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_verify 
     exit 0
   fi
   if [[ "$2" == "update" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_update
     exit 0
   fi
   if [[ "$2" == "audit" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_audit
     exit 0
   fi
   if [[ "$2" == "bench" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_bench
     exit 0
   fi
   if [[ "$2" == "status" ]]; then
+    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
+      error "Fleet not initialized" \
+	      "Run ${yellow}one-click fleet --init${reset} first"
+	    exit 1
+    fi
     fleet_status
     exit 0
   fi
   if [[ "$2" == "get" ]]; then
-    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
-      | while read l; do 
-        basename ${l//.*}
-      done | while read l; do
-        if [[ "$3" == "$l" ]]; then
-          success "$3 found in inventory"
-          touch /tmp/fleet_token
-          break
-        fi
-      done
-    if [[ ! -f "/tmp/fleet_token" ]]; then
-      error "$3 not found in inventory"
-      warn "Please use a valid fleet peer"
+    if [[ -z "${3:-}" || -z "${4:-}" || -z "${5:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet get ? web1 ?                    ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet get /remote/file peer /file     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
       exit 1
     fi
-    rm -f /tmp/fleet_token
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
     fleet_get "$3" "$4" "$5"
     exit 0
   fi
   if [[ "$2" == "put" ]]; then
-    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
-      | while read l; do 
-        basename ${l//.*}
-      done | while read l; do
-      if [[ "$3" == "$l" ]]; then
-        success "$3 found in inventory"
-        touch /tmp/fleet_token
-        break
-      fi
-    done
-    if [[ ! -f "/tmp/fleet_token" ]]; then
-      error "$3 not found in inventory"
-      warn "Please use a valid fleet peer"
+    if [[ -z "${3:-}" ||-z "${4:-}" || -z "${5:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet put web1 ? ?                    ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet put peer /file /remote/file     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
       exit 1
     fi
-    rm -f /tmp/fleet_token
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
     fleet_put "$3" "$4" "$5"
     exit 0
   fi
   if [[ "$2" == "dir" ]]; then
-    fleet_dir "$3" "$4"
-    exit 0
-  fi
-  if [[ "$2" == "raw" ]]; then
-    find /etc/one-click/fleet/state/ -type f -name '*.conf' \
-      | while read l; do 
-        basename ${l//.*}
-      done | while read l; do
-        if [[ "$3" == "$l" ]]; then
-          success "$3 found in inventory"
-          touch /tmp/fleet_token
-          break
-        fi
-      done
-    if [[ ! -f "/tmp/fleet_token" ]]; then
+    if [[ -z "${3:-}" || -z "${4:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet dir web1 /dir                   ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet dir peer /remote/dir            ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+      exit 1
+    fi
+    rm -f /tmp/fleet_dir_token
+    found=0
+    while read -r l; do
+      if [[ "$3" == "$l" ]]; then
+        success "$3 found in inventory"
+        found=1
+        break
+      fi
+    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    if [[ "$found" -eq 0 ]]; then
       error "$3 not found in inventory"
       warn "Please use a valid fleet peer"
       exit 1
     fi
-    rm -f /tmp/fleet_token
+    fleet_dir "$3" "$4"
+    exit 0
+  fi
+  if [[ "$2" == "raw" ]]; then
+    if [[ -z "${3:-}" || -z "${4:-}" ]]; then
+      printf '%s\n' \
+      "${red}╔════════════════════════════════════════════════════════╗${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet raw web1 'ls /dir'              ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet raw peer 'iptables -S'          ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
+      exit 1
+    fi
+    if [[ "$3" != "all" ]]; then
+      found=0
+      while read -r l; do
+        if [[ "$3" == "$l" ]]; then
+          success "$3 found in inventory"
+          found=1
+          break
+        fi
+      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
+    rm -f /tmp/fleet_raw_token
     fleet_raw "$3" "$4"
     exit 0
   fi
   if [[ -n "$2" ]]; then
-     error "Unknown command: $2"
+     printf '%s\n' \
+      "${red}╔═══════════════════════ [ ERROR ] ══════════════════════╗${reset}" \
+      "${red}║${reset} Unsupported Option: ${yellow}--invalid-flag "$2"${reset}                 ${red}║${reset}" \
+      "${red}║${reset} Command aborted. Check syntax parameters.              ${red}║${reset}" \
+      "${red}╠════════════════════════════════════════════════════════╣${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet list                            ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet update-keys                     ${red}║${reset}" \
+      "${red}╚════════════════════════════════════════════════════════╝${reset}"
      exit 1
   fi
   exit
@@ -961,6 +1851,12 @@ if [[ "$1" == "update-y" ]]; then
     fi
   fi
 fi
+if [[ "$1" == "--dns" ]]; then
+  build_vars
+  load_wordpress
+  dns_menu
+  exit 0
+fi
 # ==== [INFORMATIONAL]: AUTOMATION CALLS. FIRES FROM HERE ==== ###############################
 if [[ "${flag:-}" == "-z" ]] && (( ${non_interactive:-} )) && [[ -n "$profile_arg" ]]; then ##
   export non_interactive=1                                                                  ##
@@ -986,140 +1882,144 @@ if [[ -d "/usr/share/bash-completion/bash_completion.d" ]]; then
   if [[ ! -f "$tab_complete" ]]; then
     cat <<'EOF'> "$tab_complete"
 _one_click() {
-    local cur prev
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    declare -A cmds
-    
-    cmds["backup"]=""
-    cmds["bench"]=""
-    cmds["bench-sys"]=""
-    cmds["cron"]=""
-    cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-    cmds["migrator"]=""
-    cmds["net-repair"]=""
-    cmds["reinstall"]=""
-    cmds["recovery"]=""
-    cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-    cmds["system"]=""
-    cmds["sys-info"]=""
-    cmds["system-info"]=""
-    cmds["logs"]=""
-    cmds["fleet"]=""
-    cmds["log-browser"]=""
-    cmds["help"]=""
-    cmds["menu"]=""
-    cmds["migrate:'export'"]=""
-    cmds["migrate:'import'"]=""
-    cmds["uninstall"]=""
-    cmds["--version"]=""
-    cmds["--wp-create"]=""
-    cmds["--ssl"]=""
-    cmds["--wp-admin"]=""
-    cmds["--wp"]=""
-    cmds["--web-create"]=""
-    cmds["--web-admin"]=""
-    cmds["--web-backup"]=""
-    cmds["--php"]=""
-    cmds["--db-admin"]=""
-    cmds["--nodejs-create"]=""
-    cmds["--nodejs-admin"]=""
-    cmds["--dns"]=""
-    cmds["--nextcloud-create"]=""
-    cmds["--nextcloud-admin"]=""
+  local cur prev
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  declare -A cmds
 
-    cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
-    cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
-    cmds["rule-engine:backup"]=
-    cmds["rule-engine:restore"]=
-    cmds["rule-engine:'raw:"]=
-    cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
-    cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
-    cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
-    cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
-    cmds["rule-engine:mask"]=
-    cmds["rule-engine:'enable icmp'"]=
-    cmds["rule-engine:'disable icmp"]=
-    cmds["rule-engine:alias-create"]=
-    cmds["rule-engine:alias-append"]=
-    cmds["rule-engine:alias-prune"]=
-    cmds["rule-engine:'multiport"]=
-    cmds["rule-engine:'range"]=
-    cmds["rule-engine:'sensitive:"]=
-    cmds["rule-engine:sensitive-list"]=
-    cmds["rule-engine:'sensitive-remove:"]=
-    cmds["rule-engine:'from"]=
-    cmds["rule-engine:'to"]=
-    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
-    cmds["rule-engine:--dry-run"]=""
-    cmds["fleet:'init'"]=
-    cmds["fleet:'add'"]=
-    cmds["fleet:'remove'"]=
-    cmds["fleet:'list'"]=
-    cmds["fleet:'verify'"]=
-    cmds["fleet:'update'"]=
-    cmds["fleet:'audit'"]=
-    cmds["fleet:'bench'"]=
-    cmds["fleet:'put'"]=
-    cmds["fleet:'get'"]=
-    cmds["fleet:'raw'"]=
-    cmds["fleet:'status'"]=
-    cmds["fleet:'dir'"]=
+  cmds["backup"]=""
+  cmds["bench"]=""
+  cmds["bench-sys"]=""
+  cmds["cron"]=""
+  cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+  cmds["migrator"]=""
+  cmds["net-repair"]=""
+  cmds["reinstall"]=""
+  cmds["recovery"]=""
+  cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+  cmds["system"]=""
+  cmds["sys-info"]=""
+  cmds["system-info"]=""
+  cmds["logs"]=""
+  cmds["fleet"]=""
+  cmds["log-browser"]=""
+  cmds["help"]=""
+  cmds["menu"]=""
+  cmds["uninstall"]=""
+  cmds["clone-site"]=""
+  cmds["restore-site"]=""
+  cmds["--version"]=""
+  cmds["--wp-create"]=""
+  cmds["--ssl"]=""
+  cmds["--wp-admin"]=""
+  cmds["--wp"]=""
+  cmds["--web-create"]=""
+  cmds["--web-admin"]=""
+  cmds["--web-backup"]=""
+  cmds["--php"]=""
+  cmds["--db-admin"]=""
+  cmds["--nodejs-create"]=""
+  cmds["--nodejs-admin"]=""
+  cmds["--dns"]=""
+  cmds["--vps: 'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"]=""
+  cmds["--nextcloud-create"]=""
+  cmds["--nextcloud-admin"]=""
+  cmds["--proxy"]=""
+  cmds["--ssh"]=""
+  cmds["mv"]=""
 
-    cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
-    cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
-    cmds["engine:backup"]=
-    cmds["engine:restore"]=
-    cmds["engine:'raw:"]=
-    cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
-    cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
-    cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
-    cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
-    cmds["engine:mask"]=
-    cmds["engine:'enable icmp'"]=
-    cmds["engine:'disable icmp"]=
-    cmds["engine:alias-create"]=
-    cmds["engine:alias-append"]=
-    cmds["engine:alias-prune"]=
-    cmds["engine:'multiport"]=
-    cmds["engine:'range"]=
-    cmds["engine:'sensitive:"]=
-    cmds["engine:sensitive-list"]=
-    cmds["engine:'sensitive-remove:"]=
-    cmds["engine:'from"]=
-    cmds["engine:'to"]=
-    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
-    cmds["engine:--dry-run"]=""
+  cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+  cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+  cmds["rule-engine:backup"]=
+  cmds["rule-engine:restore"]=
+  cmds["rule-engine:'raw:"]=
+  cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+  cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+  cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+  cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+  cmds["rule-engine:mask"]=
+  cmds["rule-engine:'enable icmp'"]=
+  cmds["rule-engine:'disable icmp"]=
+  cmds["rule-engine:alias-create"]=
+  cmds["rule-engine:alias-append"]=
+  cmds["rule-engine:alias-prune"]=
+  cmds["rule-engine:'multiport"]=
+  cmds["rule-engine:'range"]=
+  cmds["rule-engine:'sensitive:"]=
+  cmds["rule-engine:sensitive-list"]=
+  cmds["rule-engine:'sensitive-remove:"]=
+  cmds["rule-engine:'from"]=
+  cmds["rule-engine:'to"]=
+  cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
+  cmds["rule-engine:--dry-run"]=""
+  cmds["fleet:'init'"]=
+  cmds["fleet:'add'"]=
+  cmds["fleet:'remove'"]=
+  cmds["fleet:'list'"]=
+  cmds["fleet:'verify'"]=
+  cmds["fleet:'update'"]=
+  cmds["fleet:'audit'"]=
+  cmds["fleet:'bench'"]=
+  cmds["fleet:'put'"]=
+  cmds["fleet:'get'"]=
+  cmds["fleet:'raw'"]=
+  cmds["fleet:'status'"]=
+  cmds["fleet:'dir'"]=
+  cmds["fleet:'update-keys'"]=
+  cmds["fleet: 'engine'"]=
 
-    cmds["migrate:'export' 'export to' 'import'"]=""
-    
-    _complete_tree() {
-      local path="$1"
-      local cur="$2"
-      local possible=""
-      local prefix
-      for k in "${!cmds[@]}"; do
-        prefix="${k%%:*}"
-        if [[ "$k" == "$path"* || "$path" == "" ]]; then
-          local sub="${k#*:}"
-          if [[ "$sub" == "$k" ]]; then
-            possible+="$prefix "
-          else
-            if [[ "$prefix" == "${path##*:}" ]]; then
-               possible+="$sub "
-            fi
+  cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+  cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+  cmds["engine:backup"]=
+  cmds["engine:restore"]=
+  cmds["engine:'raw:"]=
+  cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+  cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+  cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+  cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+  cmds["engine:mask"]=
+  cmds["engine:'enable icmp'"]=
+  cmds["engine:'disable icmp"]=
+  cmds["engine:alias-create"]=
+  cmds["engine:alias-append"]=
+  cmds["engine:alias-prune"]=
+  cmds["engine:'multiport"]=
+  cmds["engine:'range"]=
+  cmds["engine:'sensitive:"]=
+  cmds["engine:sensitive-list"]=
+  cmds["engine:'sensitive-remove:"]=
+  cmds["engine:'from"]=
+  cmds["engine:'to"]=
+  cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
+  cmds["engine:--dry-run"]=""
+  
+  _complete_tree() {
+    local path="$1"
+    local cur="$2"
+    local possible=""
+    local prefix
+    for k in "${!cmds[@]}"; do
+      prefix="${k%%:*}"
+      if [[ "$k" == "$path"* || "$path" == "" ]]; then
+        local sub="${k#*:}"
+        if [[ "$sub" == "$k" ]]; then
+          possible+="$prefix "
+        else
+          if [[ "$prefix" == "${path##*:}" ]]; then
+             possible+="$sub "
           fi
         fi
-      done
-      COMPREPLY=( $(compgen -W "$possible" -- "$cur") )
-    }
-    local path=""
-    for ((i=1; i<COMP_CWORD; i++)); do
-        path+="${COMP_WORDS[i]}:"
+      fi
     done
-    path="${path%:}"  # remove trailing colon
-    _complete_tree "$path" "$cur"
+    COMPREPLY=( $(compgen -W "$possible" -- "$cur") )
+  }
+  local path=""
+  for ((i=1; i<COMP_CWORD; i++)); do
+    path+="${COMP_WORDS[i]}:"
+  done
+  path="${path%:}"  # remove trailing colon
+  _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
 EOF
@@ -1128,116 +2028,121 @@ elif [[ -d "/usr/share/bash-completion/completions/" ]]; then
   if [[ ! -f "$tab_complete2" ]]; then
     cat <<'EOF'> "$tab_complete2"
 _one_click() {
-    local cur prev
-    COMPREPLY=()
-    cur="${COMP_WORDS[COMP_CWORD]}"
-    prev="${COMP_WORDS[COMP_CWORD-1]}"
-    declare -A cmds
+  local cur prev
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  declare -A cmds
     
-    cmds["backup"]=""
-    cmds["bench"]=""
-    cmds["bench-sys"]=""
-    cmds["cron"]=""
-    cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-    cmds["migrator"]=""
-    cmds["net-repair"]=""
-    cmds["reinstall"]=""
-    cmds["recovery"]=""
-    cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-    cmds["system"]=""
-    cmds["sys-info"]=""
-    cmds["system-info"]=""
-    cmds["logs"]=""
-    cmds["log-browser"]=""
-    cmds["help"]=""
-    cmds["fleet"]=""
-    cmds["menu"]=""
-    cmds["migrate"]=""
-    cmds["uninstall"]=""
-    cmds["--version"]=""
-    cmds["--wp-create"]=""
-    cmds["--ssl"]=""
-    cmds["--wp-admin"]=""
-    cmds["--wp"]=""
-    cmds["--web-create"]=""
-    cmds["--web-backup"]=""
-    cmds["--web-admin"]=""
-    cmds["--php"]=""
-    cmds["--db-admin"]=""
-    cmds["--nodejs-create"]=""
-    cmds["--nodejs-admin"]=""
-    cmds["--dns"]=""
-    cmds["--nextcloud-create"]=""
-    cmds["--nextcloud-admin"]=""
-    
-    cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
-    cmds["engine:'show alias'"]=
-    cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
-    cmds["rule-engine:backup"]=
-    cmds["rule-engine:restore"]=
-    cmds["rule-engine:'raw:"]=
-    cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
-    cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
-    cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
-    cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
-    cmds["rule-engine:mask"]=
-    cmds["rule-engine:'enable icmp'"]=
-    cmds["rule-engine:'disable icmp"]=
-    cmds["rule-engine:alias-create"]=
-    cmds["rule-engine:alias-append"]=
-    cmds["rule-engine:alias-prune"]=
-    cmds["rule-engine:'multiport"]=
-    cmds["rule-engine:'range"]=
-    cmds["rule-engine:'sensitive:"]=
-    cmds["rule-engine:sensitive-list"]=
-    cmds["rule-engine:'sensitive-remove:"]=
-    cmds["rule-engine:'from"]=
-    cmds["rule-engine:'to"]=
-    cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
-    cmds["rule-engine:--dry-run"]=""
-    cmds["fleet:'init'"]=
-    cmds["fleet:'add'"]=
-    cmds["fleet:'remove'"]=
-    cmds["fleet:'list'"]=
-    cmds["fleet:'verify'"]=
-    cmds["fleet:'update'"]=
-    cmds["fleet:'audit'"]=
-    cmds["fleet:'bench'"]=
-    cmds["fleet:'put'"]=
-    cmds["fleet:'get'"]=
-    cmds["fleet:'raw'"]=
-    cmds["fleet:'status'"]=
-    cmds["fleet:'dir'"]=
+  cmds["backup"]=""
+  cmds["bench"]=""
+  cmds["bench-sys"]=""
+  cmds["cron"]=""
+  cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+  cmds["migrator"]=""
+  cmds["net-repair"]=""
+  cmds["reinstall"]=""
+  cmds["recovery"]=""
+  cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
+  cmds["system"]=""
+  cmds["sys-info"]=""
+  cmds["system-info"]=""
+  cmds["logs"]=""
+  cmds["log-browser"]=""
+  cmds["help"]=""
+  cmds["fleet"]=""
+  cmds["menu"]=""
+  cmds["uninstall"]=""
+  cmds["clone-site"]=""
+  cmds["restore-site"]=""
+  cmds["--version"]=""
+  cmds["--wp-create"]=""
+  cmds["--ssl"]=""
+  cmds["--wp-admin"]=""
+  cmds["--wp"]=""
+  cmds["--web-create"]=""
+  cmds["--web-backup"]=""
+  cmds["--web-admin"]=""
+  cmds["--php"]=""
+  cmds["--db-admin"]=""
+  cmds["--nodejs-create"]=""
+  cmds["--nodejs-admin"]=""
+  cmds["--dns"]=""
+  cmds["--vps: 'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"]=""
+  cmds["--nextcloud-create"]=""
+  cmds["--nextcloud-admin"]=""
+  cmds["--proxy"]=""
+  cmds["--ssh"]=""
+  cmds["mv"]=""
+  
+  cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
+  cmds["engine:'show alias'"]=
+  cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+  cmds["rule-engine:backup"]=
+  cmds["rule-engine:restore"]=
+  cmds["rule-engine:'raw:"]=
+  cmds["rule-engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+  cmds["rule-engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+  cmds["rule-engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+  cmds["rule-engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+  cmds["rule-engine:mask"]=
+  cmds["rule-engine:'enable icmp'"]=
+  cmds["rule-engine:'disable icmp"]=
+  cmds["rule-engine:alias-create"]=
+  cmds["rule-engine:alias-append"]=
+  cmds["rule-engine:alias-prune"]=
+  cmds["rule-engine:'multiport"]=
+  cmds["rule-engine:'range"]=
+  cmds["rule-engine:'sensitive:"]=
+  cmds["rule-engine:sensitive-list"]=
+  cmds["rule-engine:'sensitive-remove:"]=
+  cmds["rule-engine:'from"]=
+  cmds["rule-engine:'to"]=
+  cmds["rule-engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
+  cmds["rule-engine:--dry-run"]=""
+  cmds["fleet:'init'"]=
+  cmds["fleet:'add'"]=
+  cmds["fleet:'remove'"]=
+  cmds["fleet:'list'"]=
+  cmds["fleet:'verify'"]=
+  cmds["fleet:'update'"]=
+  cmds["fleet:'audit'"]=
+  cmds["fleet:'bench'"]=
+  cmds["fleet:'put'"]=
+  cmds["fleet:'get'"]=
+  cmds["fleet:'raw'"]=
+  cmds["fleet:'status'"]=
+  cmds["fleet:'dir'"]=
+  cmds["fleet:'update-keys'"]=
+  cmds["fleet: 'engine'"]=
 
-    cmds["engine:'open filter' 'open mangle' 'open raw'"]=
-    cmds["engine:'show alias'"]=
-    cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
-    cmds["engine:backup"]=
-    cmds["engine:restore"]=
-    cmds["engine:'raw:"]=
-    cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
-    cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
-    cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
-    cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
-    cmds["engine:mask"]=
-    cmds["engine:'enable icmp'"]=
-    cmds["engine:'disable icmp"]=
-    cmds["engine:alias-create"]=
-    cmds["engine:alias-append"]=
-    cmds["engine:alias-prune"]=
-    cmds["engine:'multiport"]=
-    cmds["engine:'range"]=
-    cmds["engine:'sensitive:"]=
-    cmds["engine:sensitive-list"]=
-    cmds["engine:'sensitive-remove:"]=
-    cmds["engine:'from"]=
-    cmds["engine:'to"]=
-    cmds["engine:audit"]=
-    cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
-    cmds["engine:--dry-run"]=""
-
-    cmds["migrate:'export to'"]=""
-    
+  cmds["engine:'open filter' 'open mangle' 'open raw'"]=
+  cmds["engine:'show alias'"]=
+  cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
+  cmds["engine:backup"]=
+  cmds["engine:restore"]=
+  cmds["engine:'raw:"]=
+  cmds["engine:'allow ssh' 'allow range' 'allow http' 'allow https' 'allow cockpit' 'allow smtp'"]=
+  cmds["engine:'drop ssh' 'drop http' 'drop https' 'drop cockpit' 'drop smtp'"]=
+  cmds["engine:'reject ssh' 'reject http' 'reject https' 'reject cockpit' 'reject smtp'"]=
+  cmds["engine:'delete line' 'delete number' 'delete alias' 'delete firewall'"]=
+  cmds["engine:mask"]=
+  cmds["engine:'enable icmp'"]=
+  cmds["engine:'disable icmp"]=
+  cmds["engine:alias-create"]=
+  cmds["engine:alias-append"]=
+  cmds["engine:alias-prune"]=
+  cmds["engine:'multiport"]=
+  cmds["engine:'range"]=
+  cmds["engine:'sensitive:"]=
+  cmds["engine:sensitive-list"]=
+  cmds["engine:'sensitive-remove:"]=
+  cmds["engine:'from"]=
+  cmds["engine:'to"]=
+  cmds["engine:audit"]=
+  cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
+  cmds["engine:--dry-run"]=""
+  
     _complete_tree() {
       local path="$1"
       local cur="$2"
@@ -1251,7 +2156,7 @@ _one_click() {
             possible+="$prefix "
           else
             if [[ "$prefix" == "${path##*:}" ]]; then
-               possible+="$sub "
+              possible+="$sub "
             fi
           fi
         fi
@@ -1260,7 +2165,7 @@ _one_click() {
     }
     local path=""
     for ((i=1; i<COMP_CWORD; i++)); do
-        path+="${COMP_WORDS[i]}:"
+      path+="${COMP_WORDS[i]}:"
     done
     path="${path%:}"  # remove trailing colon
     _complete_tree "$path" "$cur"
@@ -1713,6 +2618,8 @@ if [[ $# -gt 0 ]]; then
  | || | | \\__ \\ || (_| | | |  __/ (_| |
 |___|_| |_|___/\\__\\__,_|_|_|\\___|\\__,_|"
         success "Setup Completed Successfully"
+        sleep 10
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
       elif [[ "${1:-}" == "peer" ]]; then
         success "Import of backup successful to $sys_ip"
         sleep 5
@@ -1739,6 +2646,9 @@ if [[ $# -gt 0 ]]; then
         "  cron                    Configure a cron job" \
         "  help                    Show this help message" \
         "  uninstall               Remove one-click and all associated files and configurations." \
+        "  clone-site              Clone any website/app to any of your fleet peers" \
+        "  restore-site            Package and restore from a fleet peer remote site/app to localhost" \
+        "  mv                      Move directory and contents to fleet member. \
         "  --web-admin             Create a backup of selected static site." \
         "  --web-create            Install a blank static html or php website." \
         "  --wp                    Basic wordpress and cron management." \
@@ -1748,15 +2658,20 @@ if [[ $# -gt 0 ]]; then
         "  --nodejs-create         Install a NodeJS app with either nginx or apache." \
         "  --nextcloud-create      Create a new instance of an isolated Nextcloud" \
         "  --nextcloud-admin       Manage Nextcloud instances" \
+        "  --wireguard             Enable external devices access to your secure internal mesh." \
         "  --db-admin              Manage Databases and create temp front end if needed." \
+        "  --proxy                 Routes public web traffic or custom TCP streams safely through the NAT fleet hypervisor" \
+        "  --ssh <peer_name>       Connect directly to a peer via ssh." \
         "  --dns                   Manage DNS with Cloudflare" \
         "  --ssl                   Install SSL for wordpress or any other virtual host." \
         "  --php                   Manage system-wide or per site php settings." \
+        "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments. \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)net-repair$(tput sgr 0)    Run network repair" \
         "  $(tput setaf 3)one-click $(tput setaf 4)backup$(tput sgr 0)        Backup + Restore Tool" " " "Version: $version"
-        exit "$exit_code"
+        sleep 30
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
       ;;
   esac
 fi
