@@ -10,14 +10,25 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.0 === #
 # ====== One-Click ====== #
 # ==== System information widget ====
 build_vars
+install_dep "traceroute" "command -v traceroute" "traceroute" "$pkg_mgr"
 hide_mode=true
 cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
+if [[ $sys_ip =~ ^10\..* ]] || 
+   [[ $sys_ip =~ ^192\.168\..* ]] || 
+   [[ $sys_ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\..* ]] || 
+   [[ $sys_ip =~ ^169\.254\..* ]] || 
+   [[ $sys_ip =~ ^127\..* ]]; then
+    is_nat=true
+    upstream_gw=$(sed -En '/^[ \t]+2[ \t]+/s/[^.]*[ \t]([0-9.]+).*/\1/p' <(traceroute -n 8.8.8.8))
+else
+    is_nat=false
+fi
 if [[ -f /etc/wireguard/wg0.conf ]]; then
   if ip link show wg0 &>/dev/null; then
     x_site_ip="$(sed -En '{/inet /s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s wg0))"
@@ -30,17 +41,21 @@ fi
 if [[ -f /etc/wireguard/one-click.conf ]]; then
   if ip link show one-click &>/dev/null; then
     fleet_ip="$(sed -En '{/inet/s,^[^/]* ([0-9.]+)/.*,\1,p}' <(ip a s one-click))"
+    fleet_gw="$(sed -En 's/[^:]*= \[?([0-9a-f.:]+)]?:51821.*/\1/Ip' <(wg showconf one-click 2> /dev/null))"
   else
-    fleet_ip="OFFLINE"
+    fleet_ip="OFFLINE (Interface Down)"
+    fleet_gw="N/A"
   fi
 fi
 who_ipv6="$whois_ipv6"
 sys_ipd="$sys_ip"
 ipv6_gwd="$ipv6_gw"
 sys_gwd="$sys_gw"
-x_site_gwd="$x_site_gw"
-x_site_ipd="$x_site_ip"
-fleet_ipd="$fleet_ip"
+x_site_gwd="${x_site_gw:-}"
+x_site_ipd="${x_site_ip:-}"
+fleet_ipd="${fleet_ip:-}"
+fleet_gwd="${fleet_gw:-}"
+upstream_gwd="${upstream_gw:-}"
 st=$(date +%s)
 virt=$(systemd-detect-virt || true)
 if ! vnstat -i "$nic" 2>&1 /dev/null; then 
@@ -84,17 +99,21 @@ sys_info() {
       whois_ipv6=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ipv6")
       ipv6_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$ipv6_gw")
       sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_gw")
-      x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_ip")
-      x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$x_site_gw")
-      fleet_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$fleet_ip")
+      x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${x_site_ip:-}")
+      x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${x_site_gw:-}")
+      fleet_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${fleet_ip:-}")
+      fleet_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${fleet_gw:-}")
+      upstream_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${upstream_gw:-}")
     else
       sys_ip="$sys_ipd"
       whois_ipv6="$who_ipv6"
       ipv6_gw="$ipv6_gwd"
       sys_gw="$sys_gwd"
-      x_site_ip="$x_site_ipd"
-      x_site_gw="$x_site_gwd"
-      fleet_ip="$fleet_ipd"
+      x_site_ip="${x_site_ipd:-}"
+      x_site_gw="${x_site_gwd:-}"
+      fleet_ip="${fleet_ipd:-}"
+      fleet_gw="${fleet_gwd:-}"
+      upstream_gw="${upstream_gwd:-}"
     fi
   }
   hidden
@@ -170,6 +189,10 @@ sys_info() {
     fi
     if [[ -f /etc/wireguard/one-click.conf ]]; then
       print_row "One-Click Mesh IP" "$fleet_ip"
+      print_row "One-Click Mesh GW" "$fleet_gw"
+    fi
+    if [[ "${is_nat:-}" == "true" ]]; then
+      print_row "NAT Upstream IP" "$upstream_gw"
     fi
     expand_country $ip_country
     print_row "IP Country" "$country"
