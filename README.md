@@ -203,7 +203,179 @@ one-click engine 'open ssh and drop http,https and mask in nat table'
 # Core Capabilities
 
 One-Click simplifies tedious and complex server tasks.
-It is designed to operate safely in production environments with caching, fallback mirrors, and validation safeguards.
+It is designed to operate safely with caching, fallback mirrors, and validation safeguards.
+
+# Fleet Manager (Cluster Orchestration)
+
+One-Click includes a built-in fleet orchestration engine powered by Ansible that allows multiple servers to be managed as a single infrastructure unit.
+
+The fleet engine adopts a secure hub-and-spoke architecture where the controller orchestrates all operations while reducing unnecessary public exposure across member nodes.
+
+Fleet operations include:
+
+- Cluster initialization
+- Node registration
+- SSH trust management
+- Configuration synchronization
+- Hardware auditing
+- Distributed benchmarking
+- Remote file transfers
+- Site cloning and restoration
+- Fleet-wide updates
+- Centralized firewall management
+
+## Core Commands
+
+```
+one-click fleet init
+one-click fleet add <ip> <hostname> [port]
+one-click fleet verify
+one-click fleet update
+one-click fleet audit
+one-click fleet bench
+one-click fleet update-keys
+one-click fleet put <host> <src> <dest>
+one-click fleet get <host> <src> <dest>
+one-click fleet raw <host> "<command>"
+one-click clone-site example.com peer-node
+one-click restore-site example.com peer-node
+```
+Fleet members are hardened by default.
+
+## Features include:
+
+- SSH key-based authentication
+- Reduced public attack surface
+- Controller-driven orchestration
+- Secure peer communication
+- Automated trust relationships
+
+
+---
+
+# VPS Engine
+
+One-Click can transform the controller and fleet members into an orchestrated KVM virtualization platform.
+
+Virtual machines can be provisioned locally or on remote hypervisors and immediately integrated into the management ecosystem.
+
+## Features include:
+
+- KVM provisioning
+- NAT deployments
+- Public IP deployments
+- Snapshot management
+- Backup management
+- Live migration
+- Operating system reinstall
+- Patch management
+- Automatic fleet integration
+
+## Example
+```
+one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 2 --ram 4G --disk 40G --mode nat
+one-click --vps snapshot create --target web1 --name backup_v1
+one-click --vps migrate --target web1 --name <vm_name>
+one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>
+```
+## Available Operations
+- one-click --vps create
+- one-click --vps delete
+- one-click --vps edit
+- one-click --vps reinstall
+- one-click --vps snapshot
+- one-click --vps backup
+- one-click --vps patch
+- one-click --vps migrate
+- one-click --vps start
+- one-click --vps stop
+
+# One-Click Edge Proxy
+
+The proxy engine exposes services running inside private NAT environments without requiring public addresses on the guest itself.
+
+HAProxy runs at the hypervisor edge and securely forwards traffic into backend workloads.
+
+## Features include:
+
+- HTTP proxying
+- HTTPS proxying
+- TCP forwarding
+- Domain routing
+- Port forwarding
+- NAT traversal
+
+## Example
+
+```
+one-click --proxy --target analytics-vm --website dashboard.example.com --proto https
+one-click --proxy --target web1 --source 22 --port 8822
+```
+## Available Operations
+
+- --target	Destination VM
+- --website	Domain name
+- --proto	http, https, tcp
+- --source	Internal application port
+- --port	Public listener port
+
+
+---
+
+# WireGuard Mesh Networking
+
+One-Click includes a WireGuard mesh engine that creates secure overlay networks between infrastructure components and external clients.
+
+The system automatically generates cryptographic profiles and distributes network access safely.
+
+## Features include:
+
+- Overlay networking
+- Client profile generation
+- Peer management
+- Traffic isolation
+- Secure remote access
+- Connection monitoring
+
+## Commands
+
+```
+one-click --wireguard add-user
+one-click --wireguard delete-user
+one-click --wireguard view
+```
+
+# Direct SSH NAT Access
+
+Virtual machines deployed inside NAT environments remain accessible without exposing public ports.
+This allows administrators to directly access isolated systems without manually configuring SSH tunnels.
+
+One-Click automatically creates secure access tunnels.
+
+## Example
+
+```
+one-click --ssh <peer-name|peer-ip>
+```
+
+---
+
+# DNS Manager & Replication
+
+One-Click includes a distributed DNS orchestration engine built around BIND if used or can be API based etc.
+
+The DNS manager synchronizes zone files and automatically propagates changes across fleet members.
+
+## Features include:
+
+- BIND management
+- Zone creation
+- Secure replication
+- Multi-region synchronization
+- Automatic peer updates
+- Redundant name services
+
+This enables geographically distributed infrastructure to maintain consistent naming resolution without synchronization drift.
 
 # WordPress Automation Module
 
@@ -253,24 +425,16 @@ one-click --wp-create
 
 ### WordPress Management
 
-```bash
-one-click --wp
 ```
-
-```bash
+one-click --wp
 one-click --wp-admin
+one-click --wp-backup
 ```
 
 ### Install SSL for Existing Sites
 
-```bash
-one-click --ssl
 ```
-
-### Backup and Restore Operations
-
-```bash
-one-click --wp-backup
+one-click --ssl
 ```
 
 ## Environment Structure
@@ -279,19 +443,11 @@ Each WordPress deployment follows a deterministic filesystem structure.
 
 ### Application Files
 
-```text
+```
 /etc/one-click/wordpress/<domain>/www
-```
-
-### Backups
-
-```text
+-  Backups
 /etc/one-click/wordpress/backups/<domain>
-```
-
-### SSL Certificates
-
-```text
+- SSL Certificates
 /etc/letsencrypt/live/<domain>
 ```
 
@@ -334,12 +490,13 @@ The SSL workflow supports:
 
 ## Backup System
 
-The WordPress module includes structured backup lifecycle management.
+The WordPress module includes structured backup lifecycle management as well as integrated with fleet for seamless migration and backup across fleet peers.
 
 Supported operations include:
 
 - local backups
 - remote backups
+- Fleet management
 - restore workflows
 - multi-target backup profiles
 - environment-aware backup organization
@@ -433,18 +590,11 @@ The static website deployment workflow automates:
 
 ### Create a New Static Website
 
-```bash
+```
 one-click --web-create
-```
-
-### Website Management
-
-```bash
 one-click --web
-```
-
-```bash
 one-click --web-admin
+one-click --web-backup
 ```
 
 ### Install SSL for Existing Sites
@@ -453,31 +603,17 @@ one-click --web-admin
 one-click --ssl
 ```
 
-### Backup and Restore Operations
-
-```bash
-one-click --web-backup
-```
-
 ## Environment Structure
 
 Each static website deployment follows a deterministic filesystem structure.
 
 ### Website Files
 
-```text
+```
 /etc/one-click/sites/<domain>/www
-```
-
-### Backups
-
-```text
+- Backups
 /etc/one-click/sites/backups/<domain>
-```
-
-### SSL Certificates
-
-```text
+- SSL Certificates
 /etc/letsencrypt/live/<domain>
 ```
 
@@ -1049,10 +1185,6 @@ iptables -A INPUT -P TCP --DPORT 80 -j ACCEPT
 
 Raw commands can be chained together as well as with human language parsed input. However, spacing rules are strict to prevent accidental fallback into human-language parsing when using `raw:`.
 Chaining can be used with any service. Ports will be mapped without further input.
-
-![One-Click Logo](https://as214354.network/one-click-rule-engine.png)
-
-![One-Click Logo](https://as214354.network/oc-rule-engine.png)
 
 #### Using Comma `,` Delimiter
 
