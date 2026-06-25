@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Apr 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: June 2026 == # === Version#: 1.2.0 === #
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 rule_engine() {
@@ -47,14 +47,22 @@ rule_engine() {
   real_ssh=$(sed -En '/sshd/{/0.0:/{s/^[^:]*:([0-9]+).*/\1/p}}' <(ss -ltnp))
   rule="$1"
   flag="${2:-}"
+  y_int="${3:-}"
   dry_run=0
   duplicate_skipped=0
+  y_interactive=0
   if [[ "$rule" == "--dry-run" ]]; then
+    if  [[ "$flag" == "-y" || "$y_int" == "-y" ]]; then
+      y_interactive=1
+    fi
     dry_run=1
     rule="$flag"
     if [[ -f /tmp/fw_confirmed ]]; then
       rm -f /tmp/fw_confirmed
     fi
+  fi
+  if [[ "$y_int" == "-y" || "$flag" == "-y" ]]; then
+    y_interactive=1
   fi
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
@@ -160,12 +168,17 @@ rule_engine() {
       printf "${cyan}[COMMAND]: %s${reset}\n" "$cmd"
     fi
   done
-  if [[ "$dry_run" -eq 1 ]]; then
-    read -rp "${magenta}[DRY-RUN]:${reset} Apply ALL rules? (y|n): " confirm
+  confirm=n
+  if [[ "$y_interactive" -eq 1 ]]; then
+    confirm="y"
   else
-    read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
+    if [[ "$dry_run" -eq 1 ]]; then
+      read -rp "${magenta}[DRY-RUN]:${reset} Apply ALL rules? (y|n): " confirm
+    else
+      read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
+    fi
+    confirm="${confirm,,}"
   fi
-  confirm="${confirm,,}"
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
     i=""
     fw_bin="${fw_bin:-iptables}"
@@ -252,9 +265,15 @@ rule_engine() {
     echo "PENDING_CONFIRM" > "$state_file"
     # ==== Confirmation ====
     echo
-    printf "${yellow}[SAFETY]:${reset} Firewall will auto-rollback in 10 seconds unless confirmed.\n"
     confirmed=0
-    if read -t 10 -rp "$(printf "${cyan}[USER]:${reset} Confirm firewall is functional? (y|yes): ")" safety_confirm; then
+    if [[ "$y_interactive" -eq 1 ]]; then
+      confirmed=1
+      info "Automation Mode: Changes automatically committed."
+    else
+      printf "${yellow}[SAFETY]:${reset} Firewall will auto-rollback in 10 seconds unless confirmed.\n"
+      if ! read -t 10 -rp "$(printf "${cyan}[USER]:${reset} Confirm firewall is functional? (y|yes): ")" safety_confirm; then
+        safety_confirm=""
+      fi
       safety_confirm="${safety_confirm,,}"
       if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
         confirmed=1
@@ -263,32 +282,17 @@ rule_engine() {
     if [[ "$confirmed" -eq 1 ]]; then
       echo "COMMITTED" > "$state_file"
       success "Firewall changes confirmed and committed."
+      info "Please save your rules with ${cyan}one-click engine backup${reset}"
+      sleep 1
+      success "Firewall rules persisted."
+      rm -f "$tmp_snapshot" "$confirm_file"
     else
-      warn "No confirmation received. Reverting..."
+      warn "Confirmation not received. Triggering rollback..."
       rollback
+      warn "No changes applied"
     fi
   else
     warn "No changes applied."
     exit 0
-  fi
-  echo
-  echo "${yellow}[SAFETY]:${reset} Firewall configuration will rollback in 10 seconds if not confirmed functional!"
-  safety_confirm=""
-  if ! read -t 10 -rp "${cyan}[USER]:${reset} Confirm rule is safe? (y|yes to keep): " safety_confirm; then
-    safety_confirm=""
-  fi
-  safety_confirm="${safety_confirm,,}"
-  echo
-  if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
-    echo "COMMITTED" > "$state_file"
-    success "Rule confirmed and persisted in memory."
-    info "Please save your rules with ${cyan}one-click engine backup${reset}"
-    sleep 1
-    success "Firewall rules persisted."
-    rm -f "$tmp_snapshot" "$confirm_file"
-  else
-    warn "Confirmation not received. Triggering rollback..."
-    rollback   # <-- IMPORTANT: call function, not PID logic
-    warn "No changes applied"
   fi
 }
