@@ -40,6 +40,7 @@ else
 fi
 no_gb=0
 bench_dir=/etc/one-click/ocb/benchmarks
+bench_ext="bench_$(date +'%F-%T').sysbench"
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
 cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
@@ -316,8 +317,11 @@ EOF
     echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
     run_ocb | tee -a "$bench_result"
     sed -Ei '
-      s/^[^├└T┌│]*//g;
-      s/(.*[^├└T┌│]).*$/\1/
+      s/\x1B\[[0-9;]*[mK]//g;
+      s/\x0F|\r//g;
+      s/ Running iperf3 test to[^│]*│//;
+      /Preparing Geekbench|Initializing Fio|Running (read|write) test/d;
+      s/(hostname[^│]*│ ).*/\1ONE-CLICK REDACTED/I
       /Preparing Geekbench/d
     ' "$bench_result"
     end=$(date +%s)
