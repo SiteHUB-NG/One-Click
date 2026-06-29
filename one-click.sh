@@ -133,7 +133,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  alias-create            Create named IP groups for easier rule management." \
     "                          Example: alias-create office 1.2.3.4 5.6.7.8" \
     "  alias-append            Add additional IPs to an existing alias." \
-    "  alias-prune             Remove specific IPs from an alias." "" \
+    "  alias-prune             Remove specific IPs from an alias." "" \        
     "$(tput smul)$(tput bold)Sensitive Ports$(tput sgr0)$(tput rmul)" \
     "  sensitive <ports...>    Mark ports as sensitive to trigger confirmation" \
     "                          before firewall changes." \
@@ -186,6 +186,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  update                  Run 'one-click update' simultaneously across the active fleet." \
     "  audit                   Gather real-time hardware architecture profiles and save locally as JSON." \
     "  bench                   Execute async hardware benchmarks across hosts and fetch result payloads." \
+	"  migrate-master          Migrate the controller to another server in the fleet." \
+	"  --sync                  Synchronise all nodes in the fleet ensuring controller is authoratative." \
     "  rule-engine | engine    Fleet firewall management via rule-engine" \
     "$(tput smul)$(tput bold)Operational Commands$(tput sgr0)$(tput rmul)" \
     "  dir <host> <directory>  List remote fleet members directories" \
@@ -209,6 +211,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  migrate                 Migrate VPS instance to another hypervisor." \
     "  start                   Start a VPS instance" \
     "  stop                    Stop a VPS instance " \
+	"  info                    View stats of VM such as storage, RAM and resources utilized." \
     "  view                    View available snapshots" \
     "$(tput smul)$(tput bold)Core Command Options$(tput sgr0)$(tput rmul)" \
     "    -n|--name             Instance name" \
@@ -223,20 +226,23 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "    -l|--language         Set the language for Windows installations." \
     "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
     "    one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 1 --ram 1G --disk 6G --mode nat --password <password>" \
-    "    one-click --vps snapshot create --target web1 --name backup_v1" \
-    "    one-click --vps migrate --target web1 --name <vm_name>" \
+    "    one-click --vps snapshot create --target <vm_name> --name <snapshot name>" \
+    "    one-click --vps migrate --target <target hypervisor> --name <vm_name>" \
     "    one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>" \
+	"    one-click --vps info <vps_name>" \
+	"    one-click --vps patch <vm_name|all>" \
+	"    one-click --vps info <vm name>" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  --proxy                 The proxy engine configures HAProxy instances running at the hypervisor layer to safely bridge" \
     "                          public internet requests into your isolated, non-routable WireGuard NAT private fleet." \
     "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
-    "    -t|--target            The name of the destination NAT virtual machine." \
+    "    -t|--target            The name of the source NAT virtual machine." \
     "    -w|--website           The Fully Qualified Domain Name (FQDN) assigned to handle traffic." \
     "    -c|--proto             Traffic schema protocol constraint." \
     "    -s|--source            The actual application port listening inside the destination VM." \
     "    -p|--port              The public port opened up on the hypervisor edge to receive traffic." \
     "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
-    "  Port:  one-click --proxy --target web1 --source 22 --port 8822" \
+    "  Port:  one-click --proxy --target <vm name> --source 22 --port 8822" \
     "  Web: one-click --proxy --target analytics-vm --website dashboard.internal.net --proto http" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  --wireguard               The WireGuard user engine carves an isolated /24 network slice from your internal" \
@@ -351,10 +357,12 @@ install_dependancies() {
         install_dep "tree" "type tree" "tree" "$pkg_mgr" 
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
+		install_dep "tar" "type tar" "tar" "$pkg_mgr"
+		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
+		install_dep "xz-utils" "type xz-utils" "xz-utils" "$pkg_mgr"
         ;;
       rhel|centos|fedora)
         pkg_mgr="dnf"
-        #dnf -y install epel-release &>/dev/null
         install_dep "epel-release" "rpm -q epel-release" "epel-release" "$pkg_mgr" true
         install_dep "rclone" "type rclone" "rclone" "$pkg_mgr" true
         install_dep "sgdisk" "command -v sgdisk" "gdisk" "$pkg_mgr" true
@@ -370,6 +378,9 @@ install_dependancies() {
         install_dep "tree" "type tree" "tree" "$pkg_mgr" 
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
+		install_dep "tar" "type tar" "tar" "$pkg_mgr"
+		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
+		install_dep "xz" "type xz" "xz" "$pkg_mgr"
         ;;
       *)
         printf '%s\n' "Unknown OS: $id"
@@ -994,20 +1005,43 @@ if [[ $1 == "menu" ]]; then
 fi
 # ==== Fleet SSH ====
 if [[ "$1" == "--ssh" ]]; then
-  found=0
-  fleet_ssh "$2"
+  build_vars
+  fleet_ssh "$2" "${3:-}"
   exit 0
 fi
 # ==== Fleet Bench ====
 if [[ "$1" == "flbench" ]]; then
   build_vars
+  load_ocb
   flbench_launch
   exit 0
 fi
 if [[ "$1" == "fl" ]]; then
   build_vars
   load_ocb
+  swap_file="/etc/one-click/ocb/.ephemeral_swap"
+  created_swap=false
+  if [[ $(swapon --show --noheadings | wc -l) -eq 0 ]]; then
+    sudo swapoff "$swap_file" &>/dev/null || true
+    sudo rm -f "$swap_file"
+    if sudo dd if=/dev/zero of="$swap_file" bs=1M count=2048 status=none; then
+      sudo chmod 600 "$swap_file"
+      sudo mkswap "$swap_file" &>/dev/null
+      if sudo swapon "$swap_file" &>/dev/null; then
+        created_swap=true
+        trap '
+          sudo swapoff "'"$swap_file"'" &>/dev/null || true;
+          sudo rm -f "'"$swap_file"'";
+        ' EXIT
+      fi
+    fi
+  fi
   cpu_sys
+  if [[ "$created_swap" = true ]]; then
+    trap - EXIT
+    sudo swapoff "$swap_file" &>/dev/null || true
+    sudo rm -f "$swap_file"
+  fi
   exit 0
 fi
 # ==== DB Admin ====
@@ -1017,7 +1051,7 @@ if [[ "$1" == "--db-admin" ]]; then
   db_entry
   exit 0
 fi
-# ==== Fleet Start/Stop ====
+# ==== Fleet Proxy ====
 if [[ "$1" == "--proxy" ]]; then
   shift
   target_vm="" 
@@ -1048,13 +1082,17 @@ if [[ "$1" == "--vps" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1065,6 +1103,35 @@ if [[ "$1" == "--vps" ]]; then
     fi
     fleet_vps_patch "$3" "${4:-}"
     exit 0
+  fi
+  if [[ "$action" == "info" ]]; then
+    if [[ -z "${3:-}" ]]; then
+      error "Usage: one-click --vps info <vps_name>"
+      return 1
+    fi
+	if [[ "$3" != "all" ]]; then
+      found=0
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
+          success "$3 found in inventory"
+          found=1
+        fi
+      done
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
+    fleet_vps_info "$3"
+	exit 0
   fi
   shift 2
   vps_name="" 
@@ -1105,13 +1172,17 @@ if [[ "$1" == "--vps" ]]; then
         exit 1
       fi
       found=0
-      while read -r l; do
-        if [[ "$vps_name" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$vps_name" == "$peer_name" ]]; then
           success "$vps_name found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$vps_name not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1123,19 +1194,23 @@ if [[ "$1" == "--vps" ]]; then
     backup)
       if [[ "${target_host}" != "all" ]]; then
         found=0
-        while read -r l; do
-          if [[ "$target_host" == "$l" ]]; then
-            success "$3 found in inventory"
+        shopt -s nullglob
+        state_files=("/etc/one-click/fleet/state"/*.conf)
+        shopt -u nullglob
+        for file in "${state_files[@]}"; do
+          filename="${file##*/}"
+          peer_name="${filename%.conf}"
+          if [[ "$target_host" == "$peer_name" ]]; then
+            success "$target_host found in inventory"
             found=1
-            break
           fi
-          done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
-          if [[ "$found" -eq 0 ]]; then
-            error "$target_host not found in inventory"
-            warn "Please use a valid fleet peer"
-            exit 1
-          fi
-        else
+        done
+        if [[ "$found" -eq 0 ]]; then
+          error "$target_host not found in inventory"
+          warn "Please use a valid fleet peer"
+          exit 1
+        fi
+      else
         warn "Executing commands on all fleet members"
       fi
       fleet_vps_backup "$snap_action" "$target_host" "$vps_name"
@@ -1143,19 +1218,23 @@ if [[ "$1" == "--vps" ]]; then
     snapshot)
       if [[ "${target_host}" != "all" ]]; then
         found=0
-        while read -r l; do
-          if [[ "$target_host" == "$l" ]]; then
-            success "$3 found in inventory"
+        shopt -s nullglob
+        state_files=("/etc/one-click/fleet/state"/*.conf)
+        shopt -u nullglob
+        for file in "${state_files[@]}"; do
+          filename="${file##*/}"
+          peer_name="${filename%.conf}"
+          if [[ "$target_host" == "$peer_name" ]]; then
+            success "$target_host found in inventory"
             found=1
-            break
           fi
-          done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
-          if [[ "$found" -eq 0 ]]; then
-            error "$target_host not found in inventory"
-            warn "Please use a valid fleet peer"
-            exit 1
-          fi
-        else
+        done
+        if [[ "$found" -eq 0 ]]; then
+          error "$target_host not found in inventory"
+          warn "Please use a valid fleet peer"
+          exit 1
+        fi
+      else
         warn "Executing commands on all fleet members"
       fi
       fleet_vps_snapshot "$snap_action" "$target_host" "$vps_name"
@@ -1168,13 +1247,17 @@ if [[ "$1" == "--vps" ]]; then
     migrate)
       if [[ "${target_host}" != "all" ]]; then
         found=0
-        while read -r l; do
-          if [[ "$target_host" == "$l" ]]; then
-            success "$3 found in inventory"
+        shopt -s nullglob
+        state_files=("/etc/one-click/fleet/state"/*.conf)
+        shopt -u nullglob
+        for file in "${state_files[@]}"; do
+          filename="${file##*/}"
+          peer_name="${filename%.conf}"
+          if [[ "$target_host" == "$peer_name" ]]; then
+            success "$target_host found in inventory"
             found=1
-            break
           fi
-        done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+        done
         if [[ "$found" -eq 0 ]]; then
           error "$target_host not found in inventory"
           warn "Please use a valid fleet peer"
@@ -1299,7 +1382,16 @@ if [[ "$1" == "--vps" ]]; then
         echo "Usage: one-click --vps edit -n <vps_name> -t <target_host> [-r new_ram] [-c new_cpus] [-d expand_disk]"
         exit 1
       fi
-      fleet_vps_modify "$vps_name" "$target_host" "$vps_ram" "$vps_cpu" "$disk_size"
+      if [[ -n "$vps_ram" ]]; then
+        mod_flags="${mod_flags:-} -r $vps_ram"
+      fi
+      if [[ -n "$vps_cpu" ]]; then
+        mod_flags="${mod_flags:-} -c $vps_cpu"
+      fi
+      if [[ -n "$disk_size" ]]; then
+        mod_flags="${mod_flags:-} -d $disk_size"
+      fi
+      fleet_vps_modify "$vps_name" "$target_host" $mod_flags
       exit 0
       ;;
     start) 
@@ -1395,7 +1487,7 @@ if [[ "${1:-}" == "--wireguard" ]]; then
     rm-user) fleet_wg_remove_user     ;;
     delete-user) fleet_wg_remove_user ;;
     view) fleet_wg_list_users         ;;
-    *) error "Invalid option";return 1;;
+    *) error "Invalid option";exit 1  ;;
   esac
   exit 0
 fi
@@ -1413,13 +1505,17 @@ if [[ "${1:-}" == "clone-site" ]]; then
   rm -f /tmp/fleet_clone-site_token
   if [[ "$3" != "all" ]]; then
     found=0
-    while read -r l; do
-      if [[ "$3" == "$l" ]]; then
+    shopt -s nullglob
+    state_files=("/etc/one-click/fleet/state"/*.conf)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+      filename="${file##*/}"
+      peer_name="${filename%.conf}"
+      if [[ "$3" == "$peer_name" ]]; then
         success "$3 found in inventory"
         found=1
-        break
       fi
-    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    done
     if [[ "$found" -eq 0 ]]; then
       error "$3 not found in inventory"
       warn "Please use a valid fleet peer"
@@ -1451,13 +1547,17 @@ if [[ "$1" == "restore-site" ]]; then
   rm -f /tmp/fleet_restore-site_token
   if [[ "$3" != "all" ]]; then
     found=0
-    while read -r l; do
-      if [[ "$3" == "$l" ]]; then
+    shopt -s nullglob
+    state_files=("/etc/one-click/fleet/state"/*.conf)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+      filename="${file##*/}"
+      peer_name="${filename%.conf}"
+      if [[ "$3" == "$peer_name" ]]; then
         success "$3 found in inventory"
         found=1
-        break
       fi
-    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    done
     if [[ "$found" -eq 0 ]]; then
       error "$3 not found in inventory"
       warn "Please use a valid fleet peer"
@@ -1483,13 +1583,17 @@ if [[ "$1" == "mv" ]]; then
   rm -f /tmp/fleet_mv_token
   if [[ "$3" != "all" ]]; then
     found=0
-    while read -r l; do
-      if [[ "$3" == "$l" ]]; then
+    shopt -s nullglob
+    state_files=("/etc/one-click/fleet/state"/*.conf)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+      filename="${file##*/}"
+      peer_name="${filename%.conf}"
+      if [[ "$3" == "$peer_name" ]]; then
         success "$3 found in inventory"
         found=1
-        break
       fi
-    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    done
     if [[ "$found" -eq 0 ]]; then
       error "$3 not found in inventory"
       warn "Please use a valid fleet peer"
@@ -1512,6 +1616,47 @@ if [[ "$1" == "fleet" ]]; then
     exit 1
   fi
   build_vars
+  if [[ "$2" == "--sync" ]]; then
+    if [[ ! -d "$base"/fleet ]]; then
+      error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+    sync_fleet_controller_authority
+    exit 0
+  fi
+  if [[ "$2" == "migrate-master" ]]; then
+    if [[ ! -d "$base"/fleet ]]; then
+      error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
+      exit 1
+    fi
+	if [[ -z "${3:-}" ]]; then
+      error "Usage: one-click fleet migrate-master <target_hostname_or_ip>"
+      exit 1
+    fi
+    if [[ "$3" != "all" ]]; then
+      found=0
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
+          success "$3 found in inventory"
+          found=1
+        fi
+      done
+      if [[ "$found" -eq 0 ]]; then
+        error "$3 not found in inventory"
+        warn "Please use a valid fleet peer"
+        exit 1
+      fi
+    else
+      warn "Executing commands on all fleet members"
+    fi
+    fleet_migrate_controller "$3"
+	exit 0
+  fi
   if [[ "$2" == "--init" ]]; then
     if [[ -f "$fleet_root/.initialized" ]]; then
       error "Init has already been run!"
@@ -1532,13 +1677,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1572,18 +1721,23 @@ if [[ "$1" == "fleet" ]]; then
 	      "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
-    while read -r l; do
-      if [[ "$4" == "$l" ]]; then
-        warn "$4 is already a peer member"
-        exit 1
-      fi
-    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
     while read -r ip; do
       if [[ "$3" == "$ip" ]]; then
         warn "IP $ip is already a fleet member"
         exit 1
       fi
     done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec sed -n 's/IP=//p' {} \;)
+	shopt -s nullglob
+    state_files=("/etc/one-click/fleet/state"/*.conf)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+      filename="${file##*/}"
+      peer_name="${filename%.conf}"
+      if [[ "$4" == "$peer_name" ]]; then
+        warn "$4 is already a peer member"
+        found=1
+      fi
+    done
     if [[ ! -d "$base"/fleet ]]; then
       error "Please initialize fleet first with ${magenta}one-click fleet --init${reset}"
       exit 1
@@ -1611,13 +1765,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1632,8 +1790,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "list" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
-	    exit 1
+	    "Run ${yellow}one-click fleet --init${reset}"
     fi
     fleet_list
     exit 0
@@ -1641,7 +1798,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "verify" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
+	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
     fleet_verify 
@@ -1650,7 +1807,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "update" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
+	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
     fleet_update
@@ -1659,7 +1816,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "audit" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
+	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
     fleet_audit
@@ -1668,7 +1825,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "bench" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
+	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
     fleet_bench
@@ -1677,7 +1834,7 @@ if [[ "$1" == "fleet" ]]; then
   if [[ "$2" == "status" ]]; then
     if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
       error "Fleet not initialized" \
-	      "Run ${yellow}one-click fleet --init${reset} first"
+	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
     fleet_status
@@ -1694,13 +1851,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1723,13 +1884,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -1752,13 +1917,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     rm -f /tmp/fleet_dir_token
     found=0
-    while read -r l; do
-      if [[ "$3" == "$l" ]]; then
+    shopt -s nullglob
+    state_files=("/etc/one-click/fleet/state"/*.conf)
+    shopt -u nullglob
+    for file in "${state_files[@]}"; do
+      filename="${file##*/}"
+      peer_name="${filename%.conf}"
+      if [[ "$3" == "$peer_name" ]]; then
         success "$3 found in inventory"
         found=1
-        break
       fi
-    done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+    done
     if [[ "$found" -eq 0 ]]; then
       error "$3 not found in inventory"
       warn "Please use a valid fleet peer"
@@ -1778,13 +1947,17 @@ if [[ "$1" == "fleet" ]]; then
     fi
     if [[ "$3" != "all" ]]; then
       found=0
-      while read -r l; do
-        if [[ "$3" == "$l" ]]; then
+      shopt -s nullglob
+      state_files=("/etc/one-click/fleet/state"/*.conf)
+      shopt -u nullglob
+      for file in "${state_files[@]}"; do
+        filename="${file##*/}"
+        peer_name="${filename%.conf}"
+        if [[ "$3" == "$peer_name" ]]; then
           success "$3 found in inventory"
           found=1
-          break
         fi
-      done < <(find /etc/one-click/fleet/state/ -type f -name '*.conf' -exec basename {} .conf \;)
+      done
       if [[ "$found" -eq 0 ]]; then
         error "$3 not found in inventory"
         warn "Please use a valid fleet peer"
@@ -2167,7 +2340,7 @@ _one_click() {
     for ((i=1; i<COMP_CWORD; i++)); do
       path+="${COMP_WORDS[i]}:"
     done
-    path="${path%:}"  # remove trailing colon
+    path="${path%:}" 
     _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
@@ -2236,7 +2409,6 @@ else
   die "Dependancy not handled"
 fi
 # ==== Install dependancies ====
-#dependancies
 mkdir -p "${log_dir:-}" "${base:-}"
 touch "$secret_key" "$manpage" "${log_error_file:-}" "${log_file:-}"
 chmod 640 "${log_file:-}" "${log_error_file:-}"
