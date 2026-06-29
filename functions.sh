@@ -1196,17 +1196,32 @@ fleet_init() {
     "$fleet_root/audits" \
     "$fleet_root/benchmarks"
   fleet_write_inventory
-  if [[ ! -f /etc/one-click/fleet/controller.env ]]; then
-    if [[ ! -f "$fleet_root/controller.env" ]]; then
-	  # ==== I must be the controller ====
-	  info "First-run setup detected. Establishing this machine as the central Fleet Controller..."
-	  cat > "$fleet_root/controller.env" <<EOF
+  if [[ -f "$fleet_root/controller.env" ]]; then
+    . "$fleet_root/controller.env"
+	# ==== Do we have management? ====
+    if [[ "${ROLE_TYPE:-}" == "peer" && -n "$CONTROLLER_IP" && "$sys_ip" != "$CONTROLLER_IP" ]]; then
+      warn "This server is already actively locked to Controller ($CONTROLLER_IP)."
+      error "To reassign this server, you must manually delete '$fleet_root/controller.env' on this host first."
+      return 1
+    fi
+  else
+    # ==== I must be the controller ====
+    info "First-run setup detected. Establishing this machine as the central Fleet Controller."
+    cat > "$fleet_root/controller.env" <<EOF
 CONTROLLER_IP="$sys_ip"
 CONTROLLER_NAME="$(hostname -s)"
 ROLE_TYPE="controller"
 IS_MASTER="true"
 EOF
-    fi
+    . "$fleet_root/controller.env"
+  fi
+  if [[ "$sys_ip" != "$CONTROLLER_IP" ]]; then
+    cat > "$fleet_root/controller.env" <<EOF
+CONTROLLER_IP="$CONTROLLER_IP"
+CONTROLLER_NAME="$CONTROLLER_NAME"
+ROLE_TYPE="peer"
+IS_MASTER="false"
+EOF
     . "$fleet_root/controller.env"
   fi
   if ! command -v ansible >/dev/null 2>&1; then
@@ -1251,7 +1266,7 @@ EOF
   fi
   pubkey=$(tr -d '\n' < "$fleet_root/keys/id_ed25519.pub")
   if ! id "oneclick" &>/dev/null; then
-    info "Creating 'oneclick' service account on $(hostname -s)..."
+    info "Creating 'oneclick' service account on $(hostname -s)."
     useradd -m -s /bin/bash oneclick
   fi
   mkdir -p /home/oneclick/.ssh
@@ -1268,16 +1283,14 @@ EOF
     echo 'oneclick ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/oneclick
     chmod 440 /etc/sudoers.d/oneclick
   fi
-  if [[ ! -f /etc/one-click/fleet/state/${local_host}.conf ]]; then
-    cat > /etc/one-click/fleet/state/${local_host}.conf << EOF
+  if [[ ! -f "$fleet_root/state/${local_host}.conf" ]]; then
+    cat > "$fleet_root/state/${local_host}.conf" << EOF
 HOSTNAME=$(hostname -s)
 IP=$sys_ip
 PUBKEY="$pubkey"
 PORT=22
 EOF
   fi
-  echo "CONTROLLER_IP=\"$sys_ip\"" > "$fleet_root/controller.env"
-  echo "CONTROLLER_NAME=\"$(hostname -s)\"" > "$fleet_root/controller.env"
   bash /etc/one-click/write_inventory.sh
   fleet_write_playbooks
   touch "$fleet_root/.initialized"
@@ -2372,7 +2385,7 @@ $(tput bold)$(tput setaf 113)THANK YOU FOR CHOOSING ONE-CLICK${reset}
 
 EOF
   generate_node_credentials "$host"
-  info "Waiting for $host remote host configuration..." \
+  info "Waiting for $host remote host configuration." \
     "The engine is waiting for you to apply the snippet above to [${yellow}$host ($ip)]${reset}." \
     "Press ${yellow}Ctrl+C${reset} at any time to cancel this setup block safely." \
     "Checking connectivity status"
