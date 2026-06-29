@@ -390,39 +390,50 @@ install_dependancies() {
 }
 # ==== Loader Body ====
 load_body() {
-  local url backup cache_dir cache_file ttl cache_age
+  local url backup_url cache_dir cache_file ttl cache_age now
   url=${1:-}
   backup_url=${2:-}
   cache_dir="${3:-}"
   cache_file="${4:-}"
   ttl=$((24 * 3600))
   mkdir -p "$cache_dir"
-  local now
   now=$(date +%s)
-  local cache_age=0
+  if [[ -f "$cache_file" ]]; then
+    local file_time
+    file_time=$(date -r "$cache_file" +%s 2>/dev/null || echo 0)
+    cache_age=$((now - file_time))
+  else
+    cache_age=$((ttl + 1)) # Force download if file is missing
+  fi
   if [[ ! -f "$cache_file" || $cache_age -gt $ttl ]]; then
+    printf "$blue[INFO]:$reset %s\n" "Cache missing or expired. Checking mirrors for module updates..."
     # ==== Try and pull from Github ====
     if curl -fsSL --connect-timeout 5 --max-time 10 \
         "$url" -o "$cache_file.tmp" &> /dev/null; then
       mv -f "$cache_file.tmp" "$cache_file"
       chmod +x "$cache_file"
-    # ==== Try as214354 if primary fails ====
+      printf "$green[SUCCESS]:$reset %s\n" "Successfully fetched module from primary mirror."
+    # ==== Try alternate mirror if primary fails ====
     elif [[ -n "$backup_url" ]] && \
-      curl -fsSL --connect-timeout 5 --max-time 10 \
-        "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
-      warn "Primary failed, loaded from backup mirror"
+         curl -fsSL --connect-timeout 5 --max-time 10 \
+           "$backup_url" -o "$cache_file.tmp" &> /dev/null; then
+      printf "$yellow[WARN]:$reset %s\n" "Primary mirror failed; loaded from backup mirror."
       mv -f "$cache_file.tmp" "$cache_file"
+      chmod +x "$cache_file"
     else
       if [[ ! -f "$cache_file" ]]; then
-        error "Failed to download module (primary + backup) and no cache available"
+        printf "$red[ERROR]:$reset  %s\n" "Failed to download module (primary + backup) and no cache available."
+      else
+        printf "$yellow[WARN]:$reset %s\n" "Network mirrors unavailable; falling back to existing cached module."
       fi
-      warn "Network unavailable, using cached module"
     fi
   fi
-  # ==== Use cache if both mirrors unavailable ====
-  [[ -f "$cache_file" ]] || die "Backup module missing after load attempt"
-  sed -Ei "13 {s/(Updated: )[^=]* /\1${updated} /;s/(Version#: )[^=]* /\1${version} /}" "$cache_file"
-  if [[ ! "${cache_file/*.}" == "py" ]]; then
+  if [[ ! -f "$cache_file" ]]; then
+    printf "$red[ERROR]:$reset  %s\n" "Backup module missing after load attempt."
+    return 1
+  fi
+  sed -Ei "13 {s/(Updated: )[^=]* /\1${updated:-} /;s/(Version#: )[^=]* /\1${version:-} /}" "$cache_file" 2>/dev/null || true
+  if [[ "${cache_file##*.}" != "py" ]]; then
     source "$cache_file"
   fi
 }
