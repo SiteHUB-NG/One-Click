@@ -585,8 +585,9 @@ install_db() {
   "$pkg_mgr" install -y \
    mariadb-server \
   php-fpm \
+  php-posix \
   unzip \
-  curl
+  curl > /dev/null
 }
 configure_nc_db() {
   local nc_db="one_click:${domain//./-}:$(openssl rand -hex 4):$nc_db_user"
@@ -629,19 +630,20 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
+  sed -Ei 's/(memory_limit = ).*/\11024M/' /etc/php.ini
   chown "$web_user":"${webserver_user:-${webserver}}" "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
     $wp_cmd core download  || {
-      warn "WP available in this location..."
+      warn "WP available in this location."
     }
   fi
   # ==== Ensure mysqli ====
   vers=$(sed -En '1s/[^.]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
   if [[ "$pkg_mgr" == "apt" ]]; then
-    "$pkg_mgr" -y install php${vers}-mysql php-mysql || true
+    "$pkg_mgr" -y install php${vers}-mysql php-mysql php-posix || true
   else
-    "$pkg_mgr" -y install php-mysqlnd || true
+    "$pkg_mgr" -y install php-mysqlnd php-posix || true
   fi
   # ==== Configure WP ====
   $wp_cmd config create \
@@ -704,27 +706,57 @@ wp_plugins() {
     # ==== Install Redis ====
     if [[ "$pkg_mgr" == "apt" ]]; then
       $pkg_mgr install -y redis-server php-redis
-      systemctl enable redis-server --now
+      $pkg_mgr -y install redis || $pkg_mgr install -y valkey 
+      systemctl enable redis-server --now > /dev/null || systemctl enable --now valkey > /dev/null
       local service="redis-${domain}"
       redis_conf="/etc/redis/redis.conf"
       php_user="$webserver"
     else
-      redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
-      dnf -y module enable redis:$redis_ver
-      $pkg_mgr install -y redis php-pecl-redis
-      systemctl enable redis --now
+      if ! $pkg_mgr -y install redis > /dev/null; then
+        $pkg_mgr install -y valkey > /dev/null
+        systemctl enable --now valkey > /dev/null
+        redis_execstart=/usr/bin/valkey-server
+        conf="/etc/valkey/one-click/${domain}.conf"
+        redis_conf="/etc/valkey/valkey.conf"
+        redis_ver=$(sort -rV <(awk '$1=="valkey"{print $2}' <(dnf module list valkey 2>/dev/null)) | head -1)
+      else
+        systemctl enable redis-server --now > /dev/null
+        systemctl enable redis --now > /dev/null
+        redis_execstart=/usr/bin/redis-server
+        conf="/etc/redis/one-click/${domain}.conf"
+        redis_conf="/etc/redis/redis.conf"
+        redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
+      fi
+      $pkg_mgr install -y php-pecl-redis
       local service="redis-${domain}"
-      redis_conf="/etc/redis/redis.conf"
       php_user="$webserver"
     fi
     redis_pw=$(openssl rand -base64 32)
-    local sock="/run/redis/redis-${domain}.sock"
+    if [[ -d /run/redis ]]; then
+      sock="/run/redis/redis-${domain}.sock"
+    else
+      sock="/run/valkey/redis-${domain}.sock"
+    fi
     # ==== Verify Redis ====
     if ! redis-cli ping &>/dev/null; then
-      error "Redis failed to install"
-      return 1
+      if ! valkey-cli ping > /dev/null; then
+        error "Redis failed to install"
+        return 1
+      else
+        for red in /usr/bin/valkey-*; do
+          cp -f $red /usr/bin/redis-${red##*-}
+        done
+        #cp -f /usr/bin/valkey-cli /usr/bin/redis-cli
+      fi
     fi
     # ==== Configure Redis ====
+    if ! getent passwd redis > /dev/null; then
+      redis_user=valkey
+      redis_dir=valkey
+    else
+      redis_user=redis
+      red_dir=redis
+    fi
     setup_redis "$domain"
     redis_service "$domain"
     $wp_cmd plugin install redis-cache --activate
@@ -740,8 +772,8 @@ define('WP_REDIS_PORT', null);
 define('WP_REDIS_PASSWORD', "$redis_pw");
 EOF
     fi
-    usermod -aG redis "$webserver_user"
-    usermod -aG redis "$web_user"
+    usermod -aG "$redis_user" "$webserver_user"
+    usermod -aG "$redis_user" "$web_user"
     systemctl daemon-reexec
     systemctl enable "${service}" --now
     for i in {1..10}; do
@@ -750,13 +782,7 @@ EOF
       fi
       sleep 1
     done
-    if [[ ! -S "$sock" ]]; then
-      error "Socket /run/redis-${domain}.sock was never created. Check: journalctl -u redis-${domain}"
-      return 1
-    else
-      success "Isolated redis socket created"
-    fi
-    chown redis:$web_user "$sock"
+    chown $redis_user:$web_user "$sock"
     mkdir -p /etc/systemd/system/php-fpm@${domain}.service.d/
     cat > /etc/systemd/system/php-fpm@${domain}.service.d/${domain}-redis.conf <<EOF
 [Service]
@@ -771,11 +797,11 @@ EOF
 # ==== REDIS ====
 setup_redis() {
   local domain="$1"
-  local conf="/etc/redis/one-click/${domain}.conf"
-  local sock="/run/redis/redis-${domain}.sock"
+  #local conf="/etc/redis/one-click/${domain}.conf"
+  #local sock="/run/redis/redis-${domain}.sock"
   local data_dir="/var/lib/redis/${domain}"
   mkdir -p "$data_dir" $(dirname "$conf")
-  chown redis:redis "$data_dir"
+  chown $redis_user:$redis_user "$data_dir"
   cat > "$conf" <<EOF
 bind 127.0.0.1
 port 0
@@ -786,7 +812,7 @@ unixsocketperm 770
 
 dir $data_dir
 
-maxmemory 128mb
+maxmemory 512mb
 maxmemory-policy allkeys-lru
 
 daemonize no
@@ -795,7 +821,7 @@ EOF
 }
 redis_service() {
   local domain="$1"
-  local conf="/etc/redis/one-click/${domain}.conf"
+  #local conf="/etc/redis/one-click/${domain}.conf"
   local service="redis-${domain}"
   if ! grep -Eq 'vm.overcommit_memory = 1' /etc/sysctl.conf; then
     echo 'vm.overcommit_memory = 1' >> /etc/sysctl.conf
@@ -808,11 +834,11 @@ After=network.target
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/redis-server $conf
+ExecStart=$redis_execstart $conf
 ExecStop=/usr/bin/redis-cli shutdown
-User=redis
+User=$redis_user
 Group=$web_user
-RuntimeDirectory=redis
+RuntimeDirectory=$redis_dir
 RuntimeDirectoryMode=0775
 UMask=0002
 Restart=always
@@ -822,9 +848,14 @@ WantedBy=multi-user.target
 EOF
 }
 redis_menu() {
-  local instance_conf="/etc/redis/one-click/${domain}.conf"
   local instance_service="redis-${domain}"
-  local instance_sock="/run/redis/redis-${domain}.sock"
+  if [[ -d /run/valkey ]]; then
+    local instance_sock="/run/valkey/redis-${domain}.sock"
+    local instance_conf="/etc/valkey/one-click/${domain}.conf"
+  else
+    local instance_sock="/run/redis/redis-${domain}.sock"
+    local instance_conf="/etc/redis/one-click/${domain}.conf"
+  fi
   while true; do
     local status_raw=$(systemctl is-active "$instance_service" 2>/dev/null)
     if [[ "$status_raw" == "active" ]]; then
@@ -1288,6 +1319,7 @@ install_php_mods() {
       php-xml \
       php-zip \
       php-mysql \
+      php-posix \
       bzip2
     a2enmod rewrite
     a2enmod ssl
@@ -1308,6 +1340,7 @@ install_php_mods() {
         php-xml \
         php-json \
         php-mysql \
+        php-posix \
         bzip2
   fi
 }
@@ -1916,6 +1949,7 @@ run_script() {
     "$pkg_mgr" install -y \
     mariadb-server \
     php-fpm \
+    php-posix \
     unzip \
     curl
   fi
@@ -3333,7 +3367,7 @@ detect_env() {
       webserver="httpd"
     fi
   else
-    error "No supported webserver detected!"
+    printf "$red[ERROR]:$reset  %s\n" "No supported webserver detected!"
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
 }
@@ -3450,14 +3484,14 @@ install_php() {
   setup_repos
   v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
   "$pkg_mgr" install -y php${v}-fpm
-  $pkg_mgr install -y php-fpm "php$v-fpm" "php$v-cli" "php$v-mysql" "php$v-xml" "php$v-mbstring" "php$v-gd" "php$v-curl" "php$v-zip" "php$v-gd" || return 1
+  $pkg_mgr install -y php-fpm "php$v-fpm" "php-posix" "php$v-cli" "php$v-mysql" "php$v-xml" "php$v-mbstring" "php$v-gd" "php$v-curl" "php$v-zip" "php$v-gd" || return 1
   fpm_service="php$v-fpm"
   if [[ "${webserver:-}" =~ apache || "$webserver" == "httpd" ]]; then
     a2enmod proxy_fcgi setenvif || true
     a2enconf php${v}-fpm || true
     $pkg_mgr module reset php -y
     $pkg_mgr module enable "php:remi-$ver" -y
-    $pkg_mgr install -y php php-fpm php-mysql php-mysqlnd php-xml php-mbstring php-gd php-curl php-zip "php$ver-xml" php-gd || return 1
+    $pkg_mgr install -y php php-fpm php-mysql php-posix php-mysqlnd php-xml php-mbstring php-gd php-curl php-zip "php$ver-xml" php-gd || return 1
     fpm_service="php-fpm"
   fi
   $pkg_mgr stop "php$ver-fpm" 2>/dev/null || true
@@ -3708,9 +3742,18 @@ create_isolated_php_runtime() {
   local site_user="$3"
   local webserver="$4"
   local type="$5"
-  v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
-  "$pkg_mgr" install -y php${v}-fpm
-  $pkg_mgr install -y php-fpm "php$v-fpm" "php$v-cli" "php$v-mysql" "php$v-xml" "php$v-mbstring" "php$v-gd" "php$v-curl" "php$v-zip" "php$v-gd" || return 1
+  {
+    v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
+  #"$pkg_mgr" install -y php${v}-fpm
+    $pkg_mgr install -y php-fpm || $pkg_mgr install -y "php$v-fpm"
+    $pkg_mgr install -y  php-cli || $pkg_mgr install -y "php$v-cli" 
+    $pkg_mgr install -y  php-xml || $pkg_mgr install -y "php$v-xml"
+    $pkg_mgr -y install php-mysqlnd || $pkg_mgr -y install "php$v-mysql" 
+    $pkg_mgr install -y  php-mbstring || $pkg_mgr install -y "php$v-mbstring" 
+    $pkg_mgr install -y  php-gd || $pkg_mgr install -y "php$v-gd" 
+    $pkg_mgr install -y  php-curl || $pkg_mgr install -y "php$v-curl" 
+    $pkg_mgr install -y  php-zip || $pkg_mgr install -y "php$v-zip" 
+  } 2> /dev/null
   php_bin="/usr/sbin/php-fpm${v}"
   local base_conf="/etc/one-click/php/$domain"
   local run_dir="/run/one-click/$domain"
@@ -3734,7 +3777,7 @@ create_isolated_php_runtime() {
   chmod 700 "$lib_dir"
   cat > "$ini_file" <<EOF
 [PHP]
-memory_limit = 256M
+memory_limit = 1024M
 upload_max_filesize = 64M
 post_max_size = 64M
 expose_php = Off
@@ -3800,7 +3843,10 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable "php-fpm@$domain"
-  systemctl start "php-fpm@$domain"
+  if ! systemctl start "php-fpm@$domain" > /dev/null; then
+    sed -Ei 's/(php-fpm)[0-9.]+/\1/' $fpm_conf
+    systemctl start "php-fpm@$domain"
+  fi
   if systemctl is-active --quiet "php-fpm@$domain"; then
     success "PHP $php_ver runtime for $domain is active."
     info "Socket: $run_dir/php.sock" "Logs:  $log_dir/php-fpm.log"
@@ -5750,16 +5796,41 @@ install_nextcloud() {
       redis_conf="/etc/redis/redis.conf"
       php_user="$webserver"
     else
-      redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
-      dnf -y module enable redis:$redis_ver
-      $pkg_mgr install -y redis php-pecl-redis
-      systemctl enable redis --now
-      local service="redis-${domain}"
-      redis_conf="/etc/redis/redis.conf"
+      if [[ -d /run/redis ]]; then
+        redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
+        dnf -y module enable redis:$redis_ver
+        $pkg_mgr install -y redis php-pecl-redis
+        systemctl enable redis --now
+        local service="redis-${domain}"
+        redis_conf="/etc/redis/redis.conf"
+        redis_execstart=/usr/bin/redis-server
+      else
+        redis_ver=$(sort -rV <(awk '$1=="valkey"{print $2}' <(dnf module list valkey 2>/dev/null)) | head -1)
+        $pkg_mgr install -y php-pecl-redis
+        local service="redis-${domain}"
+        $pkg_mgr install -y valkey > /dev/null
+        systemctl enable --now valkey > /dev/null
+        conf="/etc/valkey/one-click/${domain}.conf"
+        redis_conf="/etc/valkey/valkey.conf"
+        redis_execstart=/usr/bin/valkey-server
+      fi
       php_user="$webserver"
     fi
     redis_pw=$(openssl rand -base64 32)
-    local sock="/run/redis/redis-${domain}.sock"
+    if [[ -d /run/valkey ]]; then
+      sock="/run/valkey/redis-${domain}.sock"
+      readpath=/run/valkey/
+      redis_user=valkey
+      redis_dir=valkey
+      for red in /usr/bin/valkey-*; do
+        cp -f $red /usr/bin/redis-${red##*-}
+      done
+    else
+      sock="/run/redis/redis-${domain}.sock"
+      readpath=/run/redis/
+      redis_user=redis
+      redis_dir=redis
+    fi
     if ! redis-cli ping &>/dev/null; then
       error "Redis failed to install"
       return 1
@@ -5773,8 +5844,8 @@ install_nextcloud() {
     echo "REDIS_PASS=$redis_pw" >> "$nc_root/meta.conf"
     setup_redis "$domain"
     redis_service "$domain"
-    usermod -aG redis "$webserver_user"
-    usermod -aG redis "$web_user"
+    usermod -aG $redis_user "$webserver_user"
+    usermod -aG $redis_user "$web_user"
     systemctl daemon-reexec
     systemctl enable "${service}" --now
     for i in {1..10}; do
@@ -5784,16 +5855,16 @@ install_nextcloud() {
       sleep 1
     done
     if [[ ! -S "$sock" ]]; then
-      error "Socket /run/redis-${domain}.sock was never created. Check: journalctl -u redis-${domain}"
+      error "Socket $sock was never created. Check: journalctl -u redis-${domain}"
       return 1
     else
       success "Isolated redis socket created"
     fi
-    chown redis:$web_user "$sock"
+    chown $redis_user:$web_user "$sock"
     mkdir -p /etc/systemd/system/php-fpm@${domain}.service.d/
     cat > /etc/systemd/system/php-fpm@${domain}.service.d/${domain}-redis.conf <<EOF
 [Service]
-ReadWritePaths=/run/redis/
+ReadWritePaths="$readpath"
 EOF
     systemctl daemon-reload
     systemctl restart php-fpm@${domain}.service
