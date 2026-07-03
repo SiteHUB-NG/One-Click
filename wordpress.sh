@@ -797,8 +797,17 @@ EOF
 # ==== REDIS ====
 setup_redis() {
   local domain="$1"
-  #local conf="/etc/redis/one-click/${domain}.conf"
-  #local sock="/run/redis/redis-${domain}.sock"
+  if ! command -v redis-server > /dev/null; then
+    redis_execstart=/usr/bin/valkey-server
+    conf="/etc/valkey/one-click/${domain}.conf"
+    redis_conf="/etc/valkey/valkey.conf"
+    redis_ver=$(sort -rV <(awk '$1=="valkey"{print $2}' <(dnf module list valkey 2>/dev/null)) | head -1)
+  else
+    redis_execstart=/usr/bin/redis-server
+    conf="/etc/redis/one-click/${domain}.conf"
+    redis_conf="/etc/redis/redis.conf"
+    redis_ver=$(sort -rV <(awk '$1=="redis"{print $2}' <(dnf module list redis 2>/dev/null)) | head -1)
+  fi
   local data_dir="/var/lib/redis/${domain}"
   mkdir -p "$data_dir" $(dirname "$conf")
   chown $redis_user:$redis_user "$data_dir"
