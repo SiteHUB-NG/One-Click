@@ -134,7 +134,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "                          Example: alias-create office 1.2.3.4 5.6.7.8" \
     "  alias-append            Add additional IPs to an existing alias." \
     "  alias-prune             Remove specific IPs from an alias." "" \        
-    "$(tput smul)$(tput bold)Sensitive Ports$(tput sgr0)$(tput rmul)" \
+    "$(tput smul)$(tput bold)Sensitive Ports$(tput sgr0)$(tput rmul)." \
     "  sensitive <ports...>    Mark ports as sensitive to trigger confirmation" \
     "                          before firewall changes." \
     "  sensitive-list          Display all ports currently marked sensitive." \
@@ -204,6 +204,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  create                  Create a new KVM instance on the selected peer member" \
     "  delete                  Delete a KVM instance on a selected peer hypervisor" \
     "  edit                    Edit a VPS' configuration" \
+	"  console                 Access serial console for VMs from controller." \
     "  reinstall               Reinstall the OS of a target fleet peer." \
     "  snapshot                Create, delete and restore snapshots" \
     "  backup                  Create, delete and restore backups" \
@@ -273,8 +274,15 @@ log_error_file="${log_dir}/one-click-error.log"
 recovery_base="${base}/boot-recovery-tool"
 recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
-nic="$(awk -F"[: ]" '/state UP/{print $3}' <(ip link))"
-nic=$(echo "$nic" | head -n 1 | xargs)
+nic=$(ip route show default | awk '{print $5}')
+if [[ -z "$nic" ]]; then
+  nic=$(awk '{print $5}' <(ip -6 r s default))
+fi
+if ip link show br0 &> /dev/null; then
+  nic=br0
+else
+  nic="$nic"
+fi
 sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
 updated="June 2026"
 version="1.2.0"
@@ -438,20 +446,6 @@ load_body() {
   fi
 }
 # ==== Load Without Calling ====
-# ==== IDS Scanner ====
-scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/scanner.py"
-backup_scanner_url=""
-# ==== Alt Mirror ====
-#backup_scanner_url="https://as214354.network/scanner.py"
-scanner_cache_file="${cache_dir:-}/scanner.py"
-load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
-# ==== Guard ====
-scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/wordpress.sh"
-backup_scanner_url=""
-# ==== Alt Mirror ====
-#backup_scanner_url="https://as214354.network/wordpress.sh"
-scanner_cache_file="${cache_dir:-}/wordpress.sh"
-load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
 # ==== Functions ====
 func_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/functions.sh"
 backup_func_url=""
@@ -459,6 +453,20 @@ backup_func_url=""
 #backup_func_url="https://as214354.network/functions.sh"
 func_cache_file="${cache_dir:-}/functions.sh"
 load_body "$func_url" "$backup_func_url" "$cache_dir" "$func_cache_file"
+# ==== Guard ====
+scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/wordpress.sh"
+backup_scanner_url=""
+# ==== Alt Mirror ====
+#backup_scanner_url="https://as214354.network/wordpress.sh"
+scanner_cache_file="${cache_dir:-}/wordpress.sh"
+load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
+# ==== IDS Scanner ====
+scanner_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/scanner.py"
+backup_scanner_url=""
+# ==== Alt Mirror ====
+#backup_scanner_url="https://as214354.network/scanner.py"
+scanner_cache_file="${cache_dir:-}/scanner.py"
+load_body "$scanner_url" "$backup_scanner_url" "$cache_dir" "$scanner_cache_file"
 # ==== Cron Logic ====
 cron_url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/cron.sh"
 backup_cron_url=""
@@ -1020,6 +1028,29 @@ if [[ "$1" == "--ssh" ]]; then
   fleet_ssh "$2" "${3:-}"
   exit 0
 fi
+# ==== Fleet Console ====
+if [[ "$1" == "--console" ]]; then
+  found=0
+  shopt -s nullglob
+  state_files=("/etc/one-click/fleet/state"/*.conf)
+  shopt -u nullglob
+  for file in "${state_files[@]}"; do
+  filename="${file##*/}"
+  peer_name="${filename%.conf}"
+  if [[ "$2" == "$peer_name" ]]; then
+    success "$2 found in inventory"
+    found=1
+  fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    error "$2 not found in inventory"
+    warn "Please use a valid fleet peer"
+    exit 1
+  fi
+  build_vars
+  fleet_console "$2" "${3:-}"
+  exit 0
+fi
 # ==== Fleet Bench ====
 if [[ "$1" == "flbench" ]]; then
   build_vars
@@ -1085,6 +1116,10 @@ if [[ "$1" == "--proxy" ]]; then
 fi
 # ==== Fleet Hypervisor ====
 if [[ "$1" == "--vps" ]]; then
+  if [[ "$2" == "console" ]]; then
+    fleet_console "$2" "${3:-}"
+	exit 0
+  fi
   action="${2:-}"
   if [[ "$action" == "patch" ]]; then
     if [[ -z "${3:-}" ]]; then
@@ -1109,10 +1144,12 @@ if [[ "$1" == "--vps" ]]; then
         warn "Please use a valid fleet peer"
         exit 1
       fi
+	  target=$3
     else
       warn "Executing commands on all fleet members"
+	  target=all
     fi
-    fleet_vps_patch "$3" "${4:-}"
+    fleet_vps_patch "$target" "${4:-}"
     exit 0
   fi
   if [[ "$action" == "info" ]]; then
@@ -1757,7 +1794,7 @@ if [[ "$1" == "fleet" ]]; then
       error "'$3' is neither a valid IPv4 nor IPv6 address."
       exit 1
     fi
-    fleet_add "$3" "$4"
+    fleet_add "$3" "$4" "${5:-22}" "init"
     exit 0
   fi
   if [[ "$2" == "remove" || "$2" == "rm" || "$2" == "del" || "$2" == "delete" ]]; then
@@ -1807,11 +1844,6 @@ if [[ "$1" == "fleet" ]]; then
     exit 0
   fi
   if [[ "$2" == "verify" ]]; then
-    if [[ ! -f /etc/one-click/write_inventory.sh ]]; then
-      error "Fleet not initialized" \
-	    "Run ${yellow}one-click fleet --init${reset} first"
-	    exit 1
-    fi
     fleet_verify 
     exit 0
   fi
@@ -2008,6 +2040,9 @@ if [[ "$1" == "update-y" ]]; then
       if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
         if [[ ! -s "$manpage" ]]; then
           wget -P "$man_dir" "$one_click_1" &> /dev/null
+		  if ! mandb > /dev/null; then 
+		    $pkg_mgr -y install man-db
+		  fi
           mandb -q &> /dev/null
         fi
         if [[ ! -f /usr/local/bin/one-click ]]; then
@@ -2106,7 +2141,8 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps: 'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"]=""
+  cmds["--vps"]="'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"
+  cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--proxy"]=""
@@ -2252,9 +2288,10 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps: 'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"]=""
+  cmds["--vps"]="'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
+  cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--proxy"]=""
   cmds["--ssh"]=""
   cmds["mv"]=""
