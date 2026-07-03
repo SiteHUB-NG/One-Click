@@ -10,13 +10,13 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: June 2026 == # === Version#: 1.2.0 === #
 # ====== One-Click ====== #
 # ==== Cron logic ====
-if command -v cron &> /dev/null; then
+if command -v apt &> /dev/null; then
   cron_cmd=cron
   cron_rep=cron
-elif command -v crond &> /dev/null; then
+else
   cron_cmd=crond
   cron_rep=cronie
 fi
