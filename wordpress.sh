@@ -49,7 +49,8 @@ dns_domain_root="${dns_api_root}/domains"
 dns_master_key="/etc/one-click/.dns.key"
 mkdir -p "$dns_provider_root" "$dns_domain_root" "/etc/one-click"
 if [[ -f /etc/cron.d/db-manager ]]; then
-  */10 * * * * find /etc/one-click/db-manager/runtime/tokens -type f -mmin +30 -delete
+  echo "*/10 * * * * root find /etc/one-click/db-manager/runtime/tokens -type f -mmin +30 -delete" > /etc/cron.d/db-manager
+  chmod 644 /etc/cron.d/db-manager
 fi
 if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
