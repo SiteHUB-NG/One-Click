@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: July 2026 == # == Version#: 1.2.0 === #
 # ====== One-Click ====== #
 mkdir -p "${log_dir:-}"
 touch "${log_error_file:-}" "${log_file:-}"
@@ -1387,7 +1387,6 @@ fi
 declare -A seen_ips
 for file in /etc/one-click/fleet/state/*.conf; do
   [[ ! -f "$file" ]] && continue
-  # Strict check inside unique tracker loop
   if ! grep -q '^HOSTNAME=' "$file" || ! grep -q '^IP=' "$file"; then
     continue
   fi
@@ -2549,7 +2548,7 @@ EOF
     info "Initialization path. Progressing with setup."
 	# ==== Configure WG on new peer ====
     local target_host_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --host $host | jq -r '.ansible_host')
-    fleet_wg_add $target_host_ip $host
+    #fleet_wg_add $target_host_ip $host
   elif [[ "$server_type" == "hypervisor" ]]; then
     warn "Fleet Hypervisor Member. Preparing node."
 	# == Hypervisor Path ===
@@ -2594,7 +2593,7 @@ EOF
 Address = ${hv_private_ip}/16
 MTU = 1412
 SaveConfig = true
-DNS = 10.10.0.1,8.8.8.8
+#DNS = 10.10.0.1,8.8.8.8
 PrivateKey = ${hv_private_key}
 ListenPort = 51821
 
@@ -3395,7 +3394,7 @@ fleet_bench() {
       return 1
     fi
   fi
-  if pgrep -x flbench >/dev/null || pgrep -x fl >/dev/null; then
+  if pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
     error "A benchmark is already running on localhost."
     return 1
   fi
@@ -3417,7 +3416,7 @@ fleet_bench() {
         exit 0
       fi
       if ssh -n -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=1 -o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
-        "pgrep -x flbench >/dev/null || pgrep -x fl >/dev/null" 2>/dev/null; then
+        "pgrep -af '/usr/local/bin/one-click fl' > /dev/null" 2>/dev/null; then
         echo "$host" > "${tmp_check_dir}/${host}.active"
       fi
     ) &
@@ -3453,40 +3452,110 @@ fleet_bench() {
     )
   done
   info "Preparing fleet environment. Flushing stale metrics sheets."
-  ANSIBLE_HOST_KEY_CHECKING=False \
-    ANSIBLE_SSH_TIMEOUT=3 \
-    ANSIBLE_GATHERING=explicit \
-    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-    ansible all \
-    -i "$fleet_root/inventory.yml" \
-    -u oneclick --become \
-    -m shell -a "
-      bench_dir=\"/etc/one-click/ocb/benchmarks\"
-      mkdir -p \"\$bench_dir/archive\"
-      ts=\$(date +%Y%m%d-%H%M%S)
-      if [ -f \"\$bench_dir/latest.json\" ]; then
-        mv \"\$bench_dir/latest.json\" \"\$bench_dir/archive/latest-\${ts}.json\"
-      fi
-      rm -f \"\$bench_dir/COMPLETE\" \"\$bench_dir/job.state\"
-    " &>/dev/null || true
-  info "Spawning background benchmark on localhost..."
+  ansible-inventory -i /etc/one-click/fleet/inventory.yml --list | \
+  jq -r '._meta.hostvars | to_entries[] | "\(.key) \(.value.ansible_host)"' | \
+  while read -r name ip; do
+    [[ "$ip" == "$CONTROLLER_IP" ]] && continue
+	if ! ping -c1 $ip &> /dev/null; then
+	  echo "${red}[$name]:${reset} $name is unresponsive. Skipping..."
+	  continue
+	fi
+	echo "$(tput setaf 216)[$name]:$(tput sgr 0) Preparing remote files"
+    scp -r \
+      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout=1 \
+      -o ConnectionAttempts=1 \
+      -o UserKnownHostsFile=/dev/null \
+      /var/cache/one-click/* \
+      "oneclick@${ip}:/home/oneclick/" &> /dev/null || true
+	scp \
+      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+      -o StrictHostKeyChecking=no \
+      -o BatchMode=yes \
+      -o ConnectTimeout=1 \
+      -o ConnectionAttempts=1 \
+      -o UserKnownHostsFile=/dev/null \
+      /usr/local/bin/one-click \
+      "oneclick@${ip}:/home/oneclick/one-click" &> /dev/null || true
+	echo "$(tput setaf 216)[$name]:$(tput sgr 0) Spawning background benchmark on $name"
+    ssh -f \
+      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "oneclick@$ip" "
+	    echo 'nameserver 8.8.8.8' | sudo tee -a /etc/resolv.conf > /dev/null
+	    echo 'nameserver 1.1.1.1' | sudo tee -a /etc/resolv.conf > /dev/null
+	    if [ ! -f /usr/local/bin/one-click ]; then
+		  sudo mkdir -p /var/log/one-click/
+	      sudo bash /home/oneclick/one-click setup
+	    fi
+	    if ! command -v iperf3 &> /dev/null; then
+	      if ! command -v apt &> /dev/null; then
+		    sudo apt -y update
+            echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y iperf3
+		  else
+		    sudo dnf -y install iperf3
+		  fi
+	    fi
+		if ! command -v fio &> /dev/null; then
+		  if ! command -v apt &> /dev/null; then
+		    sudo apt -y update
+            echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
+		  else
+		    sudo dnf -y install fio
+		  fi
+		fi
+  	    sudo mkdir -p /var/cache/one-click
+  	    sudo mv -f /home/oneclick/*.sh /var/cache/one-click/
+        bench_dir='/etc/one-click/ocb/benchmarks'
+        sudo mkdir -p \"\$bench_dir/archive\"
+        ts=\$(date +%Y%m%d-%H%M%S)
+        if [ -f \"\$bench_dir/latest.json\" ]; then
+          sudo mv \"\$bench_dir/latest.json\" \"\$bench_dir/archive/latest-\${ts}.json\"
+        fi
+        sudo rm -f \"\$bench_dir/COMPLETE\" \"\$bench_dir/job.state\" \"/etc/one-click/ocb/benchmarks/latest.json\"
+	    echo 'RUNNING' | sudo tee /etc/one-click/ocb/benchmarks/job.state
+        sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl\"  > /dev/null 2>&1 &
+		suco cp \"/etc/one-click/ocb/benchmarks/latest.json\" \"/etc/one-click/fleet/benchmarks/localhost.json\" &> /dev/null & || true
+	    rm -f /home/oneclick/one-click /home/oneclick/*.sh
+	" < /dev/null &> /dev/null || true
+    success "$name ($ip) is now running One-Click Bench!"
+  done
+  echo "$(tput setaf 216)[$(hostname -s)]:$(tput sgr 0) Spawning background benchmark on Controller"
+  mkdir -p /var/log/one-click/
   rm -f /etc/one-click/ocb/benchmarks/COMPLETE \
     /etc/one-click/ocb/benchmarks/job.state \
     /etc/one-click/ocb/benchmarks/latest.json
-  nohup /bin/bash -c '
-    /bin/bash -lc "one-click fl" && \
-    cp "/etc/one-click/ocb/benchmarks/latest.json" "$fleet_root/benchmarks/localhost.json"
-  ' > /var/log/one-click/one-click-bench-stream.log 2>&1 &
-  info "Spawning background benchmarks across remote fleet..."
-  ANSIBLE_HOST_KEY_CHECKING=False \
-    ANSIBLE_SSH_TIMEOUT=3 \
-    ANSIBLE_GATHERING=explicit \
-    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-    ansible-playbook \
-    -i "$fleet_root/inventory.yml" \
-    -u oneclick \
-    "$fleet_root/playbooks/bench.yml" &> /dev/null &
-  success "All benchmark jobs dispatched successfully!"
+  if ! command -v iperf3 &> /dev/null; then
+	if command -v apt &> /dev/null; then
+	  apt -y update
+      echo 'iperf3 iperf3/start_daemon boolean false' | debconf-set-selections
+      DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3
+    else
+	  dnf -y install iperf3
+    fi
+  fi
+  if ! command -v fio &> /dev/null; then
+	if ! command -v apt &> /dev/null; then
+	  sudo apt -y update
+      echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+      DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
+	else
+      sudo dnf -y install fio
+	fi
+  fi
+  echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
+  nohup /bin/bash -lc "TERM=xterm-256color one-click fl" < /dev/null &> /dev/null &
+  success "Controller (${sys_ip:-${sys_ipv6:-}}) is now running One-Click Bench!"
+  cp "/etc/one-click/ocb/benchmarks/latest.json" "/etc/one-click/fleet/benchmarks/localhost.json" &> /dev/null || true
+  success "${green}All benchmark jobs dispatched successfully!${reset}"
   info "Run ${orange}'one-click fleet status'${reset} to check on progress or find logs in '$fleet_root/benchmarks/'"
 }
 fleet_status() {
@@ -3495,154 +3564,100 @@ fleet_status() {
   build_vars
   local bench_dir="$fleet_root/benchmarks"
   mkdir -p "$bench_dir"
+  local CONTROLLER_IP=""
   if [[ -f "$fleet_root/controller.env" ]]; then
     . "$fleet_root/controller.env"
-    if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
-      local remote_bench_files
-      remote_bench_files=$(ssh \
-        -n \
-        -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-        -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-        -o ConnectTimeout=1 \
-        -o BatchMode=yes \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        oneclick@"$CONTROLLER_IP" \
-        "sudo find $bench_dir/ -maxdepth 1 -name '*.json' -printf '%f\n'" 2>/dev/null)
-      if [[ -n "$remote_bench_files" ]]; then
-        for f in $remote_bench_files; do
-          [[ "$f" == "${local_host}.json" ]] && continue
-          ssh \
-            -n \
-            -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-            -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-            -o ConnectTimeout=1 \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            oneclick@"$CONTROLLER_IP" \
-            "sudo cat $bench_dir/$f" > "$bench_dir/$f" 2>/dev/null
-        done
-      fi
-    else
-      ANSIBLE_HOST_KEY_CHECKING=False \
-        ANSIBLE_SSH_TIMEOUT=3 \
-        ANSIBLE_GATHERING=explicit \
-        ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-        ansible-playbook \
-        -i "$fleet_root/inventory.yml" \
-        -u oneclick \
-        -e "local_fleet_root=$fleet_root" \
-        "$fleet_root/playbooks/fetch_results.yml" &> /dev/null || true
-    fi
   fi
-  printf "${magenta}%-20s ${magenta}%-15s ${magenta}%s\n" "HOSTNAME" "JOB STATUS" "RESULT FILE${reset}"
-  printf "${blue}%-20s ${blue}%-15s ${blue}%s\n" "--------" "----------" "-----------${reset}"  
+  if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
+    local remote_bench_files
+    remote_bench_files=$(ssh \
+      -n \
+      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+      -o ConnectTimeout=1 \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      oneclick@"$CONTROLLER_IP" \
+      "sudo find $bench_dir/ -maxdepth 1 -name '*.json' -printf '%f\n'" 2>/dev/null)
+    if [[ -n "$remote_bench_files" ]]; then
+      for f in $remote_bench_files; do
+        [[ "$f" == "${local_host}.json" ]] && continue
+        ssh \
+          -n \
+          -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+          -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+          -o ConnectTimeout=1 \
+          -o BatchMode=yes \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          oneclick@"$CONTROLLER_IP" \
+          "sudo cat $bench_dir/$f" > "$bench_dir/$f" 2>/dev/null
+      done
+    fi
+  else
+    set +e
+    ANSIBLE_HOST_KEY_CHECKING=False \
+      ANSIBLE_SSH_TIMEOUT=3 \
+      ANSIBLE_GATHERING=explicit \
+      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+      ansible-playbook \
+      -i "$fleet_root/inventory.yml" \
+      -u oneclick \
+      -e "local_fleet_root=$fleet_root" \
+      "$fleet_root/playbooks/fetch_results.yml" &> /dev/null
+	set -e
+  fi
   local local_status="IDLE"
-  local ll_status="${orange}"
-  local local_file="-"
   local is_local_active=false
   if grep -q "$local_host" "$fleet_root/inventory.yml" 2>/dev/null || [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
     is_local_active=true
-    # PRIORITY FIX: Check live running state BEFORE processing older saved filesystem JSON files
-    if pgrep -x flbench >/dev/null || pgrep -x fl >/dev/null; then
+    if pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
       local_status="RUNNING"
     elif [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
       local_status=$(cat /etc/one-click/ocb/benchmarks/job.state 2>/dev/null)
     elif [[ -f /etc/one-click/ocb/benchmarks/COMPLETE ]]; then
       local_status="COMPLETE"
     elif [[ -f "$bench_dir/${local_host}.json" ]]; then
-      local_file="$bench_dir/${local_host}.json"
       local_status=$(jq -r '.status // "COMPLETE"' "$bench_dir/${local_host}.json" 2>/dev/null || echo "COMPLETE")
     fi
-    if [[ "$local_status" == "COMPLETE" ]]; then ll_status="${green}"
-    elif [[ "$local_status" == "FAILED" ]]; then ll_status="${red}"
-    elif [[ "$local_status" == "RUNNING" ]]; then ll_status="$(tput setaf 119)"
-    else ll_status="${orange}"; fi
-    printf "$(tput setaf 227)%-20s ${ll_status}%-15s ${ll_status}%s\n" "$local_host" "$local_status" "${local_file}${reset}"
   fi
-  local private_key="/etc/one-click/fleet/keys/id_ed25519"
-  [[ ! -f "$private_key" ]] && private_key="/home/oneclick/.ssh/id_ed25519"
-  local tmp_status_dir="/tmp/fleet_status_sync_${local_host}"
-  rm -rf "$tmp_status_dir" && mkdir -p "$tmp_status_dir"
   shopt -s nullglob
   local target_configs=("$fleet_root"/state/*.conf)
   shopt -u nullglob
-  for file in "${target_configs[@]}"; do
-    [[ ! -f "$file" ]] && continue
-    (
-      eval "$(sed 's/=[[:space:]]*/=/g' "$file")"
-      local host="$HOSTNAME"
-      local peer_ip="$IP"
-      [[ "$local_host" == "$host" ]] && exit 0
-      [[ -z "$peer_ip" ]] && exit 0
-      if ! grep -q "$host" "$fleet_root/inventory.yml" 2>/dev/null; then
-        exit 0
-      fi
-      local remote_check
-      remote_check=$(ssh -n -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=1 -o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
-        "if pgrep -x flbench >/dev/null || pgrep -x fl >/dev/null; then echo 'RUNNING'; elif [ -f /etc/one-click/ocb/benchmarks/job.state ]; then cat /etc/one-click/ocb/benchmarks/job.state; elif [ -f /etc/one-click/ocb/benchmarks/COMPLETE ]; then echo 'COMPLETE'; else echo 'IDLE'; fi" 2>/dev/null)
-      local status="IDLE"
-      local res_file="-"
-      local cl_status="${orange}"
-      if echo "$remote_check" | grep -q 'RUNNING'; then 
-        status="RUNNING"
-      elif echo "$remote_check" | grep -q 'FAILED'; then 
-        status="FAILED"
-      elif echo "$remote_check" | grep -q 'COMPLETE'; then 
-        status="COMPLETE"
-      elif [[ -f "$bench_dir/${host}.json" ]]; then
-        status=$(jq -r '.status // "COMPLETE"' "$bench_dir/${host}.json" 2>/dev/null || echo "COMPLETE")
-        res_file="$bench_dir/${host}.json"
-      elif echo "$remote_check" | grep -q 'IDLE'; then 
-        status="IDLE"
-      else 
-        status="OFFLINE"
-      fi
-      if [[ "$status" == "COMPLETE" ]]; then cl_status="${green}"
-      elif [[ "$status" == "FAILED" ]]; then cl_status="${red}"
-      elif [[ "$status" == "RUNNING" ]]; then cl_status="$(tput setaf 119)"
-      elif [[ "$status" == "IDLE" ]]; then cl_status="${orange}"
-      else cl_status="${red}"; fi
-      printf "$(tput setaf 227)%-20s ${cl_status}%-15s ${cl_status}%s\n" "$host" "$status" "$res_file${reset}" > "${tmp_status_dir}/${host}.raw"
-    ) &
-  done
-  wait
-  if [ -d "$tmp_status_dir" ]; then
-    cat "$tmp_status_dir"/*.raw 2>/dev/null
-    rm -rf "$tmp_status_dir"
-  fi
   echo
   echo -e "${magenta}================================================ ${orange}FLEET BENCHMARK STATUS REPORT${magenta} ==========================================================${reset}"
   echo
   (
-    echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
-    echo -e "${magenta}FLEET\tHOSTNAME\tSTATUS\tSINGLE_CORE\tMULTI_CORE\tTOTAL_TIME\tTIMESTAMP\tONE-CLICK URL\tGEEKBENCH URL${reset}"
-    echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
+    echo -e "FLEET\tHOSTNAME\tSTATUS\tSINGLE_CORE\tMULTI_CORE\tTOTAL_TIME\tTIMESTAMP\tONE-CLICK URL\tGEEKBENCH URL"
     if [ "$is_local_active" = true ]; then
       local grid_l_color="${orange}"
-      if [[ "$local_status" == "COMPLETE" ]]; then grid_l_color="${green}"
-      elif [[ "$local_status" == "RUNNING" ]]; then grid_l_color="$(tput setaf 119)"
-      elif [[ "$local_status" == "FAILED" ]]; then grid_l_color="${red}"; fi
-      if [[ -f "$bench_dir/${local_host}.json" && "$local_status" != "RUNNING" ]]; then
+      if [[ "$local_status" == "COMPLETE" ]]; then
+	    grid_l_color="${green}"
+      elif [[ "$local_status" == "RUNNING" ]]; then
+	    grid_l_color="$(tput setaf 119)"
+      elif [[ "$local_status" == "FAILED" ]]; then
+	    grid_l_color="${red}"
+	  fi
+      if [[ -f "$bench_dir/${local_host}.json" ]]; then
         jq -r --arg f_name "${local_host}" \
           --arg green "${green}" \
           --arg red "${red}" \
-          --arg orange "${orange}" \
-          --arg cyan "${cyan}" \
+          --arg orange "$(tput setaf 227)" \
+          --arg yellow "${yellow}" \
           --arg reset "${reset}" '[
-          "localhost",
-          $f_name,
-          (if .status == "COMPLETE" then $green + .status + $reset + "  " elif .status == "FAILED" then $red + .status + $reset + "  " else $orange + .status + $reset + "  " end),
-          "  " + (."Single Core Score" // "-"),
-          "  " + (."Multi Core Score" // "-"),
-          (if ."Total Time Taken" then ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
-          "  " + (.timestamp // "-"),
-          "  " + (."One-Click Results" // "-"),
-          "  " + (."GeekBench Results" // "-")
-        ] | @tsv' "$bench_dir/${local_host}.json" 2>/dev/null || echo -e "localhost\t$(tput setaf 227)${local_host}\t${grid_l_color}${local_status}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
+          $yellow + "Controller" + $reset,
+          $orange + "  " + $f_name + $reset,
+          (if .status == "COMPLETE" then $green + "    " + .status + $reset elif .status == "FAILED" then $red + "    " + .status else $orange + "    " + .status + $reset end),
+          "      " + (."Single Core Score" // "-"),
+          "      " + (."Multi Core Score" // "-"),
+          (if ."Total Time Taken" then "      " + ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
+          "      " + (.timestamp // "-"),
+          "      " + (."One-Click Results" // "-"),
+          "      " + (."GeekBench Results" // "-")
+        ] | @tsv' "$bench_dir/${local_host}.json" 2>/dev/null || echo -e "${yellow}Controller\t$(tput setaf 227)${local_host}\t${grid_l_color}${local_status}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
       else
-        echo -e "localhost\t$(tput setaf 227)${local_host}\t${grid_l_color}${local_status}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
+        echo -e "${yellow}Controller\t$(tput setaf 227)${local_host}\t${grid_l_color}${local_status}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
       fi
     fi
     for host_conf in "${target_configs[@]}"; do
@@ -3655,39 +3670,62 @@ fleet_status() {
         local target_ip="$IP"
         if ! grep -q "$lookup_target" "$fleet_root/inventory.yml" 2>/dev/null; then
           exit 0
-        fi
-        . /etc/one-click/fleet/controller.env
-        if [[ "$target_ip" == "$CONTROLLER_IP" ]]; then fleet_c="Controller"
-        else fleet_c="$lookup_target"; fi
+		fi
+		fleet_c="$lookup_target"
         local local_json="$bench_dir/${lookup_target}.json"
         local live_p_check
-        live_p_check=$(ssh -n -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=1 "oneclick@${target_ip}" \
-          "if pgrep -x flbench >/dev/null || pgrep -x fl >/dev/null; then echo 'RUNNING'; elif [ -f /etc/one-click/ocb/benchmarks/job.state ]; then cat /etc/one-click/ocb/benchmarks/job.state; elif [ -f /etc/one-click/ocb/benchmarks/COMPLETE ]; then echo 'COMPLETE'; else echo 'IDLE'; fi" 2>/dev/null)
+		set +e
+        live_p_check=$(ssh -n -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+		  -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=2 "oneclick@${target_ip}" "
+          if [ -f /etc/one-click/ocb/benchmarks/job.state ]; then
+		    cat /etc/one-click/ocb/benchmarks/job.state
+		  elif [ -f /etc/one-click/ocb/benchmarks/COMPLETE ]; then
+		    echo 'COMPLETE'
+		  elif pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
+		    echo 'RUNNING'
+		  else
+		    echo 'IDLE'
+		  fi
+		" 2>/dev/null)
+		set -e
         live_p_check=${live_p_check:-OFFLINE}
         local c_lbl="${orange}"
-        if [[ "$live_p_check" == "COMPLETE" ]]; then c_lbl="${green}"
-        elif [[ "$live_p_check" == "IDLE" ]]; then c_lbl="${orange}"
-        elif [[ "$live_p_check" == "RUNNING" ]]; then c_lbl="$(tput setaf 119)"
-        elif [[ "$live_p_check" == "OFFLINE" || "$live_p_check" == "FAILED" ]]; then c_lbl="${red}"; fi
-        if [[ -f "$local_json" && -s "$local_json" && "$live_p_check" != "RUNNING" ]]; then
-          jq -r --arg f_name "$lookup_target" --arg f_c "$fleet_c" --arg green "${green}" --arg red "${red}" --arg orange "${orange}" --arg reset "${reset}" '[
-            $f_c, $f_name,
-            (if .status == "COMPLETE" then $green + .status + $reset elif .status == "FAILED" then $red + .status + $reset else $orange + .status + $reset end),
-            "  " + (."Single Core Score" // "-"),
-            "  " + (."Multi Core Score" // "-"),
-            (if ."Total Time Taken" then ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
-            "  " + (.timestamp // "-"),
-            "  " + (."One-Click Results" // "-"),
-            "  " + (."GeekBench Results" // "-")
-          ] | @tsv' "$local_json" 2>/dev/null || echo -e "${fleet_c}\t$(tput setaf 227)${lookup_target}\t${c_lbl}${live_p_check}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
+        if echo "$live_p_check" | grep -q 'RUNNING'; then
+		  c_lbl="$(tput setaf 119)"
+        elif echo "$live_p_check" | grep -q 'COMPLETE'; then
+		  c_lbl="${green}"
+        elif echo "$live_p_check" | grep -q 'IDLE'; then
+		  c_lbl="${orange}"
         else
-          echo -e "${fleet_c}\t$(tput setaf 227)${lookup_target}\t${c_lbl}${live_p_check}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
+		  c_lbl="${red}"
+		fi
+        local parsed_status="IDLE"
+        if echo "$live_p_check" | grep -q 'RUNNING'; then
+		  parsed_status="RUNNING"
+		fi
+        if [[ -f "$local_json" && -s "$local_json" && "$parsed_status" != "RUNNING" ]]; then
+          jq -r --arg f_name "$lookup_target" --arg f_c "$fleet_c" --arg green "${green}" --arg red "${red}" --arg orange "$(tput setaf 227)" --arg yellow "${yellow}" --arg reset "${reset}" '[
+            $yellow + $f_c + $reset,
+            $orange + "  " + $f_name,
+            (if .status == "COMPLETE" then $green + "  " + .status + $reset elif .status == "FAILED" then $red + "  " + .status else $orange + "  " + .status + $reset end),
+            "    " + (."Single Core Score" // "-"),
+            "    " + (."Multi Core Score" // "-"),
+            (if ."Total Time Taken" then "    " + ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
+            "    " + (.timestamp // "-"),
+            "    " + (."One-Click Results" // "-"),
+            "    " + (."GeekBench Results" // "-")
+          ] | @tsv' "$local_json" 2>/dev/null || echo -e "${yellow}${fleet_c}\t$(tput setaf 227)${lookup_target}\t${c_lbl}${live_p_check}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
+        else
+          echo -e "${yellow}${fleet_c}\t$(tput setaf 227)${lookup_target}\t${c_lbl}${live_p_check}${reset}\t  -\t  -\t  -\t  -\t  -\t  -"
         fi
       )
     done
-    echo -e "${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}"
-  ) | column -t -s $'\t'
-  echo
+  ) | sed -e "1s/\(.*\)/${magenta}\1${reset}/" \
+          -e "1i\\\\${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}" \
+          -e "2i\\\\${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}" \
+          -e "s/\t/\t/g" \
+          -e "\$ a\\\\${yellow}-----\t--------\t------\t-----------\t----------\t----------\t---------\t-------------\t-------------${reset}" | column -t -s $'\t'
+  return
 }
 fleet_put() {
   local host="$1"
@@ -5507,7 +5545,7 @@ EOF
 Address = ${vps_private_ip}/16
 MTU = 1412
 SaveConfig = true
-DNS = 10.10.0.1,8.8.8.8,8.8.4.4
+#DNS = 10.10.0.1,8.8.8.8,8.8.4.4
 PrivateKey = ${vps_private_key}
 
 #PostUp = ip rule add table 200 from ${vps_private_ip}
@@ -5752,7 +5790,7 @@ write_files:
       MTU = 1412
       ListenPort = 51821
       PrivateKey = ${vps_private_key}
-      DNS = 10.10.0.1,8.8.8.8
+      #DNS = 10.10.0.1,8.8.8.8
 
       [Peer]
       PublicKey = ${master_pub_key}
@@ -5799,7 +5837,7 @@ write_files:
       MTU = 1412
       ListenPort = 51821
       PrivateKey = ${vps_private_key}
-      DNS = 10.10.0.1,8.8.8.8
+      #DNS = 10.10.0.1,8.8.8.8
 
       #PostUp = ip rule add table 200 from ${vps_private_ip}
       #PreDown = ip rule del table 200 from ${vps_private_ip}
@@ -6345,9 +6383,6 @@ EOF
       -o UserKnownHostsFile=/dev/null \
       oneclick@"${remote_vps_ip:-${local_vps_ip:-$vps_private_ip}}" << EOC
         if command -v apt-get >/dev/null; then
-          #while sudo fuser /var/lib/dpkg/lock-frontends >/dev/null 2>&1; do
-            #sleep 2
-          #done
           sudo apt-get update -y
           sudo apt-get install -y -o DPkg::Lock::Timeout=120 \
             wireguard-tools \
@@ -6365,9 +6400,6 @@ EOF
             qemu-guest-agent \
             iptables-services
         elif command -v yum >/dev/null; then
-          #while sudo fuser /var/run/yum.pid >/dev/null 2>&1; do
-            #sleep 2
-          #done
           sudo yum install -y \
             epel-release || true
           sudo yum install -y \
@@ -6454,8 +6486,9 @@ EOC
                 iptables-services
             fi
             systemctl daemon-reload
-            systemctl enable --now qemu-guest-agent 2>/dev/null || true
-            systemctl enable --now wg-quick@one-click 2>/dev/null || true
+            systemctl enable --now qemu-guest-agent 2> /dev/null || true
+            systemctl enable --now wg-quick@one-click 2> /dev/null || true
+			wg-quick up one-click 2> /dev/null || true
             echo '$(cat "$fleet_root/keys/id_ed25519.pub")' >> /home/oneclick/.ssh/authorized_keys
 EOC
       " 2> /dev/null
@@ -6870,6 +6903,7 @@ fleet_ssh() {
 fleet_console() {
   local target="$1"
   local port="${2:-}"
+  build_vars
   . "/etc/one-click/fleet/controller.env"
   local inventory="/etc/one-click/fleet/inventory.yml"
   local json_inv="/etc/one-click/virtualization/inventory.json"
@@ -6899,10 +6933,17 @@ fleet_console() {
   fi
   for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
     [[ -e "$key" ]] || continue
-	virsh -c "qemu+ssh://oneclick@${hypervisor}/system?keyfile=${key}&no_verify=1" console "$target"
-    if [[ $? -eq 0 ]]; then
-      return 0
-    fi
+	if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
+      virsh console "$target"
+	  if [[ $? -eq 0 ]]; then
+        return 0
+      fi
+	else
+      virsh -c "qemu+ssh://oneclick@${hypervisor}/system?keyfile=${key}&no_verify=1" console "$target"
+      if [[ $? -eq 0 ]]; then
+        return 0
+      fi
+	fi
   done
   if [[ -z "$ip" ]]; then
     error "No mapped IP found for $target."
@@ -7481,7 +7522,7 @@ PrivateKey = ${REMOTE_PRIVATE_KEY}
 Address = ${ALLOCATED_IP}/16
 ListenPort = 51821
 MTU = 1412
-DNS = 10.10.0.1
+#DNS = 10.10.0.1
 
 [Peer]
 PublicKey = ${CONTROLLER_PUBKEY}
@@ -8066,7 +8107,6 @@ fleet_rule_engine_init() {
       printf "${orange}[CHANGED]${magenta} %s\n" '=> nftables environment detected. Applying hybrid oneclick_filter structure.'
       nft add table inet oneclick_filter 2>/dev/null || true
       nft add chain inet oneclick_filter INPUT '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || true
-      nft add chain inet oneclick_filter POSTROUTING '{ type nat hook postrouting priority 100 ; }'
       nft add table ip oneclick_nat_ipv4 2>/dev/null || true
       nft add chain ip oneclick_nat_ipv4 POSTROUTING '{ type nat hook postrouting priority 100 ; }' 2>/dev/null || true
       nft add rule ip oneclick_nat_ipv4 POSTROUTING ip saddr 192.168.250.0/24 oifname "$nic" masquerade
