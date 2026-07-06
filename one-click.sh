@@ -129,11 +129,11 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "                          Example: bounce https multiport 50 556 4000" "" \
     "  range <start-end>       Apply rule across a port range." \
     "                          Example: range 1000-2000" "" \
-    "$(tput smul)$(tput bold)IP Aliases$(tput sgr0)$(tput rmul)" \
+    "$(tput smul)$(tput bold)IP Aliases$(tput sgr0)$(tput rmul)." \
     "  alias-create            Create named IP groups for easier rule management." \
     "                          Example: alias-create office 1.2.3.4 5.6.7.8" \
     "  alias-append            Add additional IPs to an existing alias." \
-    "  alias-prune             Remove specific IPs from an alias." "" \        
+    "  alias-prune             Remove specific IPs from an alias." "" \
     "$(tput smul)$(tput bold)Sensitive Ports$(tput sgr0)$(tput rmul)." \
     "  sensitive <ports...>    Mark ports as sensitive to trigger confirmation" \
     "                          before firewall changes." \
@@ -338,11 +338,20 @@ install_dep() {
     sleep 0.3
   done
   # ==== Attempt installation ====
-  if $pkg_manager -y install "$pkg_name" &>/dev/null; then
-    printf "\r%-40s ${green}[DONE]${reset}\n" "${green}[COMPLETE]: ${reset}Installing ${dep_name}"
+  if command -v apt &> /dev/null; then
+    if $pkg_manager -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" -o DPkg::Lock::Timeout=60 install "$pkg_name" < /dev/null &> /dev/null; then
+      printf "\r%-40s ${green}[DONE]${reset}\n" "${green}[COMPLETE]: ${reset}Installing ${dep_name}"
+    else
+      printf "\r%-40s ${red}[FAILED]${reset}\n" "${red}[INCOMPLETE]: ${reset}Installing ${dep_name}"
+      [[ "$fatal" == true ]] && return 1
+    fi
   else
-    printf "\r%-40s ${red}[FAILED]${reset}\n" "${red}[INCOMPLETE]: ${reset}Installing ${dep_name}"
-    [[ "$fatal" == true ]] && return 1
+    if $pkg_manager -y --setopt=install_weak_deps=False install "$pkg_name" < /dev/null &> /dev/null; then
+      printf "\r%-40s ${green}[DONE]${reset}\n" "${green}[COMPLETE]: ${reset}Installing ${dep_name}"
+    else
+      printf "\r%-40s ${red}[FAILED]${reset}\n" "${red}[INCOMPLETE]: ${reset}Installing ${dep_name}"
+      [[ "$fatal" == true ]] && return 1
+    fi
   fi
 }
 install_dependancies() {
@@ -1078,7 +1087,7 @@ if [[ "$1" == "fl" ]]; then
       fi
     fi
   fi
-  cpu_sys
+  cpu_sys &
   if [[ "$created_swap" = true ]]; then
     trap - EXIT
     sudo swapoff "$swap_file" &>/dev/null || true
@@ -2146,7 +2155,7 @@ _one_click() {
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--proxy"]=""
-  cmds["--ssh"]=""
+  cmds["--ssh"]
   cmds["mv"]=""
 
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -2213,6 +2222,17 @@ _one_click() {
   cmds["engine:'to"]=
   cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
   cmds["engine:--dry-run"]=""
+
+  if [[ "$prev" == "--ssh" || "$prev" == "--console" ]]; then
+    hosts=$(
+      ansible all \
+        -i /etc/one-click/fleet/inventory.yml \
+        --list-hosts 2>/dev/null |
+        tail -n +2
+    )
+    COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
+    return 0
+  fi
   
   _complete_tree() {
     local path="$1"
@@ -2293,7 +2313,7 @@ _one_click() {
   cmds["--nextcloud-admin"]=""
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--proxy"]=""
-  cmds["--ssh"]=""
+  cmds["--ssh"]
   cmds["mv"]=""
   
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -2363,6 +2383,17 @@ _one_click() {
   cmds["engine:audit"]=
   cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
   cmds["engine:--dry-run"]=""
+
+  if [[ "$prev" == "--ssh" || "$prev" == "--console" ]]; then
+    hosts=$(
+      ansible all \
+        -i /etc/one-click/fleet/inventory.yml \
+        --list-hosts 2>/dev/null |
+        tail -n +2
+    )
+    COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
+    return 0
+  fi
   
     _complete_tree() {
       local path="$1"
