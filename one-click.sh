@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: July 2026 == # == Version#: 1.2.0 === #
 # ====== One-Click ====== #
 # ==== Initialization ==== 
 # ==== CONFIGURABLE CONFIGURATIONS ====
@@ -2155,7 +2155,7 @@ _one_click() {
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--proxy"]=""
-  cmds["--ssh"]
+  cmds["--ssh"]=""
   cmds["mv"]=""
 
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -2313,7 +2313,7 @@ _one_click() {
   cmds["--nextcloud-admin"]=""
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--proxy"]=""
-  cmds["--ssh"]
+  cmds["--ssh"]=""
   cmds["mv"]=""
   
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
