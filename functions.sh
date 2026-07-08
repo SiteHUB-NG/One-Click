@@ -1653,7 +1653,7 @@ tasks:
 EOF
 
   # ==== VPS Console Pre-Req ====
-  cat > "$flett_root/playbooks/vps_console.yml" <<'EOF'
+  cat > "$fleet_root/playbooks/vps_console.yml" <<'EOF'
 # Written by Chike Egbuna for One-Click ToolBox
 ---
 - name: Configure Hypervisors for Remote Virsh Console Access
@@ -2396,6 +2396,7 @@ fleet_add() {
   local virt_dir="/etc/one-click/virtualization"
   local FLEET_AVAILABLE_IPS_FILE="${virt_dir}/available_ips.txt"
   local FLEET_USED_IPS_FILE="${virt_dir}/used_ips.txt"
+  local hypervisor_wg_file="/etc/one-click/fleet/hypervisor_assigned_wg_ips.json"
   if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
     warn "Only the controller can add and remove peers."
 	return 1
@@ -2544,12 +2545,11 @@ EOF
 	  /^changed/s/] ->/${orange}&${magenta}/;
 	  /^fatal/s/(\[)([^]]*)/${red}\1${blue}\2${red}/;
     " || true
-  if [[ "$server_type" == "init" ]]; then
+  if [[ "$server_type" == "init" || "$server_type" == "hypervisor" ]]; then
     info "Initialization path. Progressing with setup."
 	# ==== Configure WG on new peer ====
     local target_host_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --host $host | jq -r '.ansible_host')
     #fleet_wg_add $target_host_ip $host
-  elif [[ "$server_type" == "hypervisor" ]]; then
     warn "Fleet Hypervisor Member. Preparing node."
 	# == Hypervisor Path ===
     local hv_node_name="${host}"
@@ -2570,7 +2570,6 @@ EOF
     hv_preshared_key=$(wg genpsk)
     master_pub_key=$(cat /etc/wireguard/public.key)
     info "Registering Tunnel Endpoint locally in Controller configuration files."
-    echo -e "\n# Peer IP Assignment (Hypervisor): $hv_node_name" >> /etc/wireguard/one-click.conf
     cat >> /etc/wireguard/one-click.conf <<EOF
 
 # ==== Hypervisor Cluster Node: $hv_node_name ====
@@ -2587,7 +2586,7 @@ EOF
     sed -i "1d" "$FLEET_AVAILABLE_IPS_FILE"
     echo "$hv_private_ip" >> "$FLEET_USED_IPS_FILE"
     local hv_wg_stage="/tmp/wg_build_${hv_node_name}.conf"
-    info "Rendering WireGuard interface credentials into staging layout..."
+    info "Rendering WireGuard interface credentials into staging layout."
     cat > "$hv_wg_stage" <<EOF
 [Interface]
 Address = ${hv_private_ip}/16
@@ -2615,6 +2614,12 @@ EOF
       -u oneclick --become \
       -m copy -a "src=$hv_wg_stage dest=/etc/wireguard/one-click.conf owner=root group=root mode=0600" &>/dev/null
     rm -f "$hv_wg_stage"
+	mkdir -p "$(dirname "$hypervisor_wg_file")"
+    if [[ ! -f "$hypervisor_wg_file" ]] || [[ ! -s "$hypervisor_wg_file" ]] || ! jq empty "$hypervisor_wg_file" 2>/dev/null; then
+        echo "{}" > "$hypervisor_wg_file"
+    fi
+    jq --arg hv "$host" --arg ip "$hv_private_ip" \
+       '.[$hv] = $ip' "$hypervisor_wg_file" > "${hypervisor_wg_file}.tmp" && mv "${hypervisor_wg_file}.tmp" "$hypervisor_wg_file"
     info "Invoking runtime network shifts and restarting service on hypervisor host."
 	set +e
     ANSIBLE_HOST_KEY_CHECKING=False \
@@ -2625,6 +2630,13 @@ EOF
       -i /etc/one-click/fleet/inventory.yml \
       -u oneclick --become \
       -m shell -a "
+	    if ! command -v wg > /dev/null; then
+		  if command -v apt > /dev/null; then
+		    apt -y install wireguard-tools &> /dev/null
+		  else
+		    dnf -y install wireguard-tools &> /dev/null
+		  fi
+		fi
 	    sysctl -w net.ipv4.ip_forward=1 && \
         echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
 		echo 'net.ipv4.conf.all.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
@@ -2657,7 +2669,7 @@ EOF
         systemctl restart wg-quick@one-click 2>/dev/null
       " &>/dev/null   
 	set -e
-    success "Hypervisor mesh pipe successfully initialized. Interface link live at: $hv_private_ip"
+    success "Hypervisor mesh pipe successfully initialized. Interface link live at:$(tput setaf 97) $hv_private_ip ${reset}"
   elif [[  "$server_type" == "vps" ]]; then
     info "VPS path deployment."
     ANSIBLE_HOST_KEY_CHECKING=False \
@@ -2695,7 +2707,6 @@ EOF
     fi
     success "Cluster mesh successfully updated. Each peer now shares mutual rootless trust."
 	fleet_rule_engine_init
-	
   else
     error "Failed to mesh peer authentication keys."
     return 1
@@ -3394,10 +3405,6 @@ fleet_bench() {
       return 1
     fi
   fi
-  if pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
-    error "A benchmark is already running on localhost."
-    return 1
-  fi
   info "Checking fleet for active benchmark jobs..."
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
   [[ ! -f "$private_key" ]] && private_key="/home/oneclick/.ssh/id_ed25519"
@@ -3415,9 +3422,14 @@ fleet_bench() {
       if [[ -z "$peer_ip" || "$peer_ip" == "null" ]]; then
         exit 0
       fi
-      if ssh -n -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=1 -o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
-        "pgrep -af '/usr/local/bin/one-click fl' > /dev/null" 2>/dev/null; then
-        echo "$host" > "${tmp_check_dir}/${host}.active"
+      if ssh -n \
+	    -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+		-o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+		-o StrictHostKeyChecking=no \
+		-o BatchMode=yes -o ConnectTimeout=1 \
+		-o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
+        "cat /etc/one-click/ocb/benchmarks/job.state > /dev/null" 2>/dev/null; then
+          echo "$host" > "${tmp_check_dir}/${host}.active"
       fi
     ) &
   done
@@ -3431,10 +3443,6 @@ fleet_bench() {
       active_hosts=$(cat "${active_files[@]}" | xargs)
     fi
     rm -rf "$tmp_check_dir"
-  fi
-  if [[ -n "$active_hosts" && "$active_hosts" != *"?"* ]]; then
-    error "Benchmarks already running on remote endpoints: $active_hosts"
-    return 1
   fi
   info "Preparing local environment. Flushing stale metrics sheets."
   mkdir -p "$fleet_root/benchmarks/archive"
@@ -3456,6 +3464,10 @@ fleet_bench() {
   jq -r '._meta.hostvars | to_entries[] | "\(.key) \(.value.ansible_host)"' | \
   while read -r name ip; do
     [[ "$ip" == "$CONTROLLER_IP" ]] && continue
+	if [[ " $active_hosts " == *" $name "* ]]; then
+      echo -e "$(tput setaf 216)[$name]:${reset} Benchmark already running on ${red}${name}${reset}. Skipping..."
+      continue
+    fi
 	if ! ping -c1 $ip &> /dev/null; then
 	  echo "${red}[$name]:${reset} $name is unresponsive. Skipping..."
 	  continue
@@ -3506,10 +3518,12 @@ fleet_bench() {
 		if ! command -v fio &> /dev/null; then
 		  if ! command -v apt &> /dev/null; then
 		    sudo apt -y update
-            echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+            echo 'fio fio/start_daemon boolean false' | sudo debconf-set-selections
             DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
+			DEBIAN_FRONTEND=noninteractive sudo apt-get install -y sysbench
 		  else
 		    sudo dnf -y install fio
+			sudo dnf -y install sysbench
 		  fi
 		fi
   	    sudo mkdir -p /var/cache/one-click
@@ -3528,6 +3542,15 @@ fleet_bench() {
 	" < /dev/null &> /dev/null || true
     success "$name ($ip) is now running One-Click Bench!"
   done
+  fleet_local_bench
+}
+fleet_local_bench() {
+  if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+    if [[ $(cat /etc/one-click/ocb/benchmarks/job.state) == "RUNNING" ]]; then
+	  echo "${red}[$(tput setaf 216)[$(hostname -s)]${red}]${reset}: A benchmark is already running on the Controller"
+      return 1
+    fi
+  fi
   echo "$(tput setaf 216)[$(hostname -s)]:$(tput sgr 0) Spawning background benchmark on Controller"
   mkdir -p /var/log/one-click/
   rm -f /etc/one-click/ocb/benchmarks/COMPLETE \
@@ -3543,14 +3566,16 @@ fleet_bench() {
     fi
   fi
   if ! command -v fio &> /dev/null; then
-	if ! command -v apt &> /dev/null; then
-	  sudo apt -y update
+	if command -v apt &> /dev/null; then
+	  (sudo apt -y update 
       echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
-      DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
+      DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio) &> /dev/null
 	else
-      sudo dnf -y install fio
+	  (dnf -y install iperf3
+      dnf -y install fio) &> /dev/null
 	fi
   fi
+  mkdir -p /etc/one-click/ocb/benchmarks/
   echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
   nohup /bin/bash -lc "TERM=xterm-256color one-click fl" < /dev/null &> /dev/null &
   success "Controller (${sys_ip:-${sys_ipv6:-}}) is now running One-Click Bench!"
@@ -3612,14 +3637,12 @@ fleet_status() {
   local is_local_active=false
   if grep -q "$local_host" "$fleet_root/inventory.yml" 2>/dev/null || [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
     is_local_active=true
-    if pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
-      local_status="RUNNING"
-    elif [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+    if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
       local_status=$(cat /etc/one-click/ocb/benchmarks/job.state 2>/dev/null)
     elif [[ -f /etc/one-click/ocb/benchmarks/COMPLETE ]]; then
       local_status="COMPLETE"
-    elif [[ -f "$bench_dir/${local_host}.json" ]]; then
-      local_status=$(jq -r '.status // "COMPLETE"' "$bench_dir/${local_host}.json" 2>/dev/null || echo "COMPLETE")
+    else
+      local_status=IDLE
     fi
   fi
   shopt -s nullglob
@@ -3681,8 +3704,6 @@ fleet_status() {
 		    cat /etc/one-click/ocb/benchmarks/job.state
 		  elif [ -f /etc/one-click/ocb/benchmarks/COMPLETE ]; then
 		    echo 'COMPLETE'
-		  elif pgrep -af '/usr/local/bin/one-click fl' >/dev/null; then
-		    echo 'RUNNING'
 		  else
 		    echo 'IDLE'
 		  fi
@@ -5359,10 +5380,34 @@ fleet_vps_provision() {
   if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
     die "Can only be managed by the controller (${sys_ip:-${sys_ipv6}})"
   fi
+  local vps_name="$1"
+  local target_host="$2"
+  local network_mode="${3:-nat}"
+  local base_image_name="$4"
+  local disk_size="$5"
+  local raw_password="$6"
+  local vps_ram="${7:-1024}"
+  vps_ram=$(normalize_memory "$vps_ram")
+  local vps_cpu="${8:-2}"
+  local public_ip="${9:-}"
+  local LOCK_FILE="/tmp/vps_ip_allocation.lock"
+  local target_wg_port
+  local storage_script="/etc/one-click/virtualization/initialize_storage.sh"
+  local inventory_file="/etc/one-click/virtualization/inventory.json"
+  warn "VPS Deployment initializing."
+  local name_exists
+  name_exists=$(jq --arg name "$vps_name" 'any(.[] ; .name == $name)' "$inventory_file" 2>/dev/null || true)
   cleanup_poisoned_session() {
     local exit_code=$?
 	local inventory_file=/etc/one-click/fleet/inventory.yml
+	local inventory_json="/etc/one-click/virtualization/inventory.json"
     if [[ "$exit_code" -ne 0 ]]; then
+      local exists_in_yaml=false
+      if [[ -f "$inventory_file" ]] && [[ -n "$vps_name" ]]; then
+        if grep -E -q "^[[:space:]]*${vps_name}:" "$inventory_file"; then
+          exists_in_yaml=true
+        fi
+      fi
       warn "Deployment interrupted or timed out. Purging corrupted hypervisor states."
 	  if [[ -f "$inventory_file" ]] && [[ -n "$vps_name" ]]; then
         sed -i "/^[[:space:]]*${vps_name}:/,+2d" "$inventory_file"
@@ -5376,6 +5421,9 @@ fleet_vps_provision() {
         #flock -u 9
         #exec 9>&-
       fi
+	  if [[ "$exists_in_yaml" = false ]]; then
+	    jq --arg name "$vps_name" 'del(.[] | select(.name == $name))' "$inventory_json" > "$inventory_json.tmp" && mv "$inventory_json.tmp" "$inventory_json"
+	  fi
       if [[ "$target_host" == "$(hostname -s)" || "$target_host" == "127.0.0.1" ]]; then
         virsh destroy "$vps_name" 2>/dev/null || true
         virsh undefine "$vps_name" --remove-all-storage 2>/dev/null || true
@@ -5401,23 +5449,6 @@ fleet_vps_provision() {
     fi
   }
   trap cleanup_poisoned_session EXIT INT TERM
-  local vps_name="$1"
-  local target_host="$2"
-  local network_mode="${3:-nat}"
-  local base_image_name="$4"
-  local disk_size="$5"
-  local raw_password="$6"
-  local vps_ram="${7:-1024}"
-  vps_ram=$(normalize_memory "$vps_ram")
-  local vps_cpu="${8:-2}"
-  local public_ip="${9:-}"
-  local LOCK_FILE="/tmp/vps_ip_allocation.lock"
-  local target_wg_port
-  local storage_script="/etc/one-click/virtualization/initialize_storage.sh"
-  local inventory_file="/etc/one-click/virtualization/inventory.json"
-  warn "VPS Deployment initializing."
-  local name_exists
-  name_exists=$(jq --arg name "$vps_name" 'any(.[] ; .name == $name)' "$inventory_file" 2>/dev/null || true)
   if ! wg > /dev/null; then
     $pkg_mgr install -y wireguard-tools
   fi
@@ -6198,15 +6229,15 @@ EOF
           --noautoconsole
         rm -rf \"\$work_dir\"
         rm -f /tmp/${vps_name}_user_data.yml /tmp/${vps_name}_meta_data.yml
-      " 2> /dev/null | sed -En "/Changed/ {
-		s,(.*),${orange}[CHANGED]${yellow} localhost => $target_host ${magenta}Created KVM on $target_host hypervisor...${reset},p;
-	  };
-	  /SUCCESS/ {
-		s,(.*),${green}[OK]${yellow} localhost => $target_host ${magenta}Created KVM on $target_host hypervisor...${reset},p;
-	  };
-	  /Error/ {
-	    s/Error[ \t]+(.*)/${red}[ERROR]${yellow} localhost => $target_host ${magenta} \1${reset}/p;
-	  }"
+      " #2> /dev/null | sed -En "/Changed/ {
+#		s,(.*),${orange}[CHANGED]${yellow} localhost => $target_host ${magenta}Created KVM on $target_host hypervisor...${reset},p;
+#	  };
+#	  /SUCCESS/ {
+#		s,(.*),${green}[OK]${yellow} localhost => $target_host ${magenta}Created KVM on $target_host hypervisor...${reset},p;
+#	  };
+#	  /Error/ {
+#	    s/Error[ \t]+(.*)/${red}[ERROR]${yellow} localhost => $target_host ${magenta} \1${reset}/p;
+#	  }"
   fi
   if [[ "$?" -eq 0 ]]; then
     success "VPS successfully deployed." 
@@ -6929,11 +6960,25 @@ fleet_console() {
   info "Prepaing Console permissions on hypervisor host: ($parent_host - $hypervisor)"
   active=$(ssh -i /etc/one-click/fleet/keys/id_ed25519 -o StrictHostKeyChecking=no oneclick@${hypervisor} "if [[ \"\$(id)\" =~ libvirt ]]; then echo yes; fi")
   if [[ "$active" != "yes" ]]; then
-    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_TIMEOUT=5 ansible-playbook -i /etc/one-click/fleet/inventory.yml /etc/one-click/fleet/playbooks/vps_console.yml -e "target=$parent_host"
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_TIMEOUT=5 ansible-playbook -i /etc/one-click/fleet/inventory.yml /etc/one-click/fleet/playbooks/vps_console.yml -e "target=$parent_host" \
+	  2> /dev/null | sed -En "/task/I {
+	    N;
+		s/.*\[([^]]*).*\n(.*)/$(tput setaf 244)\2 ${blue}=> ${magento}\1${reset}/p
+	  };
+	"
+  fi
+  if ! command -v virsh > /dev/null; then
+    if command -v apt > /dev/null; then
+      apt -y update | sed -En "s/.*/$(tput setaf 196)[VIRSH] $(tput setaf 277)=> ${magenta} Virsh unavailable. Installing...${reset}/p"
+	  apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst virsh &> /dev/null
+    else
+      dnf groupinstall -y "Virtualization Host" &> /dev/vull
+      dnf install -y libvirt-client | sed -En "s/.*/$(tput setaf 196)[VIRSH] $(tput setaf 277)=> ${magenta} Virsh unavailable. Installing.../p"
+    fi
   fi
   for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
     [[ -e "$key" ]] || continue
-	if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
+	if [[ "${ip}" == "$CONTROLLER_IP" ]]; then
       virsh console "$target"
 	  if [[ $? -eq 0 ]]; then
         return 0
@@ -7994,10 +8039,12 @@ fleet_rule_engine_init() {
 	  ${porto[@]} \
       "oneclick@$connect_ip" "
       if ! sudo iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
-        echo \">>> $PRETTY_NAME / Pure nftables environment detected. Applying native hybrid oneclick_filter structure.\"
+        echo ">>> $PRETTY_NAME / Pure nftables environment detected. Applying native hybrid oneclick_filter structure."
         sudo nft add table inet oneclick_filter 2>/dev/null || true
         sudo nft add chain inet oneclick_filter INPUT { type filter hook input priority 0 \; policy accept \; } 2>/dev/null
-		sudo nft add chain inet oneclick_filter POSTROUTING '{ type nat hook postrouting priority 100 \; }'
+        sudo nft add chain inet oneclick_filter POSTROUTING '{ type nat hook postrouting priority 100 \; }'
+        sudo nft add chain inet oneclick_filter FORWARD '{ type filter hook forward priority 0 \; policy accept \; }' 2>/dev/null || true
+        sudo nft add rule inet oneclick_filter FORWARD iifname "one-click" oifname "one-click" accept 2>/dev/null || true
         sudo nft add table ip oneclick_nat_ipv4 2>/dev/null || true
         sudo nft add chain ip oneclick_nat_ipv4 POSTROUTING '{ type nat hook postrouting priority 100 \; }' 2>/dev/null || true
         sudo nft add rule ip oneclick_nat_ipv4 POSTROUTING ip saddr 192.168.250.0/24 oifname \"$nic\" masquerade
@@ -8038,11 +8085,20 @@ fleet_rule_engine_init() {
           fi
         done
         sudo nft add rule inet oneclick_filter ONE-CLICK-FLEET drop
+        if command -v firewall-cmd > /dev/null; then
+          if systemctl is-active firewalld > /dev/null; then
+            firewall-cmd --zone=public --add-port=51821/udp --permanent
+            # INTEGRATION: firewalld policy configuration to allow spoke-to-spoke forward paths
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i one-click -o one-click -j ACCEPT 2>/dev/null || true
+            firewall-cmd --reload
+          fi
+        fi
       else
-        echo \">>> ($PRETTY_NAME) Legacy iptables engine active. Applying dual-stack legacy ruleset.\"
+        echo ">>> ($PRETTY_NAME) Legacy iptables engine active. Applying dual-stack legacy ruleset."
         if [ \"$has_ipv4\" = true ]; then
-		  sudo iptables -P FORWARD ACCEPT
+          sudo iptables -P FORWARD ACCEPT
           sudo iptables -P OUTPUT ACCEPT
+          sudo iptables -A FORWARD -i one-click -o one-click -j ACCEPT 2>/dev/null || true
           sudo iptables -N ONE-CLICK-FLEET 2>/dev/null || true
           if ! sudo iptables -C INPUT -j ONE-CLICK-FLEET 2>/dev/null; then
             sudo iptables -I INPUT 1 -j ONE-CLICK-FLEET
@@ -8054,16 +8110,17 @@ fleet_rule_engine_init() {
           sudo iptables -A ONE-CLICK-FLEET -p udp --sport 53 -j ACCEPT
           sudo iptables -A ONE-CLICK-FLEET -p udp --dport 51821 -j ACCEPT
           sudo iptables -A ONE-CLICK-FLEET -i ocbr0 -p udp --sport 68 --dport 67 -j ACCEPT
-		  sudo ip6tables -t nat -A POSTROUTING -s fd00:99aa::/64 -o \"$nic\" -j MASQUERADE
-		  sudo iptables -t nat -A POSTROUTING -s 192.168.250.0/24 -o \"$nic\" -j MASQUERADE
+          sudo ip6tables -t nat -A POSTROUTING -s fd00:99aa::/64 -o \"$nic\" -j MASQUERADE
+          sudo iptables -t nat -A POSTROUTING -s 192.168.250.0/24 -o \"$nic\" -j MASQUERADE
           if [[ ! \"$CONTROLLER_IP\" =~ : ]]; then
             sudo iptables -A ONE-CLICK-FLEET -s \"$CONTROLLER_IP\" -p tcp --dport 22 -j ACCEPT
           fi
           sudo iptables -A ONE-CLICK-FLEET -s 10.10.0.1 -p tcp --dport 1:65535 -j ACCEPT
         fi
         if [ \"$has_ipv6\" = true ] && command -v ip6tables >/dev/null 2>&1; then
-		  sudo ip6tables -P FORWARD ACCEPT
+          sudo ip6tables -P FORWARD ACCEPT
           sudo ip6tables -P OUTPUT ACCEPT
+          sudo ip6tables -A FORWARD -i one-click -o one-click -j ACCEPT 2>/dev/null || true
           sudo ip6tables -N ONE-CLICK-FLEET 2>/dev/null || true
           if ! ip6tables -C INPUT -j ONE-CLICK-FLEET 2>/dev/null; then
             sudo ip6tables -I INPUT 1 -j ONE-CLICK-FLEET
@@ -8097,16 +8154,25 @@ fleet_rule_engine_init() {
         if [ \"$has_ipv6\" = true ] && command -v ip6tables >/dev/null 2>&1; then
            sudo ip6tables -A ONE-CLICK-FLEET -j DROP
         fi
+        if command -v firewall-cmd > /dev/null; then
+          if systemctl is-active firewalld > /dev/null; then
+            firewall-cmd --zone=public --add-port=51821/udp --permanent
+            firewall-cmd --reload
+          fi
+        fi
       fi
-	" 2>/dev/null | sed -En "s/>>> (.*)/${orange}changed: $(tput setaf 227)[$(hostname -s) => $host_name] ->${magenta} \1${reset}/p"
+    " 2> /dev/null | sed -En "s/>>> (.*)/${orange}changed: $(tput setaf 227)[$(hostname -s) => $host_name] ->${magenta} \1${reset}/p"
   done
-  # ==== Fleet Controller ====
+  # ==== Fleet Controller Local Section ====
   info "Applying isolated base guard config to local controller."
   {
     if ! iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
       printf "${orange}[CHANGED]${magenta} %s\n" '=> nftables environment detected. Applying hybrid oneclick_filter structure.'
       nft add table inet oneclick_filter 2>/dev/null || true
       nft add chain inet oneclick_filter INPUT '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || true
+      nft add chain inet oneclick_filter FORWARD '{ type filter hook forward priority 0 ; policy accept ; }' 2>/dev/null || true
+      nft add rule inet oneclick_filter FORWARD iifname "one-click" oifname "one-click" accept 2>/dev/null || true
+	  nft add rule inet oneclick_filter FORWARD ct state established,related accept 2>/dev/null || true
       nft add table ip oneclick_nat_ipv4 2>/dev/null || true
       nft add chain ip oneclick_nat_ipv4 POSTROUTING '{ type nat hook postrouting priority 100 ; }' 2>/dev/null || true
       nft add rule ip oneclick_nat_ipv4 POSTROUTING ip saddr 192.168.250.0/24 oifname "$nic" masquerade
@@ -8146,11 +8212,19 @@ fleet_rule_engine_init() {
           nft add rule inet oneclick_filter ONE-CLICK-FLEET ip saddr "$target_ip" tcp dport 22 accept
         fi
       done
+      if command -v firewall-cmd > /dev/null; then
+        if systemctl is-active firewalld > /dev/null; then
+          firewall-cmd --zone=public --add-port=51821/udp --permanent
+          firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i one-click -o one-click -j ACCEPT 2>/dev/null || true
+          firewall-cmd --reload
+        fi
+      fi
     else
       printf "${orange}[CHANGED]${magenta} %s\n" '=> Legacy iptables detected. Applying dual-stack legacy ruleset.'
       if [ "$has_ipv4" = true ]; then
         iptables -P FORWARD ACCEPT
         iptables -P OUTPUT ACCEPT
+        iptables -A FORWARD -i one-click -o one-click -j ACCEPT 2>/dev/null || true
         iptables -N ONE-CLICK-FLEET 2>/dev/null || true
         if ! iptables -C INPUT -j ONE-CLICK-FLEET 2>/dev/null; then
           iptables -I INPUT 1 -j ONE-CLICK-FLEET
@@ -8162,8 +8236,8 @@ fleet_rule_engine_init() {
         iptables -A ONE-CLICK-FLEET -p udp --sport 53 -j ACCEPT
         iptables -A ONE-CLICK-FLEET -p udp --dport 51821 -j ACCEPT
         iptables -A ONE-CLICK-FLEET -i ocbr0 -p udp --sport 68 --dport 67 -j ACCEPT
-		ip6tables -t nat -A POSTROUTING -s fd00:99aa::/64 -o $nic -j MASQUERADE
-		iptables -t nat -A POSTROUTING -s 192.168.250.0/24 -o "$nic" -j MASQUERADE
+        ip6tables -t nat -A POSTROUTING -s fd00:99aa::/64 -o $nic -j MASQUERADE
+        iptables -t nat -A POSTROUTING -s 192.168.250.0/24 -o "$nic" -j MASQUERADE
         if [[ ! "$CONTROLLER_IP" =~ : ]]; then
           iptables -A ONE-CLICK-FLEET -s "$CONTROLLER_IP" -p tcp --dport 22 -j ACCEPT
         fi
@@ -8172,6 +8246,7 @@ fleet_rule_engine_init() {
       if [ "$has_ipv6" = true ] && command -v ip6tables >/dev/null 2>&1; then
         ip6tables -P FORWARD ACCEPT
         ip6tables -P OUTPUT ACCEPT
+        ip6tables -A FORWARD -i one-click -o one-click -j ACCEPT 2>/dev/null || true
         ip6tables -N ONE-CLICK-FLEET 2>/dev/null || true
         if ! ip6tables -C INPUT -j ONE-CLICK-FLEET 2>/dev/null; then
           ip6tables -I INPUT 1 -j ONE-CLICK-FLEET
@@ -8193,12 +8268,19 @@ fleet_rule_engine_init() {
             ip6tables -A ONE-CLICK-FLEET -s "$target_ip" -p tcp --dport 22 -j ACCEPT
           fi
         else
-          if [ \"$has_ipv4\" = true ]; then
+          if [ "$has_ipv4" = true ]; then
             iptables -A ONE-CLICK-FLEET -s "$target_ip" -j ACCEPT
             iptables -A ONE-CLICK-FLEET -s "$target_ip" -p tcp --dport 22 -j ACCEPT
           fi
         fi
       done
+      if command -v firewall-cmd > /dev/null; then
+        if systemctl is-active firewalld > /dev/null; then
+		  firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i one-click -o one-click -j ACCEPT 2>/dev/null || true
+          firewall-cmd --zone=public --add-port=51821/udp --permanent
+          firewall-cmd --reload
+        fi
+      fi
     fi
   } &>/dev/null
   success "Global fleet baseline security deployed securely!"
