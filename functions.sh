@@ -3423,13 +3423,68 @@ fleet_bench() {
         exit 0
       fi
       if ssh -n \
-	    -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-		-o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-		-o StrictHostKeyChecking=no \
-		-o BatchMode=yes -o ConnectTimeout=1 \
-		-o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
-        "cat /etc/one-click/ocb/benchmarks/job.state > /dev/null" 2>/dev/null; then
-          echo "$host" > "${tmp_check_dir}/${host}.active"
+        -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+        -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+        -o StrictHostKeyChecking=no \
+        -o BatchMode=yes -o ConnectTimeout=1 \
+        -o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
+        "if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+           file_age=\$((\$(date +%s) - \$(stat -c %Y /etc/one-click/ocb/benchmarks/job.state)))
+           if [[ \$file_age -lt 3600 ]]; then
+             exit 0
+           else
+             sudo rm -f /etc/one-click/ocb/benchmarks/job.state
+             exit 1
+           fi
+         else
+           export DEBIAN_FRONTEND=noninteractive
+           export NEEDRESTART_MODE=a
+           if command -v apt-get &> /dev/null; then
+             apt_lock=\"/var/lib/dpkg/lock-frontend\"
+             if [ -f \"\$apt_lock\" ]; then
+               pid=\$(fuser \"\$apt_lock\" 2>/dev/null | awk '{print \$1}')
+               [ -z \"\$pid\" ] && pid=\$(lsof -t \"\$apt_lock\" 2>/dev/null)
+               if [ ! -z \"\$pid\" ]; then
+                 kill -9 \"\$pid\" 2>/dev/null
+                 sleep 1
+               fi
+               rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+             fi
+             debconf_lock=\"/var/cache/debconf/config.dat-lock\"
+             if [ -f \"\$debconf_lock\" ] || fuser \"/var/cache/debconf/config.dat\" &> /dev/null; then
+               d_pid=\$(fuser \"/var/cache/debconf/config.dat\" 2>/dev/null | awk '{print \$1}')
+               if [ ! -z \"\$d_pid\" ]; then
+                 kill -9 \"\$d_pid\" 2>/dev/null
+                 sleep 1
+               fi
+               rm -f /var/cache/debconf/config.dat-lock
+               rm -f /var/cache/debconf/passwords.dat-lock
+             fi
+             dpkg --configure -a --force-confdef --force-confold
+             apt-get update -y
+             apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"
+           fi
+           if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
+             dnf_lock=\"/var/run/dnf.pid\"
+             [ ! -f \"\$dnf_lock\" ] && dnf_lock=\"/var/run/yum.pid\"
+             if [ -f \"\$dnf_lock\" ]; then
+               pid=\$(cat \"\$dnf_lock\" 2>/dev/null)
+               if [ ! -z \"\$pid\" ] && kill -0 \"\$pid\" &> /dev/null; then
+                 kill -9 \"\$pid\" 2>/dev/null
+                 sleep 1
+               fi
+               rm -f /var/run/dnf.pid /var/run/yum.pid /var/lib/dnf/lock /var/lib/rpm/.rpm.lock
+             fi
+             pkg_mgr=\$(command -v dnf || command -v yum)
+             \$pkg_mgr clean all
+             if command -v dnf &> /dev/null; then
+               dnf history redo last -y &> /dev/null || true
+             fi
+             \$pkg_mgr makecache
+             \$pkg_mgr check-update -y || [ \$? -eq 100 ]
+           fi
+         fi" 2>/dev/null; then
+         echo "$host" > "${tmp_check_dir}/${host}.active"
       fi
     ) &
   done
@@ -3464,15 +3519,15 @@ fleet_bench() {
   jq -r '._meta.hostvars | to_entries[] | "\(.key) \(.value.ansible_host)"' | \
   while read -r name ip; do
     [[ "$ip" == "$CONTROLLER_IP" ]] && continue
-	if [[ " $active_hosts " == *" $name "* ]]; then
-      echo -e "$(tput setaf 216)[$name]:${reset} Benchmark already running on ${red}${name}${reset}. Skipping..."
+    if [[ " $active_hosts " == *" $name "* ]]; then
+      echo -e "${red}[$(tput setaf 216)[$name]${red}]:${reset} Benchmark already running on ${red}${name}${reset}. Skipping..."
       continue
     fi
-	if ! ping -c1 $ip &> /dev/null; then
-	  echo "${red}[$name]:${reset} $name is unresponsive. Skipping..."
-	  continue
-	fi
-	echo "$(tput setaf 216)[$name]:$(tput sgr 0) Preparing remote files"
+    if ! ping -c1 $ip &> /dev/null; then
+      echo "${red}[$name]:${reset} $name is unresponsive. Skipping..."
+      continue
+    fi
+    echo "$(tput setaf 216)[$name]:$(tput sgr 0) Preparing remote files"
     scp -r \
       -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
       -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
@@ -3483,7 +3538,7 @@ fleet_bench() {
       -o UserKnownHostsFile=/dev/null \
       /var/cache/one-click/* \
       "oneclick@${ip}:/home/oneclick/" &> /dev/null || true
-	scp \
+    scp \
       -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
       -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
       -o StrictHostKeyChecking=no \
@@ -3493,41 +3548,41 @@ fleet_bench() {
       -o UserKnownHostsFile=/dev/null \
       /usr/local/bin/one-click \
       "oneclick@${ip}:/home/oneclick/one-click" &> /dev/null || true
-	echo "$(tput setaf 216)[$name]:$(tput sgr 0) Spawning background benchmark on $name"
+    echo "$(tput setaf 216)[$name]:$(tput sgr 0) Spawning background benchmark on $name"
     ssh -f \
       -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
       -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "oneclick@$ip" "
-	    echo 'nameserver 8.8.8.8' | sudo tee -a /etc/resolv.conf > /dev/null
-	    echo 'nameserver 1.1.1.1' | sudo tee -a /etc/resolv.conf > /dev/null
-	    if [ ! -f /usr/local/bin/one-click ]; then
-		  sudo mkdir -p /var/log/one-click/
-	      sudo bash /home/oneclick/one-click setup
-	    fi
-	    if ! command -v iperf3 &> /dev/null; then
-	      if ! command -v apt &> /dev/null; then
-		    sudo apt -y update
+        echo 'nameserver 8.8.8.8' | sudo tee -a /etc/resolv.conf > /dev/null
+        echo 'nameserver 1.1.1.1' | sudo tee -a /etc/resolv.conf > /dev/null
+        if [ ! -f /usr/local/bin/one-click ]; then
+          sudo mkdir -p /var/log/one-click/
+          sudo bash /home/oneclick/one-click setup
+        fi
+        if ! command -v iperf3 &> /dev/null; then
+          if ! command -v apt &> /dev/null; then
+            sudo apt -y update
             echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
             DEBIAN_FRONTEND=noninteractive sudo apt-get install -y iperf3
-		  else
-		    sudo dnf -y install iperf3
-		  fi
-	    fi
-		if ! command -v fio &> /dev/null; then
-		  if ! command -v apt &> /dev/null; then
-		    sudo apt -y update
+          else
+            sudo dnf -y install iperf3
+          fi
+        fi
+        if ! command -v fio &> /dev/null; then
+          if ! command -v apt &> /dev/null; then
+            sudo apt -y update
             echo 'fio fio/start_daemon boolean false' | sudo debconf-set-selections
             DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
-			DEBIAN_FRONTEND=noninteractive sudo apt-get install -y sysbench
-		  else
-		    sudo dnf -y install fio
-			sudo dnf -y install sysbench
-		  fi
-		fi
-  	    sudo mkdir -p /var/cache/one-click
-  	    sudo mv -f /home/oneclick/*.sh /var/cache/one-click/
+            DEBIAN_FRONTEND=noninteractive sudo apt-get install -y sysbench
+          else
+            sudo dnf -y install fio
+            sudo dnf -y install sysbench
+          fi
+        fi
+          sudo mkdir -p /var/cache/one-click
+          sudo mv -f /home/oneclick/*.sh /var/cache/one-click/
         bench_dir='/etc/one-click/ocb/benchmarks'
         sudo mkdir -p \"\$bench_dir/archive\"
         ts=\$(date +%Y%m%d-%H%M%S)
@@ -3535,11 +3590,11 @@ fleet_bench() {
           sudo mv \"\$bench_dir/latest.json\" \"\$bench_dir/archive/latest-\${ts}.json\"
         fi
         sudo rm -f \"\$bench_dir/COMPLETE\" \"\$bench_dir/job.state\" \"/etc/one-click/ocb/benchmarks/latest.json\"
-	    echo 'RUNNING' | sudo tee /etc/one-click/ocb/benchmarks/job.state
+        echo 'RUNNING' | sudo tee /etc/one-click/ocb/benchmarks/job.state
         sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl\"  > /dev/null 2>&1 &
-		suco cp \"/etc/one-click/ocb/benchmarks/latest.json\" \"/etc/one-click/fleet/benchmarks/localhost.json\" &> /dev/null & || true
-	    rm -f /home/oneclick/one-click /home/oneclick/*.sh
-	" < /dev/null &> /dev/null || true
+        sudo cp \"/etc/one-click/ocb/benchmarks/latest.json\" \"/etc/one-click/fleet/benchmarks/localhost.json\" &> /dev/null & || true
+        rm -f /home/oneclick/one-click /home/oneclick/*.sh
+    " < /dev/null &> /dev/null || true
     success "$name ($ip) is now running One-Click Bench!"
   done
   fleet_local_bench
@@ -3671,7 +3726,7 @@ fleet_status() {
           --arg reset "${reset}" '[
           $yellow + "Controller" + $reset,
           $orange + "  " + $f_name + $reset,
-          (if .status == "COMPLETE" then $green + "    " + .status + $reset elif .status == "FAILED" then $red + "    " + .status else $orange + "    " + .status + $reset end),
+          (if .status == "COMPLETE" then $green + "    " + .status + $reset elif .status == "FAILED" then $red + "    " + .status + $reset else $orange + "    " + .status + $reset end),
           "      " + (."Single Core Score" // "-"),
           "      " + (."Multi Core Score" // "-"),
           (if ."Total Time Taken" then "      " + ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
@@ -3728,7 +3783,7 @@ fleet_status() {
           jq -r --arg f_name "$lookup_target" --arg f_c "$fleet_c" --arg green "${green}" --arg red "${red}" --arg orange "$(tput setaf 227)" --arg yellow "${yellow}" --arg reset "${reset}" '[
             $yellow + $f_c + $reset,
             $orange + "  " + $f_name,
-            (if .status == "COMPLETE" then $green + "  " + .status + $reset elif .status == "FAILED" then $red + "  " + .status else $orange + "  " + .status + $reset end),
+            (if .status == "COMPLETE" then $green + "  " + .status + $reset elif .status == "FAILED" then $red + "  " + .status + $reset else $orange + "  " + .status + $reset end),
             "    " + (."Single Core Score" // "-"),
             "    " + (."Multi Core Score" // "-"),
             (if ."Total Time Taken" then "    " + ((."Total Time Taken" | tonumber) as $s | "\(($s / 60 | floor)):\(($s % 60 | tostring | if length == 1 then "0"+. else . end))") else "-" end),
@@ -6193,7 +6248,7 @@ EOF
           if command -v apt-get &>/dev/null; then
             sudo apt-get update && sudo apt-get install -y genisoimage &>/dev/null
           elif command -v dnf &>/dev/null; then
-            sudo dnf install -y genisoimage &>/dev/null
+            sudo dnf install -y cdrkit-genisoimage &>/dev/null
           fi
         fi
         cp /tmp/${vps_name}_user_data.yml \"\$work_dir/user-data\"
@@ -6221,7 +6276,7 @@ EOF
           --disk path=\"\$iso_path\",device=cdrom,format=raw,boot.order=2 \
           --network network=oneclick-nat,model=virtio \
           \$VIRT_TYPE_FLAG \
-          --osinfo generic \
+          --osinfo detect=on,require=off \
           --import \
           --graphics none \
           --console pty,target_type=serial \
@@ -6532,23 +6587,14 @@ EOC
     dns_bind_create_zone "$current_domain"
   done
   info "Ensuring One-Click Binaries"
-
-  ssh \
-    -n \
-    -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-    -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-    -o ConnectTimeout=1 \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-	${porto[@]} \
-    "oneclick@${vps_private_ip:-${public_ip}}" "
-	  if [ ! -f /usr/local/bin/one-click ]; then
-	    curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh && \
-          bash /tmp/one-click.sh setup && \
-          rm -f /tmp/one-click.sh
-	  fi
-	" 2> /dev/null | sed -En "1{s/.*/${green}[SUCCESS] One-Click binaries available/p}"
+  set +e
+  if [ -f "/etc/one-click/fleet/keys/id_ed25519" ]; then
+    ssh_identities+=("-o" "IdentityFile=/etc/one-click/fleet/keys/id_ed25519")
+  fi
+  if [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
+    ssh_identities+=("-o" "IdentityFile=/home/oneclick/.ssh/id_ed25519")
+  fi
+  fl_ssh "${vps_private_ip:-${public_ip}}"
   sleep 5
   clear
   printf "$(tput setaf 197)[VPS] ${blue}%s${reset}\n" \
@@ -6919,7 +6965,7 @@ fleet_ssh() {
   fi
   for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
     [[ -e "$key" ]] || continue
-    ssh -i "$key" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" 
+    ssh -i "$key" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target"
     if [[ $? -eq 0 ]]; then
       return 0
     fi
@@ -6928,6 +6974,55 @@ fleet_ssh() {
     error "No mapped IP found for $target."
     return 1
   fi
+  error "Trust mesh execution failure: Connection timed out or credentials rejected by $target on port $port."
+  return 1
+}
+fl_ssh() {
+  local target="$1"
+  local port="${2:-22}"
+  . "/etc/one-click/fleet/controller.env"
+  local inventory="/etc/one-click/fleet/inventory.yml"
+  if [[ ! -f "$inventory" ]]; then
+    error "Inventory file missing at $inventory"
+    return 1
+  fi
+  local host_details
+  host_details=$(awk -v target="$target" '
+    $0 ~ "^[[:space:]]*" target ":" { found=1; next }
+    found && /^[[:space:]]*ansible_host:/ { host=$2 }
+    found && /^[[:space:]]*ansible_port:/ { port=$2 }
+    found && /^[[:space:]]*[A-Za-z0-9_-]+:/ && !/ansible_/ { found=0 }
+    END { if (host) print host, (port ? port : "22") }
+  ' "$inventory" | tr -d '"\027')
+  local ip
+  local port
+  ip=$(echo "$host_details" | awk '{print $1}')
+  port=$(echo "$host_details" | awk '{print $2}')
+  local ssh_target
+  if [[ -n "$ip" ]]; then
+    ssh_target="oneclick@$ip"
+  else
+    ssh_target="oneclick@$target"
+    port="22"
+  fi
+  for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
+    [[ -e "$key" ]] || continue
+    ssh -t -i "$key" -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" "
+	  if [[ -d /tmp ]]; then
+	    oc_path=/tmp/one-click.sh
+	  else
+        oc_path=/root/one-click.sh
+	  fi
+	  if [ ! -f /usr/local/bin/one-click ]; then
+	    sudo curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o \"\$oc_path\" && \
+          sudo bash \"\$oc_path\" setup && \
+          sudo rm -f \"\$oc_path\"
+	  fi
+	"
+    if [[ $? -eq 0 ]]; then
+      exit 0
+    fi
+  done
   error "Trust mesh execution failure: Connection timed out or credentials rejected by $target on port $port."
   return 1
 }
@@ -8038,8 +8133,22 @@ fleet_rule_engine_init() {
       -o UserKnownHostsFile=/dev/null \
 	  ${porto[@]} \
       "oneclick@$connect_ip" "
-      if ! sudo iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
-        echo ">>> $PRETTY_NAME / Pure nftables environment detected. Applying native hybrid oneclick_filter structure."
+	  if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_FAMILY_CHECK=\"\${ID_LIKE:-$ID}\"
+      else
+        OS_FAMILY_CHECK=\"debian\"
+      fi
+      if [[ \"\$OS_FAMILY_CHECK\" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
+	    echo \">>> $PRETTY_NAME / Firewalld environment detected. Applying rules.\"
+        sudo firewall-cmd --permanent --zone=trusted --add-interface=ocbr0 2>/dev/null || true
+        sudo firewall-cmd --permanent --zone=trusted --add-interface=oneclick-nat 2>/dev/null || true
+        ACTIVE_GW_ZONE=\$(sudo firewall-cmd --get-active-zones | head -n 1)
+        sudo firewall-cmd --permanent --zone="\${ACTIVE_GW_ZONE:-public}" --add-masquerade 2>/dev/null || true
+		sudo firewall-cmd --zone=public --add-port=51821/udp --permanent
+        sudo firewall-cmd --reload &>/dev/null
+      elif ! sudo iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
+        echo \">>> $PRETTY_NAME / Pure nftables environment detected. Applying native hybrid oneclick_filter structure.\"
         sudo nft add table inet oneclick_filter 2>/dev/null || true
         sudo nft add chain inet oneclick_filter INPUT { type filter hook input priority 0 \; policy accept \; } 2>/dev/null
         sudo nft add chain inet oneclick_filter POSTROUTING '{ type nat hook postrouting priority 100 \; }'
@@ -8094,7 +8203,7 @@ fleet_rule_engine_init() {
           fi
         fi
       else
-        echo ">>> ($PRETTY_NAME) Legacy iptables engine active. Applying dual-stack legacy ruleset."
+        echo \">>> ($PRETTY_NAME) Legacy iptables engine active. Applying dual-stack legacy ruleset.\"
         if [ \"$has_ipv4\" = true ]; then
           sudo iptables -P FORWARD ACCEPT
           sudo iptables -P OUTPUT ACCEPT
@@ -8166,7 +8275,21 @@ fleet_rule_engine_init() {
   # ==== Fleet Controller Local Section ====
   info "Applying isolated base guard config to local controller."
   {
-    if ! iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
+    if [ -f /etc/os-release ]; then
+      . /etc/os-release
+      OS_FAMILY_CHECK="${ID_LIKE:-$ID}"
+    else
+      OS_FAMILY_CHECK="debian"
+    fi
+    if [[ "$OS_FAMILY_CHECK" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
+	  printf "${orange}[CHANGED]${magenta} %s\n" '=> firewalld environment detected. Applying rules.'
+      sudo firewall-cmd --permanent --zone=trusted --add-interface=ocbr0 2>/dev/null || true
+      sudo firewall-cmd --permanent --zone=trusted --add-interface=oneclick-nat 2>/dev/null || true
+      ACTIVE_GW_ZONE=$(sudo firewall-cmd --get-active-zones | head -n 1)
+      sudo firewall-cmd --permanent --zone="${ACTIVE_GW_ZONE:-public}" --add-masquerade 2>/dev/null || true
+	  sudo firewall-cmd --zone=public --add-port=51821/udp --permanent
+      sudo firewall-cmd --reload &>/dev/null
+    elif ! iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
       printf "${orange}[CHANGED]${magenta} %s\n" '=> nftables environment detected. Applying hybrid oneclick_filter structure.'
       nft add table inet oneclick_filter 2>/dev/null || true
       nft add chain inet oneclick_filter INPUT '{ type filter hook input priority 0 ; policy accept ; }' 2>/dev/null || true
