@@ -3239,6 +3239,8 @@ fleet_audit() {
     os_name="${NAME:-Linux}"
     version_id="${VERSION_ID:-Unknown}"
     kernel_release=$(uname -r)
+	c_model=$(sed -En '/^[ \t]*Model name/I{s/[^(]*[ \t]+([^@]*).*/\1/p}' <(lscpu 2>/dev/null) | xargs)
+    [[ -z "$c_model" ]] && c_model="Unknown"
     local r_total r_free d_total d_free
     r_total=$(awk '/MemTotal/ {printf "%.1f", $2/1024/1024}' /proc/meminfo)
     r_free=$(awk '/MemAvailable/ {printf "%.1f", $2/1024/1024}' /proc/meminfo) 
@@ -3255,7 +3257,8 @@ fleet_audit() {
   "ram_total_gb": "${r_total}G",
   "ram_free_gb": "${r_free}G",
   "disk_total_gb": "${d_total}G",
-  "disk_free_gb": "${d_free}G"
+  "disk_free_gb": "${d_free}G",
+  "cpu_model": "${c_model}"
 }
 EOF
   )
@@ -3279,6 +3282,8 @@ EOF
         os=${NAME:-Linux}
         ver=${VERSION_ID:-Unknown}
         kern=$(uname -r)
+		mod_name=$(sed -En '/^[ \t]*Model name/I{s/[^(]*[ \t]+([^@]*).*/\1/p}' <(lscpu 2>/dev/null) | xargs)
+        [ -z "$mod_name" ] && mod_name="Unknown"
         r_tot=$(awk '/MemTotal/ {printf "%.1f", $2/1024/1024}' /proc/meminfo)
         r_fr=$(awk '/MemAvailable/ {printf "%.1f", $2/1024/1024}' /proc/meminfo)
         d_tot=$(df / | awk 'NR==2 {printf "%.1f", $2/1024/1024}')
@@ -3294,7 +3299,8 @@ EOF
   "ram_total_gb": "${r_tot}G",
   "ram_free_gb": "${r_fr}G",
   "disk_total_gb": "${d_tot}G",
-  "disk_free_gb": "${d_fr}G"
+  "disk_free_gb": "${d_fr}G",
+  "cpu_model": "${mod_name}"
 }
 EOX
 EOF
@@ -3311,21 +3317,63 @@ EOF
       done
     fi
   fi
-  echo -e "\n${blue}============================== ${orange}FLEET AUDIT REPORT${blue} =====================================${reset}"
-  echo
-  (
-    echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------${reset}"
-    echo -e "${magenta}HOSTNAME\tOS_DISTRO\tVERSION\tKERNEL\tCPUS\tLOAD_1M\tRAM(FREE/TOTAL)\tDISK(FREE/TOTAL)${reset}"
-    echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------${reset}"
-    if [[ -f "${audit_dir}/${local_host}.json" ]]; then
-      eval "$(jq -r '@sh "h=\(.hostname) d=\(.distribution) v=\(.version) k=\(.kernel) c=\(.cpus) l=\(.load_1m) rf=\(.ram_free_gb) rt=\(.ram_total_gb) df=\(.disk_free_gb) dt=\(.disk_total_gb)"' "${audit_dir}/${local_host}.json")"
+  echo -e "\n${blue}============================================================= ${orange}FLEET AUDIT REPORT${blue} ====================================================================${reset}"
+echo
+(
+  echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------\t---------${reset}"
+  echo -e "${magenta}HOSTNAME\tOS_DISTRO\tVERSION\tKERNEL\tCPUS\tLOAD_1M\tRAM(FREE/TOTAL)\tDISK(FREE/TOTAL)\tCPU_MODEL${reset}"
+  echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------\t---------${reset}"
+  if [[ -f "${audit_dir}/${local_host}.json" ]]; then
+    eval "$(jq -r '@sh "h=\(.hostname) d=\(.distribution) v=\(.version) k=\(.kernel) c=\(.cpus) l=\(.load_1m) rf=\(.ram_free_gb) rt=\(.ram_total_gb) df=\(.disk_free_gb) dt=\(.disk_total_gb) m=\(.cpu_model)"' "${audit_dir}/${local_host}.json")"
+    [[ -z "$m" || "$m" == "null" ]] && m="-"
+    local c_color="${reset}"
+    if [[ "$c" != "?" && -n "$l" ]]; then
+      local load_pct
+      load_pct=$(echo "scale=4; ($l / $c) * 100" | bc 2>/dev/null)
+      if (( $(echo "$load_pct >= 80" | bc -l) )); then c_color="${red}"
+      elif (( $(echo "$load_pct >= 60" | bc -l) )); then c_color="${yellow}";
+      else c_color="$green"; fi
+    fi
+    local r_color="${reset}"
+    local raw_rf="${rf%G}" raw_rt="${rt%G}"
+    if [[ -n "$raw_rf" && -n "$raw_rt" && "$raw_rt" != "0.0" ]]; then
+      local ram_used ram_pct
+      ram_used=$(echo "$raw_rt - $raw_rf" | bc 2>/dev/null)
+      ram_pct=$(echo "scale=4; ($ram_used / $raw_rt) * 100" | bc 2>/dev/null)
+      if (( $(echo "$ram_pct >= 80" | bc -l) )); then r_color="${red}"
+      elif (( $(echo "$ram_pct >= 60" | bc -l) )); then r_color="${yellow}"; 
+      else r_color="$green"; fi
+    fi
+    local d_color="${reset}"
+    local raw_df="${df%G}" raw_dt="${dt%G}"
+    if [[ -n "$raw_df" && -n "$raw_dt" && "$raw_dt" != "0.0" ]]; then
+      local disk_used disk_pct
+      disk_used=$(echo "$raw_dt - $raw_df" | bc 2>/dev/null)
+      disk_pct=$(echo "scale=4; ($disk_used / $raw_dt) * 100" | bc 2>/dev/null)
+      if (( $(echo "$disk_pct >= 80" | bc -l) )); then d_color="${red}"
+      elif (( $(echo "$disk_pct >= 60" | bc -l) )); then d_color="${yellow}";
+      else d_color="$green"; fi
+    fi
+    echo -e "$(tput setaf 227)$h${reset}\t  $d\t  $v\t  $k\t  $c\t  ${c_color}$l${reset}\t    ${r_color}${rf}/${rt}${reset}\t      ${d_color}${df}/${dt}${reset}\t        $(tput setaf 222)$m${reset}"
+  else
+    echo -e "$local_host\t${red}LOCAL_ERROR${reset}\t-\t-\t-\t-\t-\t-\t-"
+  fi
+  for host_conf in "$f_root/state"/*.conf; do
+    [[ ! -f "$host_conf" ]] && continue
+    local current_target
+    current_target=$(basename "$host_conf" .conf)
+    [[ "$current_target" == "$local_host" ]] && continue
+    local json_file="${audit_dir}/${current_target}.json"
+    if [[ -f "$json_file" && -s "$json_file" ]]; then
+      eval "$(jq -r '@sh "h=\(.hostname) d=\(.distribution) v=\(.version) k=\(.kernel) c=\(.cpus) l=\(.load_1m) rf=\(.ram_free_gb) rt=\(.ram_total_gb) df=\(.disk_free_gb) dt=\(.disk_total_gb) m=\(.cpu_model)"' "$json_file")"
+      [[ -z "$m" || "$m" == "null" ]] && m="-"
       local c_color="${reset}"
       if [[ "$c" != "?" && -n "$l" ]]; then
         local load_pct
         load_pct=$(echo "scale=4; ($l / $c) * 100" | bc 2>/dev/null)
         if (( $(echo "$load_pct >= 80" | bc -l) )); then c_color="${red}"
         elif (( $(echo "$load_pct >= 60" | bc -l) )); then c_color="${yellow}";
-		else c_color="$green"; fi
+        else c_color="${green}"; fi
       fi
       local r_color="${reset}"
       local raw_rf="${rf%G}" raw_rt="${rt%G}"
@@ -3334,8 +3382,8 @@ EOF
         ram_used=$(echo "$raw_rt - $raw_rf" | bc 2>/dev/null)
         ram_pct=$(echo "scale=4; ($ram_used / $raw_rt) * 100" | bc 2>/dev/null)
         if (( $(echo "$ram_pct >= 80" | bc -l) )); then r_color="${red}"
-        elif (( $(echo "$ram_pct >= 60" | bc -l) )); then r_color="${yellow}"; 
-		else r_color="$green"; fi
+        elif (( $(echo "$ram_pct >= 60" | bc -l) )); then r_color="${yellow}";
+        else r_color="${green}"; fi
       fi
       local d_color="${reset}"
       local raw_df="${df%G}" raw_dt="${dt%G}"
@@ -3345,54 +3393,14 @@ EOF
         disk_pct=$(echo "scale=4; ($disk_used / $raw_dt) * 100" | bc 2>/dev/null)
         if (( $(echo "$disk_pct >= 80" | bc -l) )); then d_color="${red}"
         elif (( $(echo "$disk_pct >= 60" | bc -l) )); then d_color="${yellow}";
-		else d_color="$green"; fi
+        else d_color="${green}"; fi
       fi
-      echo -e "$(tput setaf 227)$h${reset}\t  $d\t  $v\t  $k\t  $c\t  ${c_color}$l${reset}\t    ${r_color}${rf}/${rt}${reset}\t      ${d_color}${df}/${dt}${reset}"
-    else
-      echo -e "$local_host\t${red}LOCAL_ERROR${reset}\t-\t-\t-\t-\t-\t-"
+      echo -e "$(tput setaf 227)$h${reset}\t  $d\t  $v\t  $k\t  $c\t  ${c_color}$l${reset}\t    ${r_color}${rf}/${rt}${reset}\t      ${d_color}${df}/${dt}${reset}\t        $(tput setaf 222)$m${reset}"
     fi
-    for host_conf in "$f_root/state"/*.conf; do
-      [[ ! -f "$host_conf" ]] && continue
-      local current_target
-      current_target=$(basename "$host_conf" .conf)
-      [[ "$current_target" == "$local_host" ]] && continue
-      local json_file="${audit_dir}/${current_target}.json"
-      if [[ -f "$json_file" && -s "$json_file" ]]; then
-        eval "$(jq -r '@sh "h=\(.hostname) d=\(.distribution) v=\(.version) k=\(.kernel) c=\(.cpus) l=\(.load_1m) rf=\(.ram_free_gb) rt=\(.ram_total_gb) df=\(.disk_free_gb) dt=\(.disk_total_gb)"' "$json_file")"
-        local c_color="${reset}"
-        if [[ "$c" != "?" && -n "$l" ]]; then
-          local load_pct
-          load_pct=$(echo "scale=4; ($l / $c) * 100" | bc 2>/dev/null)
-          if (( $(echo "$load_pct >= 80" | bc -l) )); then c_color="${red}"
-          elif (( $(echo "$load_pct >= 60" | bc -l) )); then c_color="${yellow}";
-		  else c_color="${green}"; fi
-        fi
-        local r_color="${reset}"
-        local raw_rf="${rf%G}" raw_rt="${rt%G}"
-        if [[ -n "$raw_rf" && -n "$raw_rt" && "$raw_rt" != "0.0" ]]; then
-          local ram_used ram_pct
-          ram_used=$(echo "$raw_rt - $raw_rf" | bc 2>/dev/null)
-          ram_pct=$(echo "scale=4; ($ram_used / $raw_rt) * 100" | bc 2>/dev/null)
-          if (( $(echo "$ram_pct >= 80" | bc -l) )); then r_color="${red}"
-          elif (( $(echo "$ram_pct >= 60" | bc -l) )); then r_color="${yellow}";
-		  else r_color="${green}"; fi
-        fi
-        local d_color="${reset}"
-        local raw_df="${df%G}" raw_dt="${dt%G}"
-        if [[ -n "$raw_df" && -n "$raw_dt" && "$raw_dt" != "0.0" ]]; then
-          local disk_used disk_pct
-          disk_used=$(echo "$raw_dt - $raw_df" | bc 2>/dev/null)
-          disk_pct=$(echo "scale=4; ($disk_used / $raw_dt) * 100" | bc 2>/dev/null)
-          if (( $(echo "$disk_pct >= 80" | bc -l) )); then d_color="${red}"
-          elif (( $(echo "$disk_pct >= 60" | bc -l) )); then d_color="${yellow}";
-		  else d_color="${green}"; fi
-        fi
-        echo -e "$(tput setaf 227)$h${reset}\t  $d\t  $v\t  $k\t  $c\t  ${c_color}$l${reset}\t    ${r_color}${rf}/${rt}${reset}\t      ${d_color}${df}/${dt}${reset}"
-      fi
-    done
-    echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------${reset}"
-  ) | column -t -s $'\t'
-  echo -e "${blue}==========================================================================================${reset}\n"
+  done
+  echo -e "${yellow}--------\t---------\t-------\t------\t----\t-------\t---------------\t----------------\t---------${reset}"
+) | column -t -s $'\t'
+echo -e "${blue}===================================================================================================================================================${reset}\n"
 }
 fleet_bench() {
   fleet_init
@@ -3428,7 +3436,12 @@ fleet_bench() {
         -o StrictHostKeyChecking=no \
         -o BatchMode=yes -o ConnectTimeout=1 \
         -o ConnectionAttempts=1 -o UserKnownHostsFile=/dev/null "oneclick@${peer_ip}" \
-        "if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+        "if ! command -v one-click; then
+		   curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /tmp/one-click.sh && \\
+             bash /tmp/one-click.sh setup && \\
+             rm -f /tmp/one-click.sh
+         fi
+		 if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
            file_age=\$((\$(date +%s) - \$(stat -c %Y /etc/one-click/ocb/benchmarks/job.state)))
            if [[ \$file_age -lt 3600 ]]; then
              exit 0
@@ -3442,27 +3455,28 @@ fleet_bench() {
            if command -v apt-get &> /dev/null; then
              apt_lock=\"/var/lib/dpkg/lock-frontend\"
              if [ -f \"\$apt_lock\" ]; then
-               pid=\$(fuser \"\$apt_lock\" 2>/dev/null | awk '{print \$1}')
+               pid=\$(sudo fuser \"\$apt_lock\" 2>/dev/null | awk '{print \$1}')
                [ -z \"\$pid\" ] && pid=\$(lsof -t \"\$apt_lock\" 2>/dev/null)
                if [ ! -z \"\$pid\" ]; then
-                 kill -9 \"\$pid\" 2>/dev/null
+                 sudo kill -9 \"\$pid\" 2>/dev/null
                  sleep 1
                fi
-               rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+               sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
              fi
              debconf_lock=\"/var/cache/debconf/config.dat-lock\"
-             if [ -f \"\$debconf_lock\" ] || fuser \"/var/cache/debconf/config.dat\" &> /dev/null; then
-               d_pid=\$(fuser \"/var/cache/debconf/config.dat\" 2>/dev/null | awk '{print \$1}')
+             if [ -f \"\$debconf_lock\" ] || sudo fuser \"/var/cache/debconf/config.dat\" &> /dev/null; then
+               d_pid=\$(sudo fuser \"/var/cache/debconf/config.dat\" 2>/dev/null | awk '{print \$1}')
                if [ ! -z \"\$d_pid\" ]; then
-                 kill -9 \"\$d_pid\" 2>/dev/null
+                 sudo kill -9 \"\$d_pid\" 2>/dev/null
                  sleep 1
                fi
-               rm -f /var/cache/debconf/config.dat-lock
-               rm -f /var/cache/debconf/passwords.dat-lock
+               sudo rm -f /var/cache/debconf/config.dat-lock
+               sudo rm -f /var/cache/debconf/passwords.dat-lock
              fi
-             dpkg --configure -a --force-confdef --force-confold
-             apt-get update -y
-             apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"
+             sudo dpkg --configure -a --force-confdef --force-confold
+             sudo apt-get update -y
+             sudo apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"
+			 sudo apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iperf3 fio
            fi
            if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
              dnf_lock=\"/var/run/dnf.pid\"
@@ -3470,18 +3484,19 @@ fleet_bench() {
              if [ -f \"\$dnf_lock\" ]; then
                pid=\$(cat \"\$dnf_lock\" 2>/dev/null)
                if [ ! -z \"\$pid\" ] && kill -0 \"\$pid\" &> /dev/null; then
-                 kill -9 \"\$pid\" 2>/dev/null
+                 sudo kill -9 \"\$pid\" 2>/dev/null
                  sleep 1
                fi
-               rm -f /var/run/dnf.pid /var/run/yum.pid /var/lib/dnf/lock /var/lib/rpm/.rpm.lock
+               sudo rm -f /var/run/dnf.pid /var/run/yum.pid /var/lib/dnf/lock /var/lib/rpm/.rpm.lock
              fi
              pkg_mgr=\$(command -v dnf || command -v yum)
-             \$pkg_mgr clean all
+             sudo \$pkg_mgr clean all
              if command -v dnf &> /dev/null; then
-               dnf history redo last -y &> /dev/null || true
+               sudo dnf history redo last -y &> /dev/null || true
              fi
-             \$pkg_mgr makecache
-             \$pkg_mgr check-update -y || [ \$? -eq 100 ]
+             sudo \$pkg_mgr makecache
+             sudo \$pkg_mgr check-update -y || [ \$? -eq 100 ]
+			 sudo \$pkg_mgr install -y --setopt=install_weak_deps=False iperf3 fio
            fi
          fi" 2>/dev/null; then
          echo "$host" > "${tmp_check_dir}/${host}.active"
