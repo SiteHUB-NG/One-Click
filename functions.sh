@@ -5676,7 +5676,9 @@ EOF
     os_family="debian"
     os_version="${os_family}${BASH_REMATCH[2]}"
   elif [[ "${base_image_name,,}" =~ (ubuntu)([0-9]+) ]]; then
-    if [[ "${BASH_REMATCH[2]}" == 24 ]]; then
+    if [[ "${BASH_REMATCH[2]}" == 26 ]]; then
+      os_model="26.04"
+    elif [[ "${BASH_REMATCH[2]}" == 24 ]]; then
       os_model="24.04"
     elif [[ "${BASH_REMATCH[2]}" == 22 ]]; then
       os_model="22.04"
@@ -6396,12 +6398,12 @@ EOF
   remote_vps_ip=""
   local_vps_ip=""
   local loop_counter=0
+  set +e
   while [ $loop_counter -lt 45 ]; do
     if [[ "$target_host" == "$(hostname -s)" ]]; then
       local_vps_ip=$(virsh net-dhcp-leases oneclick-nat | awk -v m="$target_mac" '$3==m {print $5}' | cut -d'/' -f1 | grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n 1)
 	else
-      printf "\r$(tput setaf 49)[POLL]${reset} Querying network lease table (Attempt $((loop_counter + 1))/45)."
-	  echo
+      printf "\r$(tput setaf 49)[POLL]${reset} Querying network lease table (Attempt $((loop_counter + 1))/45).$(tput el)"
       remote_vps_ip=$(ANSIBLE_HOST_KEY_CHECKING=False \
 	    ANSIBLE_SSH_TIMEOUT=3 \
         ANSIBLE_GATHERING=explicit \
@@ -6418,6 +6420,8 @@ EOF
     loop_counter=$((loop_counter + 1))
     sleep 2
   done
+  echo
+  set -e
   if [ -z "${remote_vps_ip:-${local_vps_ip}}" ]; then
     error "Target failed to broadcast a DHCP lease request in time."
     exit 1
@@ -6425,8 +6429,11 @@ EOF
   success "Captured Target DHCP Allocated Address: [${remote_vps_ip:-${local_vps_ip}}]"
   sleep 2
   info "Finalizing the build of $vps_name (${remote_vps_ip:-${local_vps_ip:-$vps_private_ip}})"
+  set +e
   if [[ "$target_host" == "$(hostname -s)" ]]; then
     info "Initiating local hypervisor deployment for ${vps_name}."
+	virsh shutdown $vps_name &> /dev/null
+	sleep 15
     virsh autostart "$vps_name" &> /dev/null || true
 	virsh start "$vps_name" &> /dev/null || true
     sleep 15
@@ -6509,9 +6516,10 @@ EOC
       -i /etc/one-click/fleet/inventory.yml \
       -u oneclick --become \
       -m shell -a "
+	    sudo virsh shutdown $vps_name &> /dev/null
 	    sudo virsh autostart $vps_name &> /dev/null
         sudo virsh start $vps_name &> /dev/null
-	    sleep 15
+	    sleep 20
         ssh_ready=0
         counter=0
         while [ \$counter -lt 30 ]; do
@@ -6526,7 +6534,10 @@ EOC
           else
             if [[ ! -f reset-check ]]; then
               touch reset-check
-              virsh reset $vps_name
+			  echo \"Health Check \$counter\"
+			  if [[ \"\$counter\" =~ ^[2468]\$ || \"\$counter\" =~ ^[0-9][24680] ]]; then
+                virsh reset $vps_name
+			  fi
               sleep 20
             fi
           fi
@@ -6571,14 +6582,15 @@ EOC
                 qemu-guest-agent \
                 iptables-services
             fi
-            systemctl daemon-reload
-            systemctl enable --now qemu-guest-agent 2> /dev/null || true
-            systemctl enable --now wg-quick@one-click 2> /dev/null || true
-			wg-quick up one-click 2> /dev/null || true
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now qemu-guest-agent 2> /dev/null || true
+            sudo systemctl enable --now wg-quick@one-click 2> /dev/null || true
+			sudo wg-quick up one-click 2> /dev/null || true
             echo '$(cat "$fleet_root/keys/id_ed25519.pub")' >> /home/oneclick/.ssh/authorized_keys
 EOC
       " 2> /dev/null
   fi
+  set -e
   success "$vps_name built on $target_host successfully."
   sleep 5
   info "Adding $vps_name to fleet"
@@ -6587,13 +6599,6 @@ EOC
     dns_bind_create_zone "$current_domain"
   done
   info "Ensuring One-Click Binaries"
-  set +e
-  if [ -f "/etc/one-click/fleet/keys/id_ed25519" ]; then
-    ssh_identities+=("-o" "IdentityFile=/etc/one-click/fleet/keys/id_ed25519")
-  fi
-  if [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
-    ssh_identities+=("-o" "IdentityFile=/home/oneclick/.ssh/id_ed25519")
-  fi
   fl_ssh "${vps_private_ip:-${public_ip}}"
   sleep 5
   clear
@@ -7020,7 +7025,7 @@ fl_ssh() {
 	  fi
 	"
     if [[ $? -eq 0 ]]; then
-      exit 0
+      return 0
     fi
   done
   error "Trust mesh execution failure: Connection timed out or credentials rejected by $target on port $port."
