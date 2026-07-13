@@ -255,6 +255,11 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "    view                    View active profiles" ""
 exit 0
 fi
+# ==== Does Path Exist? ====
+if [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+  echo 'export PATH="/usr/local/bin:$PATH"' | sudo tee -a /etc/profile > /dev/null
+  export PATH="/usr/local/bin:$PATH"
+fi
 # ==== Confirm Package Manager ====
 if command -v dnf >/dev/null 2>&1; then
   pkg_mgr="dnf"
@@ -376,6 +381,7 @@ install_dependancies() {
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
 		install_dep "tar" "type tar" "tar" "$pkg_mgr"
 		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
+		install_dep "wget" "type wget" "wget" "$pkg_mgr"
 		install_dep "xz-utils" "type xz-utils" "xz-utils" "$pkg_mgr"
         ;;
       rhel|centos|fedora)
@@ -397,6 +403,7 @@ install_dependancies() {
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
 		install_dep "tar" "type tar" "tar" "$pkg_mgr"
 		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
+		install_dep "wget" "type wget" "wget" "$pkg_mgr"
 		install_dep "xz" "type xz" "xz" "$pkg_mgr"
         ;;
       *)
@@ -1351,6 +1358,10 @@ if [[ "$1" == "--vps" ]]; then
       target_url=""
       resolved_filename=""
       case "${base_image_name,,}" in
+	    ubuntu26|ubuntu-26)
+          target_url="https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+          resolved_filename="ubuntu26.img"
+          ;;
         ubuntu24|ubuntu-24)
           target_url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
           resolved_filename="ubuntu24.img"
@@ -1399,9 +1410,14 @@ if [[ "$1" == "--vps" ]]; then
           target_url="https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
           resolved_filename="alma10.img"
           ;;
-        fedora|fedora-latest)
-          target_url="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-44-1.1.qcow2"
-          resolved_filename="fedora.img"
+        fedora[0-9]*|fedora-[0-9]*|fedora-latest|fedora)
+          if [[ "${base_image_name,,}" =~ [0-9]+ ]]; then
+            v_num=$(echo "${base_image_name,,}" | tr -cd '0-9')
+          else
+            v_num=$(curl -fsSL https://download.fedoraproject.org/pub/fedora/linux/releases/ | grep -oE '[0-9]{2}/' | tr -d '/' | sort -n | tail -1)
+          fi
+          target_url="https://download.fedoraproject.org/pub/fedora/linux/releases/${v_num}/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-${v_num}.x86_64.qcow2"
+          resolved_filename="fedora${v_num}.img"
           ;;
         *)
           resolved_filename="$base_image_name"
@@ -1421,6 +1437,45 @@ if [[ "$1" == "--vps" ]]; then
       else
         base_image_name="$resolved_filename"
       fi
+      # ==== TMUX Call ====
+      session="one-click"
+      flag="seen"
+      path="$(realpath "$0")"
+      if [[ -z "${!flag:-}" ]]; then
+        if tmux has-session -t "$session" 2>/dev/null; then
+          echo "One-Click is already running."
+          echo "${cyan}Attach with: tmux attach -t ${session}${reset}"
+          exit 1
+        fi
+        if [[ -f "$path" ]]; then
+          chmod +x "${path:?Path not set}"
+        fi
+        printf '%s' "Launching a TMUX session for Provisioning"
+        for i in {1..5}; do printf '.'; sleep 0.2; done
+        echo
+        tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip'; exec bash"
+        tmux new-session -s "$session" "$tmux_cmd"
+        printf '%s\n' \
+          "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
+          "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
+          "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}" 
+        echo "Provisioning running in background. Attach with: tmux attach -t $session"
+        exit 0
+      fi
+	  cat << 'EOF'
+  ___                    ____ _ _      _    
+ / _ \ _ __   ___       / ___| (_) ___| | __
+| | | | '_ \ / _ \_____| |   | | |/ __| |/ /
+| |_| | | | |  __/_____| |___| | | (__|   < 
+ \___/|_| |_|\___|      \____|_|_|\___|_|\_\
+                                            
+__     ___      _        _____             _            
+\ \   / (_)_ __| |_     | ____|_ __   __ _(_)_ __   ___ 
+ \ \ / /| | '__| __|    |  _| | '_ \ / _` | | '_ \ / _ \
+  \ V / | | |  | ||     | |___| | | | (_| | | | | |  __/
+   \_/  |_|_|   \__|    |_____|_| |_|\__, |_|_| |_|\___|
+                                     |___/              
+EOF
       fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip"
       exit 0
       ;;
@@ -2630,30 +2685,35 @@ if [[ $# -gt 0 ]]; then
         read -rp "${cyan}Are you sure? ${yellow}[y|n]:${reset} " uninstall_confirm
         uninstall_confirm=${uninstall_confirm,,}
         if [[ "$uninstall_confirm" == "y" || "$uninstall_confirm" == "yes" ]]; then
-          warn "Migrating sites and apps to /var/www. Please manually delete if data is no longer needed"
-          rsync -a "$base/wordpress/" /var/www/
-          rsync -a "$base/sites/" /var/www/
-          rsync -a "$base/apps/nodejs/" /var/www/
-          warn "Reinstating default webserver configs"
-          if [[ -d /etc/nginx ]]; then
-            if mv -f /etc/nginx/nginx.conf.one-click.bak /etc/nginx/nginx.conf &> /dev/null; then
-              info "Nginx default conf restored"
-            else 
-              error "Default conf file has been moved! Please manually replace"
+		  if [[ -d "$base/wordpress || -d "$base/sites || -d "$base/apps || -d "$base/nextcloud ]]; then
+            warn "Migrating sites and apps to /var/www. Please manually delete if data is no longer needed"
+            rsync -a "$base/wordpress/" /var/www/ || true
+            rsync -a "$base/sites/" /var/www/ || true
+            rsync -a "$base/apps/nodejs/" /var/www/ || true
+			rsync -a "$base/nextcloud/" /var/www/ || true
+            warn "Reinstating default webserver configs"
+            if [[ -d /etc/nginx ]]; then
+              if mv -f /etc/nginx/nginx.conf.one-click.bak /etc/nginx/nginx.conf &> /dev/null; then
+                info "Nginx default conf restored"
+              else 
+                error "Default conf file has been moved! Please manually replace"
+              fi
+            elif [[ -d /etc/apache2 ]]; then
+              if mv -f /etc/apache2/apache2.conf.one-click.bak /etc/apache2/apache2.conf &> /dev/null; then
+                info "Nginx default conf restored"
+              else 
+                error "Default conf file has been moved! Please manually replace"
+              fi
+            elif [[ -d /etc/httpd ]]; then
+              if mv -f /etc/httpd/httpd.conf.one-click.bak /etc/httpd/httpd.conf &> /dev/null; then
+                info "Nginx default conf restored"
+              else 
+                error "Default conf file has been moved! Please manually replace"
+              fi
             fi
-          elif [[ -d /etc/apache2 ]]; then
-            if mv -f /etc/apache2/apache2.conf.one-click.bak /etc/apache2/apache2.conf &> /dev/null; then
-              info "Nginx default conf restored"
-            else 
-              error "Default conf file has been moved! Please manually replace"
-            fi
-          elif [[ -d /etc/httpd ]]; then
-            if mv -f /etc/httpd/httpd.conf.one-click.bak /etc/httpd/httpd.conf &> /dev/null; then
-              info "Nginx default conf restored"
-            else 
-              error "Default conf file has been moved! Please manually replace"
-            fi
-          fi
+		  else
+		    info "No sites or apps found!"
+		  fi
           info "Loading protected paths from state files..."
           find "$state_dir" -type f | while read -r state; do
             while read -r line; do
