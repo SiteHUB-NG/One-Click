@@ -1358,6 +1358,31 @@ if [[ "$1" == "--vps" ]]; then
       target_url=""
       resolved_filename=""
       case "${base_image_name,,}" in
+	    http://*|https://*)
+          target_url="$base_image_name"
+          local clean_basename
+          clean_basename=$(basename "${base_image_name%%\?*}")
+          if [[ -z "$clean_basename" ]]; then
+            resolved_filename="custom_input_source.img"
+          else
+            resolved_filename="$clean_basename"
+          fi
+          ;;
+        nixos*|nix-os*)
+          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]{2}\.[0-9]{2}' || echo "24.11")
+          target_url="https://channels.nixos.org/nixos-${ver}/latest-nixos-openstack-x86_64-linux.qcow2"
+          resolved_filename="nixos-${ver}.img"
+          ;;
+        alpine*|alpine-linux*)
+          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]\.[0-9]+')
+          if [[ -z "$ver" ]]; then
+            target_url="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-virt-latest-x86_64.iso"
+            resolved_filename="alpine-latest.img"
+          else
+            target_url="https://dl-cdn.alpinelinux.org/alpine/v${ver}/releases/x86_64/alpine-virt-${ver}-x86_64.iso"
+            resolved_filename="alpine-${ver}.img"
+          fi
+          ;;
 	    ubuntu26|ubuntu-26)
           target_url="https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
           resolved_filename="ubuntu26.img"
