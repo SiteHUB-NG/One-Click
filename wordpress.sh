@@ -18,10 +18,24 @@ if [[ "$pkg_mgr" == "apt" ]]; then
   php_pkg="php"
 else
   dig_pkg=bind-utils
-  php_pkg="$(awk '$0 !~ /=/ {print $1}' <($pkg_mgr search php 2> /dev/null) | head -1)"
+  php_pkg="$($pkg_mgr search php 2> /dev/null | awk '$0 !~ /=/ {print $1}' | head -1 || true)"
+  php_pkg="${php_pkg//.*}"
 fi
 if command -v install_dep &> /dev/null; then
-  install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
+  else
+    $pkg_mgr install -y epel-release &> /dev/null
+    $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm &> /dev/null
+    $pkg_mgr module reset php -y &> /dev/null
+    install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php) | tail -1)
+    $pkg_mgr module enable php:remi-${install_php_ver} -y &> /dev/null
+    install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
+    install_dep "php-cli" "command -v php" "php-cli" "$pkg_mgr" true
+    install_dep "php-fpm" "command -v php" "php-fpm" "$pkg_mgr" true
+    install_dep "php-mysqlnd" "command -v php" "php-mysqlnd" "$pkg_mgr" true
+    #dnf install -y php php-cli php-fpm php-mysqlnd
+  fi
   install_dep "git" "command -v git" "git" "$pkg_mgr" true
   install_dep "dig" "command -v dig" "$dig_pkg" "$pkg_mgr" true
   install_dep "bzip2" "command -v bzip2" "bzip2" "$pkg_mgr" true
@@ -1228,6 +1242,7 @@ install_webserver() {
   local mode
   mode="$1"
   domain="${2:-}"
+  enable_hsts="${3:-}"
   if [[ "$mode" == "wordpress" ]]; then
     mode_ver="$mode"
   elif [[ "$mode" == "nodejs" ]]; then
@@ -1272,7 +1287,11 @@ EOF
       if [[ ! -f /etc/nginx/sites-enabled/00-default.conf ]]; then
         default_nginx
       fi
-      nginx_conf
+      if [[ "$mode" == "nextcloud" ]]; then
+        nc_nginx_conf "$enable_hsts"
+      else
+        nginx_conf
+      fi
     else
       if systemctl is-active nginx > /dev/null; then
         systemctl disable nginx --now
@@ -1295,6 +1314,12 @@ EOF
       "$pkg_mgr" install -y nginx
       if [[ "$mode" == "wordpress" ]]; then
         nginx_conf
+      elif [[ "$mode" == "nextcloud" ]]; then
+        nc_nginx_conf "$enable_hsts"
+        sed -Ei "/^types \{/ {n;p;s/[[:alpha:]]+[^ \t]*([ \t]+).*/text\/javascript\1mjs;/}" /etc/nginx/mime.types
+      #else
+      #  nginx_conf
+      #fi
       else
         nginx_static_conf "$domain" "$site_dir"
       fi
@@ -1341,7 +1366,6 @@ install_php_mods() {
     "$pkg_mgr" install -y \
         httpd \
         mod_ssl \
-        mod_proxy_fcgi \
         php \
         php-fpm \
         php-mysqlnd \
@@ -1399,6 +1423,135 @@ EOF
   fi
   sed -Ei.one-click.bak '/log_format|access_log/{s/main/oneclick/}' /etc/nginx/nginx.conf
   for i in /etc/nginx/sites-enabled/ /etc/nginx/sites-available /etc/nginx/con.d/ ; do
+    if [[ ! -d "$i" ]]; then
+      continue
+    fi
+    find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
+  done
+  nginx -t
+  systemctl enable nginx --now
+  systemctl reload nginx
+}
+# ==== NextCloud Nginx Conf ====
+nc_nginx_conf() {
+  enable_hsts=$1
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
+    nginx_log_dir="/var/log/nginx"
+  else
+    nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
+    nginx_log_dir="/var/log/nginx"
+  fi
+  echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
+  mkdir -p /var/log/nginx/${domain}
+  cat << EOF > "$nginx_conf_file"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain www.$domain;
+
+    root /etc/one-click/$mode_ver/$domain/www;
+    index index.php index.html;
+
+    client_max_body_size 512M;
+    fastcgi_buffers 64 4K;
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 4;
+    gzip_min_length 256;
+    gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Strict-Transport-Security "max-age=15552000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Permitted-Cross-Domain-Policies "none" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Download-Options "noopen" always;
+
+    fastcgi_hide_header X-Powered-By;
+
+    location ^~ /.well-known/ {
+        location ^~ /.well-known/carddav   { return 301 https://\$host/remote.php/dav/; }
+        location ^~ /.well-known/caldav    { return 301 https://\$host/remote.php/dav/; }
+        location ^~ /.well-known/webfinger { return 301 https://\$host/index.php/.well-known/webfinger; }
+        location ^~ /.well-known/nodeinfo  { return 301 https://\$host/index.php/.well-known/nodeinfo; }
+        
+        try_files \$uri \$uri/ /index.php\$request_uri;
+    }
+
+    location ~ ^\/(?:\\.user\\.ini|\\.htaccess|\\.git|\\.data|autotest|occ|issue|indie|db_|gpl-3.0\\.txt) {
+        deny all;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php\$request_uri;
+    }
+
+    location ^~ /ocm-provider/ {
+        try_files \$uri \$uri/ /index.php\$request_uri;
+    }
+    
+    location ^~ /ocs-provider/ {
+        try_files \$uri \$uri/ /index.php\$request_uri;
+    }
+
+    location ~ ^\/(?:updater|ocm-provider|ocs-provider)(?:\$|\/) {
+        try_files \$uri/ =404;
+        index index.php;
+    }
+
+    location ~ ^\/(?:index|remote|public|cron|core\/ajax\/update|status|updater|ocm-provider|ocs-provider)\\.php(?:\$|\/) {
+        include fastcgi_params;
+        fastcgi_split_path_info ^(.+?\\.php)(\/.*)\$;
+        try_files \$fastcgi_script_name =404;
+        
+        fastcgi_pass unix:/run/one-click/${domain}/php.sock;
+        fastcgi_index index.php;
+        
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+        
+        fastcgi_intercept_errors on;
+        fastcgi_request_buffering off;
+    }
+
+    location ~ \\.php(?:\$|/) {
+      fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
+      set \$path_info \$fastcgi_path_info;
+      try_files \$fastcgi_script_name =404;
+    
+      include fastcgi_params;
+      fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+      fastcgi_param PATH_INFO \$path_info;
+      fastcgi_param HTTPS on;
+      fastcgi_param modHeadersAvailable true;
+      fastcgi_param front_controller_active true;
+    
+      fastcgi_pass unix:/run/one-click/${domain}/php.sock;
+      fastcgi_intercept_errors on;
+      fastcgi_request_buffering off;
+    }
+
+    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?|mp4|ogg)\$ {
+        expires 6M;
+        access_log off;
+        log_not_found off;
+    }
+}
+EOF
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -Ei '
+     N;/add_header.*\n$/ {
+    p;s/add_header.*\n/add_header Strict-Transport-Security "max-age=15552000; includeSubDomains; preload" always;/;
+    }' "$nginx_conf_file"
+  fi
+  if [[ "$pkg_mgr" == "apt" && -d /etc/nginx/sites-available ]]; then
+    ln -sf /etc/nginx/sites-available/$domain.conf /etc/nginx/sites-enabled/$domain.conf
+  fi
+  sed -Ei.one-click.bak '/log_format|access_log/{s/main/oneclick/}' /etc/nginx/nginx.conf
+  for i in /etc/nginx/sites-enabled/ /etc/nginx/sites-available /etc/nginx/conf.d/ ; do
     if [[ ! -d "$i" ]]; then
       continue
     fi
@@ -1601,6 +1754,10 @@ install_letsencrypt() {
       fi
       if [[ "$mode" == "wordpress" ]]; then
         site="/etc/one-click/wordpress/$domain/www"
+      elif [[ "$mode" == "nextcloud" ]]; then
+        site="/etc/one-click/nextcloud/${domain}/www"
+      elif [[ "$mode" == "nodejs" ]]; then
+        site="/etc/one-click/apps/nodejs/${domain}/www"
       else
         site="/etc/one-click/sites/$domain/www"
       fi
@@ -3764,7 +3921,11 @@ create_isolated_php_runtime() {
     $pkg_mgr install -y  php-curl || $pkg_mgr install -y "php$v-curl" 
     $pkg_mgr install -y  php-zip || $pkg_mgr install -y "php$v-zip" 
   } 2> /dev/null
-  php_bin="/usr/sbin/php-fpm${v}"
+  if command -v php-fpm${v} &> /dev/null; then
+    php_bin="/usr/sbin/php-fpm${v}"
+  else
+    php_bin="/usr/bin/php-fpm" || php_bin="usr/sbin/php-fpm"
+  fi
   local base_conf="/etc/one-click/php/$domain"
   local run_dir="/run/one-click/$domain"
   local log_dir="/var/log/one-click/$domain"
@@ -5587,12 +5748,10 @@ install_nextcloud() {
     fi
     echo "Domain cannot be empty!"
   done
-
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide a NextCloud User: " nc_user
     [[ -n "$nc_user" ]] && break
   done
-
   while true; do
     read -rsp "${cyan}[USER]${reset} Please provide a password for $nc_user: " nc_pass
     echo
@@ -5652,6 +5811,10 @@ install_nextcloud() {
     fi
     break
   done
+  read -rp "${cyan}[USER]${blue} Enable HSTS: ${reset}" enable_hsts
+  if [[ "$enable_hsts" =~ ^(y|yes|Y|YES|Yes)$ ]]; then
+    enable_hsts="yes"
+  fi
   while true; do
     read -rp "${cyan}[USER]${reset} Please provide the Admin Email: " email
     [[ -n "$email" ]] && break
@@ -5663,10 +5826,10 @@ install_nextcloud() {
   mkdir -p \
     "$nc_webroot" \
     "$nc_data" \
-    "$nc_logs" \
     "$nc_root/backups" \
     "$nc_root/config"
   chmod 750 "$nc_root"
+  touch "$nc_logs"
   warn "Creating web owner"
   web_user="${nc_user:4}_$(echo -n "$domain" | sha1sum | cut -c1-8)"
   id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
@@ -5768,10 +5931,30 @@ install_nextcloud() {
   rm -f latest*
   rm -rf nextcloud/
   info "Installing $webserver"
-  install_webserver nextcloud "$domain" "$nc_webroot"
+  install_webserver nextcloud "$domain" "$nc_webroot" "$enable_hsts"
   info "Creating resource slice for $domain"
   info "Configuring PHP-FPM"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "nextcloud"
+  info "Installing missing Nextcloud PHP extensions"
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    $pkg_mgr install -y php-imagick php-apcu php-gmp php-intl php-sodium
+  else
+    $pkg_mgr install --skip-broken -y php-pecl-imagick php-apcu php-gmp php-intl php-sodium
+  fi
+  info "Tuning isolated OPcache parameters for $domain"
+  local site_php_ini="/etc/one-click/php/${domain}/php.ini"
+  if [[ -f "$site_php_ini" ]]; then
+    if grep -q "opcache.interned_strings_buffer" "$site_php_ini"; then
+      sed -i 's/;*opcache.interned_strings_buffer.*/opcache.interned_strings_buffer=16/' "$site_php_ini"
+    else
+      echo "opcache.interned_strings_buffer=16" >> "$site_php_ini"
+    fi
+    if grep -q "allow_url_fopen" "$site_php_ini"; then
+      sed -i 's/;*allow_url_fopen.*/allow_url_fopen = On/' "$site_php_ini"
+    else
+      echo "allow_url_fopen = On" >> "$site_php_ini"
+    fi
+  fi
   info "Enabling PHP"
   systemctl enable php-fpm@${domain}.service --now
   info "Configuring MariaDB"
@@ -5780,7 +5963,7 @@ install_nextcloud() {
   info "Configuring Nextcloud"
   . "$nc_root/meta.conf"
   nc_db="$DB_NAME"
-  sudo -u "$web_user" php \
+  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
     "$nc_webroot/occ" maintenance:install \
     --database "mysql" \
     --database-name "$nc_db" \
@@ -5790,10 +5973,10 @@ install_nextcloud() {
     --admin-pass "$nc_pass" \
     --database-host "127.0.0.1" \
     --data-dir "$nc_data"
-  sudo -u "$web_user" php "$nc_webroot/occ" \
+  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
     config:system:set trusted_domains 1 \
     --value="$domain"
-  sudo -u "$web_user" php "$nc_webroot/occ" \
+  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
     config:system:set overwriteprotocol \
     --value="https"
   if [[ "$enable_redis" == "y" ]]; then
@@ -5876,16 +6059,58 @@ install_nextcloud() {
 [Service]
 ReadWritePaths="$readpath"
 EOF
-    systemctl daemon-reload
-    systemctl restart php-fpm@${domain}.service
-    sudo -u "$web_user" php "$nc_webroot/occ" \
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
       config:system:set redis host --value="$sock"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
+      config:system:set memcache.local --value="\OC\Memcache\APCu"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
+      config:system:set memcache.locking --value="\OC\Memcache\Redis"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
+      config:system:set redis port --value="0" --type=integer
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
+      config:system:set default_phone_region --value="US"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" config:app:delete core appstore.appdata.expiration
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" db:add-missing-indices
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" db:convert-filecache-bigint
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" maintenance:repair
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:disable appapi --force
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:disable circles
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:disable password_policy
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:enable password_policy
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" config:app:delete appapi enabled
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:disable contacts 2>/dev/null || true
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" app:enable contacts 2>/dev/null || true
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" config:app:set dav hide_absence_settings --value="yes"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" maintenance:update:htaccess
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" maintenance:mimetype:update-js
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      "$nc_webroot/occ" config:app:set dav hide_absence_settings --value="yes"
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      /etc/one-click/nextcloud/${domain}/www/cron.php
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
+      -d memory_limit=1024M "$nc_webroot/occ" config:system:set maintenance_window_start --value="1" --type=integer
+    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" app:update --all
+    mv /etc/one-click/nextcloud/${domain}/www/apps/appapi /tmp/appapi_backup 2>/dev/null || true
     success "Redis installed and configured."
   fi
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver" -y
   info "Configuring SSL"
-  install_letsencrypt wordpress
+  install_letsencrypt nextcloud
   set +o pipefail
   if [[ "${manual_install:-}" -eq 1 ]]; then
     webroot_nginx_template
@@ -5894,6 +6119,28 @@ EOF
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site $domain > /dev/null 2>&1" > "/etc/cron.d/one-click_wp-web-monitor_nc_$domain"
   info "Fixing permissions"
   sleep 1
+  sed -Ee -i '
+    /^\[Service/ {
+      n;
+      i\Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    '
+    -e '
+      }
+    ' /etc/systemd/system/php-fpm@${domain}.service
+  echo "clear_env = no" >> /etc/one-click/php/${domain}/pool.conf
+  echo "apc.enable_cli = 1" >> /etc/one-click/php/${domain}/php.ini
+  sed -Ee -i "
+    /CONFIG = array/ {
+      n;
+      i\  'memcache.local' => '\\\OC\\\Memcache\\\APCu',\n'overwrite.cli.url' => 'http://localhost',\n'overwriteprotocol' => 'https',\n'maintenance_window_start' => 1,\n'user_status.enabled' => true,
+    " 
+    -e 
+    '
+      }
+    ' $nc_webroot/config/config.php
+  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini $nc_webroot/occ files:scan --all
+  systemctl daemon-reload
+  systemctl restart php-fpm@${domain}.service
   check_permissions "$domain"
   systemctl reload "$webserver"
   success " Suit has now been installed!"
@@ -5987,16 +6234,16 @@ tail_nextcloud_logs() {
     echo "Failed to load metadata"
     return 1
   }
-  local log_file="/etc/one-click/nextcloud/nginx2.test/logs/"
+  local log_file="/etc/one-click/nextcloud/${domain}/logs/"
   [[ ! -f "$log_file" ]] && {
     echo "Nextcloud log not found: $log_file"
     return 1
   }
   clear
-  printf "\n"
-  printf "╔══════════════════════════════════════════════════════════════╗\n"
-  printf "║                   Nextcloud Live Log View                  ║\n"
-  printf "╚══════════════════════════════════════════════════════════════╝\n"
+  printf "%s\n" \
+    "╔══════════════════════════════════════════════════════════════╗" \
+    "║                   Nextcloud Live Log View                    ║" \
+    "╚══════════════════════════════════════════════════════════════╝" \
   printf " Domain : %s\n" "$domain"
   printf " Log    : %s\n\n" "$log_file"
   tail -Fn0 "$log_file" | while read -r line; do
@@ -6007,11 +6254,11 @@ tail_nextcloud_logs() {
     user=$(jq -r '.user // "-"' <<< "$line" 2>/dev/null)
     case "$level" in
       0) colour='\033[0;32m'; level_name="DEBUG" ;;
-      1) colour='\033[0;36m'; level_name="INFO" ;;
-      2) colour='\033[1;33m'; level_name="WARN" ;;
+      1) colour='\033[0;36m'; level_name="INFO"  ;;
+      2) colour='\033[1;33m'; level_name="WARN"  ;;
       3) colour='\033[1;31m'; level_name="ERROR" ;;
       4) colour='\033[1;35m'; level_name="FATAL" ;;
-      *) colour='\033[0m'; level_name="$level" ;;
+      *) colour='\033[0m'; level_name="$level"   ;;
     esac
     printf "%b[%s]\033[0m %-6s %-15s %-15s %s\n" \
       "$colour" \
@@ -6239,6 +6486,7 @@ nextcloud_menu() {
       "║ ${magenta}7${blue}  ║ ${green}Restart PHP-FPM${blue}                                       ║" \
       "║ ${magenta}8${blue}  ║ ${green}Update Nextcloud${blue}                                      ║" \
       "║ ${magenta}9${blue}  ║ ${green}Backup Instance${blue}                                       ║" \
+      "║ ${magenta}10${blue} ║ ${green}Check/Fix Permissions${blue}                                 ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                                  ║" \
       "╚════╩═══════════════════════════════════════════════════════╝${reset}"
     read -rp "${cyan}[USER]${reset} Select option [0-9]: " choice
@@ -6252,6 +6500,7 @@ nextcloud_menu() {
       7) systemctl restart php-fpm@${domain}.service ;;
       8) update_nextcloud_instance                   ;;
       9) backup_nextcloud_instance                   ;;
+      10) check_permissions "$domain"                ;;
       0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
     esac
   done
@@ -6500,7 +6749,12 @@ registry_create() {
   elif [[ -d /etc/one-click/wordpress/${domain} ]]; then
     type=wordpress
   fi
-  db_port=$(awk -F= '/port =/{print $2}' /etc/mysql/my.cnf)
+  if [[ -f /etc/mysql/my.cnf ]]; then
+    cnf_file=/etc/mysql/my.cnf
+  else
+    cnf_file=/etc/my.cnf
+  fi
+  db_port=$(awk -F= '/port =/{print $2}' $cnf_file)
   local meta_file="/etc/one-click/${type}/${domain}/meta.conf"
   local php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
   passfile="/etc/one-click/db-manager/secrets/db/${domain}.pass"
@@ -7692,6 +7946,8 @@ db_create_login_token() {
   "expires": $expires
 }
 EOF
+  user_perm=$(ls -l /etc/one-click/db-manager/secrets/db/${domain}.pass | awk '{print $3":"$4}')
+  chown "$user_perm" "/etc/one-click/db-manager/runtime/tokens/${token}.json"
   chmod 600 "$token_file"
   printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
   printf "${blue}║${reset}  ${yellow}ACCESS TOKEN GENERATED${reset} %-44s ${blue}║${reset}\n" ""
@@ -7854,6 +8110,11 @@ db_manager_menu() {
   done
 }
 db_ui_menu() {
+  if [[ ! -f /etc/one-click/db-manager/sites/${domain}.json ]]; then
+    warn "Registry not generated"
+    info "Generating registry now..."
+    registry_create "$domain"
+  fi
   db_status=$(jq -r '.database.enabled' /etc/one-click/db-manager/sites/${domain}.json)
   if [[ "$db_status" != "true" ]]; then
     error "There is no database for $domain."
