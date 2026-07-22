@@ -10,25 +10,32 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: May 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: July 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== OCB Module ==== 
 collect_sysinfo
+if ! command -v iperf3 &> /dev/null; then
+  if command -v apt &> /dev/null; then
+    sudo apt -y update &> /dev/null
+    echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iperf3 fio &> /dev/null
+  else
+    dnf -y install iperf3 fio &> /dev/null
+  fi
+fi
 install_dep "fio" "type fio" "fio" "$pkg_mgr" true
 install_dep "iperf3" "type iperf3" "iperf3" "$pkg_mgr" true
 install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
 install_dep "openssl" "type openssl" "openssl" "$pkg_mgr" true
 mkdir -p /etc/one-click/ocb/benchmarks
 # ==== Check System Resources ====
-clear
-if curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token -H "Content-Type: application/json" &> /dev/null; then
-  #key=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token -H "Content-Type: application/json" | jq -r .token)
-  challenge=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-challenge \
-    | jq -r .challenge)
+challenge=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-challenge | jq -r .challenge 2>/dev/null)
+if [[ -n "$challenge" && "$challenge" != "null" ]]; then
   echo -n "$challenge" > /tmp/ocb.txt
   challenged=$(openssl pkeyutl -sign \
     -inkey /etc/one-click/ocb/ocb.pem -rawin \
     -in /tmp/ocb.txt | base64 -w0)
+  sleep 2
   key=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token \
     -H "Content-Type: application/json" \
     -d "{
@@ -36,7 +43,11 @@ if curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token -H "Content-Ty
       \"signature\": \"$challenged\"
     }" | jq -r .token)
 else
+  key=""
+fi
+if [[ -z "$key" || "$key" == "null" ]]; then
   warn "Token unavailable. Will not be able to publish results"
+  sleep 3
 fi
 no_gb=0
 bench_dir=/etc/one-click/ocb/benchmarks
@@ -76,7 +87,7 @@ if [[ "${#uptime}" -eq 19 ]]; then
   uptime="${uptime}"
 fi
 if command -v systemd-detect-virt &>/dev/null; then
-  virt=$(systemd-detect-virt)
+  virt=$(systemd-detect-virt || true)
   [[ "$virt" == "none" ]] && virt="Baremetal"
 elif command -v virt-what &>/dev/null; then
   virt=$(virt-what)
@@ -119,11 +130,6 @@ print_row() {
   cleaned=$(sed -r 's/\x1B\[[0-9;]*[mK]//g' <<< "$val")
   visible=$(printf "%s" "$cleaned" | wc -m)
   pad=$((val_width - visible))
-  case "$key" in
- #   "AES-NI"|"VM-x/AMD-V"|"Connectivity"|"Disk") pad=$((pad + 2)) ;;
- #   "Connectivity")                              pad=$((pad + 6)) ;;
- #   "Disk")                                      pad=$((pad + 1)) ;;                                     
-  esac
   (( pad < 0 )) && pad=0
   printf "${blue}│ %-*s │ %s%*s │${reset}\n" \
     "$key_width" "$key" \
@@ -516,7 +522,7 @@ EOF
     '  "$bench_result"
     . /etc/one-click/ocb/meta.conf
     end=$(date +%s)
-    if [[ -n "$key" ]]; then
+    if [[ -n "${key:-}" ]]; then
       raw=$(base64 -w 0 "$bench_result")
       response=$(
         jq -n \
@@ -545,7 +551,7 @@ EOF
       url=$(echo "$response" | jq -r '.url')
     fi
   fi
-  total_time "$start" "$end" "$url" "$key"
+  total_time "$start" "$end" "${url:-}" "${key:-}"
   . /etc/one-click/ocb/meta.conf
   cat > "/etc/one-click/ocb/benchmarks/latest.json" <<EOF
 {
