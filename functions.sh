@@ -728,13 +728,19 @@ geekbench_table() {
   fi
   single=$(jq -r '.benchmark.single' <<< "$api_response")
   multi=$(jq -r '.benchmark.multi' <<< "$api_response")
+  if [[ "$single" == "null" ]]; then
+    single=0
+  fi
+  if [[ "$multi" == "null" ]]; then
+    multi=0
+  fi
   timestamp=$(date '+%F %T')
   # ==== Build Config File ====
-    echo "single=$single" > /etc/one-click/ocb/meta.conf
-	echo "multi=$multi" >> /etc/one-click/ocb/meta.conf
-	echo "gb_id=$gb_id" >> /etc/one-click/ocb/meta.conf
-	echo "gb_url=$test_url" >> /etc/one-click/ocb/meta.conf
-	echo "timestamp=\"$timestamp\"" >> /etc/one-click/ocb/meta.conf
+  echo "single=$single" > /etc/one-click/ocb/meta.conf
+  echo "multi=$multi" >> /etc/one-click/ocb/meta.conf
+  echo "gb_id=$gb_id" >> /etc/one-click/ocb/meta.conf
+  echo "gb_url=$test_url" >> /etc/one-click/ocb/meta.conf
+  echo "timestamp=\"$timestamp\"" >> /etc/one-click/ocb/meta.conf
   if [[ ! -f "$results_file" || ! -s "$results_file" ]]; then
     first_run=1
     echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
@@ -1187,6 +1193,7 @@ total_time() {
     printf "${blue}│ %-*s │${reset}\n" "$((total_width - 4))" "$msg1"
     printf "${blue}└%s┘${reset}\n" "$border"
   fi
+  return
 }
 # ============================================= End One-Click Bench ========================================= #
 # ================================================= Fleet =================================================== #
@@ -3577,7 +3584,7 @@ fleet_bench() {
           sudo bash /home/oneclick/one-click setup
         fi
         if ! command -v iperf3 &> /dev/null; then
-          if ! command -v apt &> /dev/null; then
+          if command -v apt &> /dev/null; then
             sudo apt -y update
             echo 'iperf3 iperf3/start_daemon boolean false' | sudo debconf-set-selections
             DEBIAN_FRONTEND=noninteractive sudo apt-get install -y iperf3
@@ -4463,6 +4470,105 @@ EOF
     if ! grep -Ec '(vmx|svm)' /proc/cpuinfo &>/dev/null; then
 	  hardware_capacle=0
 	fi
+    info '> Verifying KVM internal NAT network infrastructure switches.'
+    if ! virsh net-info oneclick-nat &>/dev/null; then
+      warn '> Compiling and defining missing default NAT network XML infrastructure.'
+        cat > /tmp/kvm_default_nat.xml <<EOF
+<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0' connections='3'>
+  <name>oneclick-nat</name>
+  <forward mode='nat'/>
+  <bridge name='ocbr0' stp='on' delay='0'/>
+  <dns>
+    <forwarder addr='1.1.1.1'/>
+    <forwarder addr='8.8.8.8'/>
+	<forwarder addr='2606:4700:4700::1111'/>
+    <forwarder addr='2001:4860:4860::8888'/>
+  </dns>
+  <ip address='192.168.250.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.250.2' end='192.168.250.254'/>
+    </dhcp>
+  </ip>
+  <ip family='ipv6' address='fd00:99aa::1' prefix='64'>
+    <dhcp>
+      <range start='fd00:99aa::2' end='fd00:99aa::ffff'/>
+    </dhcp>
+  </ip>
+  <dnsmasq:options>
+    <dnsmasq:option value='port=0'/>
+	<dnsmasq:option value='dhcp-option=6,1.1.1.1,8.8.8.8'/>
+	<dnsmasq:option value='dhcp-option=option6:dns-server,[2606:4700:4700::1111],[2001:4860:4860::8888]'/>
+  </dnsmasq:options>
+</network>
+EOF
+      virsh net-define /tmp/kvm_default_nat.xml &>/dev/null
+      rm -f /tmp/kvm_default_nat.xml
+    fi
+    if [ "$(virsh net-info oneclick-nat 2>/dev/null | grep -E '^Active:' | awk '{print $2}')" != "yes" ]; then
+      info '> Activating default NAT hypervisor bridge (ocbr0).'
+      virsh net-start oneclick-nat &>/dev/null
+    fi
+    virsh net-autostart oneclick-nat &>/dev/null
+    local physical_nic=$(ip route show default | awk '{print $5}')
+	if [[ -z "$physical_nic" ]]; then
+	  physical_nic=$(awk '{print $5}' <(ip -6 r s default))
+	fi
+    if [ -n "$physical_nic" ] && [ ! -d "/sys/class/net/br0" ]; then
+      if nmcli dev status &>/dev/null; then
+        info "> NetworkManager active: Re-wiring interface $physical_nic to public bridge br0."
+        ip_addr=$(ip -o -4 addr show dev $physical_nic | awk '{print $4}' | head -n 1)
+        gateway=$(ip route show default | awk '{print $3}')
+        nameservers=$(grep -i nameserver /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ' | sed 's/ \$//')
+        old_conn=$(nmcli -g NAME connection show --active | grep -E "($physical_nic|Wired)" | head -n 1)
+        nmcli connection add type bridge con-name br0 ifname br0 ip4 "$ip_addr" gw4 "$gateway" &>/dev/null
+        nmcli connection modify br0 ipv4.dns "1.1.1.1 8.8.8.8" ipv6.dns "2606:4700:4700::1111 2001:4860:4860::8888" &>/dev/null || nmcli connection modify br0 ipv4.dns "$nameservers" &>/dev/null
+        nmcli connection modify br0 bridge.stp no bridge.forward-delay 0 &>/dev/null
+        nmcli connection add type ethernet con-name br0-slave ifname "$physical_nic" master br0 &>/dev/null
+        [ -n "$old_conn" ] && nmcli connection delete "$old_conn" &>/dev/null
+        nmcli connection up br0 &>/dev/null
+        nmcli connection up br0-slave &>/dev/null
+        sleep 10
+        if ping -c2 "$gateway" >/dev/null 2>&1; then
+          [ -n "$old_conn" ] && nmcli connection delete "$old_conn" || true
+          info '> Public Layer-2 bridge br0 online and routing successfully.'
+        else
+          error '> Bridge validation failed. Original profile retained.'
+        fi
+      elif command -v netplan &>/dev/null; then
+        netplan_file=\"/etc/netplan/50-cloud-init.yaml\"
+        [ ! -f "$netplan_file" ] && netplan_file=$(ls /etc/netplan/*.yaml | head -n 1)
+        if [ -f "$netplan_file" ] && ! grep -q "br0" "$netplan_file"; then
+          info "> Netplan active: Writing configuration matrix definitions for br0..."
+          cp "$netplan_file" "${netplan_file}.bak"
+          ip_addr=$(ip -o -4 addr show dev $physical_nic | awk '{print $4}' | head -n 1)
+          gateway=$(ip route show default | awk '{print $3}')
+          nameservers=$(grep -i nameserver /etc/resolv.conf | awk '{print $2}' | tr '\n' ',' | sed 's/,\$//')
+          cat > "$netplan_file" <<EOF
+network:
+  version: 2
+  ethernets:
+    \${physical_nic}:
+      dhcp4: false
+      dhcp6: false
+  bridges:
+    br0:
+      interfaces: [\${physical_nic}]
+      dhcp4: false
+      addresses: [\${ip_addr}]
+      routes:
+        - to: default
+          via: \${gateway}
+      nameservers:
+        addresses: [\${nameservers}]
+      parameters:
+        stp: false
+        forward-delay: 0
+EOF
+        netplan apply &>/dev/null
+        info '> Netplan profile applied: Public bridge br0 activated.'
+        fi
+      fi
+    fi
   elif ! ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
     ansible ${target_host} -i /etc/one-click/fleet/inventory.yml -u oneclick --become \
     -m shell -a "grep -Ec '(vmx|svm)' /proc/cpuinfo" &>/dev/null; then
@@ -4476,6 +4582,7 @@ EOF
   local private_subnet="192.168.250.0/24"
   local ipv6_private_subnet=fd00:99aa::/64
   info "Deploying KVM core hypervisor frameworks and building cross-platform file structures."
+  set +e
   ANSIBLE_HOST_KEY_CHECKING=False \
     ANSIBLE_SSH_TIMEOUT=3 \
     ANSIBLE_GATHERING=explicit \
@@ -4624,7 +4731,7 @@ EOF
       fi
       systemctl enable --now libvirtd 2>/dev/null
       modprobe kvm
-      modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null
+      modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null || modprobe kvm-intel 2>/dev/null || modprobe kvm-amd 2>/dev/null
       echo '>>> Virtualization system environment configured.'
     executable=/bin/bash" 2> /dev/null | sed -E '
     /changed=/d;
@@ -4632,6 +4739,7 @@ EOF
     s/^([a-zA-Z0-9.-]+)[[:space:]]*\|[[:space:]]*CHANGED[[:space:]]*\|.*rc=0[[:space:]]*>>/[\1]/g;
     s/>>>[[:space:]]*/  -> /g;
   '
+  set -e
   success "Hypervisor nodes successfully provisioned and directory structures created."
 }
 write_peer_vps_vg_allocation() {
@@ -5474,11 +5582,13 @@ fleet_vps_provision() {
     if [[ "$exit_code" -ne 0 ]]; then
       local exists_in_yaml=false
       if [[ -f "$inventory_file" ]] && [[ -n "$vps_name" ]]; then
-        if grep -E -q "^[[:space:]]*${vps_name}:" "$inventory_file"; then
+	    local exists_check=$(grep -E -q "^[[:space:]]*${vps_name}:" "$inventory_file" || true)
+        if [[ -n "$exists_check" ]]; then
           exists_in_yaml=true
         fi
       fi
       warn "Deployment interrupted or timed out. Purging corrupted hypervisor states."
+	  one-click fleet rm "$vps_name"
 	  if [[ -f "$inventory_file" ]] && [[ -n "$vps_name" ]]; then
         sed -i "/^[[:space:]]*${vps_name}:/,+2d" "$inventory_file"
       fi
@@ -5486,7 +5596,7 @@ fleet_vps_provision() {
         warn "Rolling back IP $vps_private_ip to available pool."
         #exec 9>"/tmp/vps_ip_allocation.lock"
         #flock -x 9
-		sed -Ei "1a\ ${vps_private_ip:-}" /etc/one-click/virtualization/available_ips.txt
+		sed -Ei -e "1 /${vps_private_ip}/ ! {1a\ ${vps_private_ip:-}" -e '}' /etc/one-click/virtualization/available_ips.txt
         echo "$vps_private_ip" >> "/etc/one-click/virtualization/available_ips.txt"
         #flock -u 9
         #exec 9>&-
@@ -5498,6 +5608,7 @@ fleet_vps_provision() {
         virsh destroy "$vps_name" 2>/dev/null || true
         virsh undefine "$vps_name" --remove-all-storage 2>/dev/null || true
         rm -f "/var/lib/libvirt/images/${vps_name}_cloudinit.iso" 2>/dev/null || true
+		lvremove /dev/one_click_vg/lv_$vps_name -y || true
       else
         ANSIBLE_HOST_KEY_CHECKING=False \
 		  ANSIBLE_SSH_TIMEOUT=3 \
@@ -5511,6 +5622,7 @@ fleet_vps_provision() {
             virsh undefine \"$vps_name\" --remove-all-storage 2>/dev/null || true
             rm -f /var/lib/libvirt/images/${vps_name}_cloudinit.iso 2>/dev/null || true
 			rm -f /var/lib/libvirt/images/${vps_name}.qcow2 2>/dev/null || true
+			lvremove /dev/one_click_vg/lv_$vps_name -y || true
           " &>/dev/null || true
           one-click fleet rm "$vps_name"
       fi
@@ -5680,7 +5792,19 @@ EOF
   fi
   # ==== cloud-config ====
   local os_family=""
-  if [[ "${base_image_name,,}" =~ (alma|rhel|centos|fedora|el)([0-9]+) ]]; then
+  if [[ "${base_image_name,,}" =~ http://|https:// ]]; then
+    if [[ "${base_image_name,,}" =~ \.iso ]]; then
+      os_family="custom_iso"
+    else
+      os_family="custom_cloudimg"
+    fi
+  elif [[ "${base_image_name,,}" =~ (nixos|nix-os) ]]; then
+    os_family="nixos"
+	os_version="nixos"
+  elif [[ "${base_image_name,,}" =~ alpine ]]; then
+    os_family="alpine"
+	os_version="alpinelinux"
+  elif [[ "${base_image_name,,}" =~ (alma|rhel|centos|fedora|el)([0-9]+) ]]; then
     os_family="el"
     #os_version="${os_family}${BASH_REMATCH[2]}"
     os_version="ubuntu24.04"
@@ -5704,6 +5828,175 @@ EOF
     os_version="${os_family}${os_model}"
   fi
   case "$os_family" in
+    nixos)
+      cat > "$user_data_file" <<EOF
+#cloud-config
+
+hostname: ${vps_name}
+fqdn: ${vps_name}
+
+users:
+  - name: oneclick
+    uid: 1000
+    groups: [ wheel, docker ]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${host_ssh_key}
+      - ${target_ssh_key}
+
+write_files:
+  - path: /etc/sysctl.d/99-oneclick-vps-routing.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/wireguard/one-click.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      [Interface]
+      Address = ${vps_private_ip}/16
+      MTU = 1412
+      ListenPort = 51821
+      PrivateKey = ${vps_private_key}
+
+      [Peer]
+      PublicKey = ${master_pub_key}
+      PresharedKey = ${vps_preshared_key}
+      AllowedIPs = 10.10.0.0/16
+      Endpoint = ${CONTROLLER_IP}:51821
+      PersistentKeepalive = 25
+
+runcmd:
+  - sysctl --system
+  - systemctl start wireguard-one-click 2>/dev/null || true
+
+final_message: "OneClick NixOS cloud-init configurations staged."
+EOF
+      ;;
+    alpine)
+      cat > "$user_data_file" <<EOF
+#cloud-config
+
+hostname: ${vps_name}
+fqdn: ${vps_name}
+
+users:
+  - name: oneclick
+    gecos: OneClick Administrator
+    groups: wheel,users
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${host_ssh_key}
+      - ${target_ssh_key}
+
+chpasswd:
+  list:
+    - oneclick:${raw_password}
+  expire: false
+
+write_files:
+  - path: /etc/sysctl.d/99-oneclick-vps-routing.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/wireguard/one-click.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      [Interface]
+      Address = ${vps_private_ip}/16
+      MTU = 1412
+      ListenPort = 51821
+      PrivateKey = ${vps_private_key}
+
+      [Peer]
+      PublicKey = ${master_pub_key}
+      PresharedKey = ${vps_preshared_key}
+      AllowedIPs = 10.10.0.0/16
+      Endpoint = ${CONTROLLER_IP}:51821
+      PersistentKeepalive = 25
+
+runcmd:
+  - sysctl --system
+  - apk update
+  - apk add wireguard-tools curl qemu-guest-agent iptables bash sudo
+  - rc-update add qemu-guest-agent default 2>/dev/null || true
+  - ln -s /usr/libexec/qemu-guest-agent /etc/init.d/qemu-guest-agent 2>/dev/null || true
+  - rc-service qemu-guest-agent start 2>/dev/null || true
+  - rc-update add wg-quick default 2>/dev/null || true
+
+final_message: "OneClick Alpine provisioning completed."
+EOF
+      ;;
+    custom_cloudimg)
+      cat > "$user_data_file" <<EOF
+#cloud-config
+
+hostname: ${vps_name}
+fqdn: ${vps_name}
+package_update: false
+package_upgrade: false
+
+users:
+  - default
+  - name: oneclick
+    gecos: OneClick Administrator
+    groups: [wheel, sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${host_ssh_key}
+      - ${target_ssh_key}
+
+chpasswd:
+  list:
+    - oneclick:${raw_password}
+  expire: false
+
+write_files:
+  - path: /etc/sysctl.d/99-oneclick-vps-routing.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/wireguard/one-click.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      [Interface]
+      Address = ${vps_private_ip}/16
+      MTU = 1412
+      ListenPort = 51821
+      PrivateKey = ${vps_private_key}
+
+      [Peer]
+      PublicKey = ${master_pub_key}
+      PresharedKey = ${vps_preshared_key}
+      AllowedIPs = 10.10.0.0/16
+      Endpoint = ${CONTROLLER_IP}:51821
+      PersistentKeepalive = 25
+
+runcmd:
+  - sysctl --system
+  - |
+    if command -v apt-get >/dev/null; then
+      apt-get update && apt-get install -y wireguard-tools curl qemu-guest-agent iptables
+    elif command -v dnf >/dev/null; then
+      dnf install -y wireguard-tools curl qemu-guest-agent iptables-services
+    fi
+
+final_message: "Custom Cloud Image initialized cleanly."
+EOF
+      ;;
     el)
       cat > "$user_data_file" <<EOF
 #cloud-config
@@ -5906,7 +6199,6 @@ runcmd:
   - sysctl --system
 
 final_message: "OneClick provisioning completed."
-
 EOF
       ;;
     ubuntu|*)
@@ -5990,6 +6282,12 @@ runcmd:
   - systemctl enable --now wg-quick@one-click 2>/dev/null || true
 EOF
     ;;
+  custom_iso|*)
+      cat > "$user_data_file" <<EOF
+#cloud-config
+hostname: ${vps_name}
+EOF
+      ;;
   esac
   cp "$user_data_file" "$archive_user_data"
   info "Configuring peer VPS networking"
@@ -6023,6 +6321,17 @@ EOF
   if [[ "$target_host" == "$(hostname -s)" ]]; then
     fleet_vps_init
 	mkdir -p "$stage_dir"
+	if ! command -v virt-install >/dev/null 2>&1; then
+      if command -v dnf >/dev/null 2>&1; then
+        dnf groupinstall -y "Virtualization Host"
+        dnf install -y libvirt-daemon-kvm qemu-kvm libvirt
+      elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y libvirt-daemon-system libvirt-clients bridge-utils
+      else
+        return 1
+      fi
+    fi
     local meta_data_file="${stage_dir}/meta-data"
 	iso_path="/var/lib/libvirt/images/${vps_name}_cloudinit.iso"
 	work_dir="/tmp/build_${vps_name}"
@@ -6078,7 +6387,24 @@ EOF
     fi
     virsh destroy "$vps_name" 2>/dev/null || true
     virsh undefine "$vps_name" 2>/dev/null || true
-	install_dep "genisoimage" "command -v genisoimage" "genisoimage" "$pkg_mgr" true
+	if ! command -v genisoimage &>/dev/null; then
+      if command -v apt-get &>/dev/null; then
+        apt-get update
+		apt-get install -y genisoimage &>/dev/null
+      elif command -v dnf &>/dev/null; then
+        dnf install -y cdrkit-genisoimage &>/dev/null || dnf install -y genisoimage &> /dev/null
+		if command -v xorriso &> /dev/null; then 
+		  ln -s /usr/bin/xorrisofs /usr/bin/genisoimage 2>/dev/null
+		  systemctl enable --now virtqemud.socket
+          systemctl enable --now virtqemud-ro.socket
+          systemctl enable --now virtqemud-admin.socket
+          systemctl enable --now virtnetworkd.socket
+          systemctl enable --now virtstoraged.socket
+          systemctl enable --now virtnodedevd.socket
+          systemctl enable --now virtqemud.service
+		fi
+      fi
+    fi
 	cp "$meta_data_file" "$work_dir/meta-data"
     cp "$user_data_file" "$work_dir/user-data"
     rm -f "$iso_path"
@@ -6090,8 +6416,8 @@ EOF
       return 1
     fi
     VIRT_TYPE_FLAG="--virt-type kvm"
-    if virt-install --help 2>&1 | grep -q -- '--type'; then
-      if ! virt-install --help 2>&1 | grep -q -- '--virt-type'; then
+    if virt-install --help 2>&1 | grep -q -- '\-\-type'; then
+      if ! virt-install --help 2>&1 | grep -q -- '\-\-virt-type'; then
         VIRT_TYPE_FLAG="--type kvm"
       fi
     fi
@@ -6120,7 +6446,7 @@ EOF
       --graphics none \
       --console pty,target_type=serial \
       --boot hd,cdrom \
-      --noautoconsole &> /dev/null
+      --noautoconsole #&> /dev/null
 	rm -f /tmp/${vps_name}_user_data.yml /tmp/${vps_name}_meta_data.yml
   else
     info "Preparing ${target_host}'s LVM script."
@@ -8155,9 +8481,7 @@ fleet_rule_engine_init() {
       "oneclick@$connect_ip" "
 	  if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS_FAMILY_CHECK=\"\${ID_LIKE:-$ID}\"
-      else
-        OS_FAMILY_CHECK=\"debian\"
+        OS_FAMILY_CHECK=\"\${ID_LIKE:-\${ID}}\"
       fi
       if [[ \"\$OS_FAMILY_CHECK\" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
 	    echo \">>> $PRETTY_NAME / Firewalld environment detected. Applying rules.\"
@@ -8297,9 +8621,7 @@ fleet_rule_engine_init() {
   {
     if [ -f /etc/os-release ]; then
       . /etc/os-release
-      OS_FAMILY_CHECK="${ID_LIKE:-$ID}"
-    else
-      OS_FAMILY_CHECK="debian"
+      OS_FAMILY_CHECK="${ID_LIKE:-${ID}}"
     fi
     if [[ "$OS_FAMILY_CHECK" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
 	  printf "${orange}[CHANGED]${magenta} %s\n" '=> firewalld environment detected. Applying rules.'
@@ -8834,9 +9156,10 @@ check_firewall_available() {
     return 0
   elif [[ "$firewall_backend" == "nft" ]]; then
     if ! command -v iptables >/dev/null 2>&1; then
-      warn "$firewall_backend installed. Installing iptables compatibility layer..."
-      install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
-	  if [[ "$pkg_mgr" == "dnf" ]]; then
+      warn "$firewall_backend installed. Installing iptables compatibility layer."
+	  if [[ "$pkg_mgr" == "apt" ]]; then
+        install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
+	  elif [[ "$pkg_mgr" == "dnf" ]]; then
         install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
 	  fi
       firewall_backend="iptables"
@@ -9466,9 +9789,11 @@ view_global_banlist() {
       "╠══════════════════╦═════════════════╦══════════════╦═══════════╣" \
       "║ ${yellow}SOURCE${blue}           ║ ${yellow}IP${blue}              ║ ${yellow}JAIL/REASON${blue}  ║ ${yellow}STATUS${blue}    ║" \
       "╠══════════════════╬═════════════════╬══════════════╬═══════════╣"
+	set +e
     fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/.*list://' | tr ' ' '\n' | grep -v '^$' | while read -r f2b_ip; do
       printf "${blue}║ ${yellow}%-16s${blue} ║${reset} %-15s${blue} ║${reset} %-12s${blue} ║ ${red}%-9s${blue} ║${reset}\n" "Fail2Ban" "$f2b_ip" "sshd" "BANNED"
     done
+	set -e
 	if [[ -s "$monitor_history_file" ]]; then
       jq -r -s 'map(select(.action == "DROP" or .action == "BLOCKED")) | unique_by(.ip) | .[] | [.ip, (.reason // "Brute Force"), .ts] | @tsv' "$monitor_history_file" 2>/dev/null |
       while IFS=$'\t' read -r g_ip g_reason g_drop_ts; do
@@ -9485,6 +9810,7 @@ view_global_banlist() {
     done
 	fi
     printf "${blue}╚══════════════════╩═════════════════╩══════════════╩═══════════╝${reset}\n"
+	return
 }
 check_ip_reputation() {
   local ip key_file api_key response score usage country color
