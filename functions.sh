@@ -617,14 +617,13 @@ fio_cpu_benchmark() {
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 }
 install_geekbench() {
-  local url path archive gb_cmd
+  local url path archive version
   url="$1"
   path="$2"
   version="$3"
-  gb_cmd="geekbench${version}"
   archive="/tmp/geekbench_${version}.tar.gz"
   mkdir -p "$path" || exit 1
-  curl -fSL "$url" -o "$archive" &> /dev/null|| {
+  curl -fSL "$url" -o "$archive" &> /dev/null || {
     error "Download failed"
     exit 1
   }
@@ -634,10 +633,7 @@ install_geekbench() {
     error "Extraction failed"
     exit 1
   }
-  chmod +x "$path/$gb_cmd" || {
-    echo "[GB] chmod failed"
-    exit 1
-  }
+  chmod +x "$path"/geekbench* 2>/dev/null || true
 }
 get_latest_gb() {
   local arch_name arch_suffix major minor patch url
@@ -676,13 +672,21 @@ geekbench_table() {
   gb_run="False"
   results_file="/etc/one-click/ocb/ocb_results.txt"
   # ==== Detect package ====
-  if [[ $version == "6" ]]; then
+  if [[ $version == "7" ]]; then
+    gb_url=$(get_latest_gb "$version") || return
+    gb_cmd="geekbench7"
+    gb_run="True"
+  elif [[ $version == "6" ]]; then
     gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench6"
     gb_run="True"
   elif [[ $version == "5" ]]; then
     gb_url=$(get_latest_gb "$version") || return
-    gb_cmd="geekbench5"
+    if [[ -f "$gb_path/geekbench_x86_64" ]]; then
+        gb_cmd="geekbench_x86_64"
+    else
+        gb_cmd="geekbench5"
+    fi
     gb_run="True"
   else
     return
@@ -743,13 +747,13 @@ geekbench_table() {
   echo "timestamp=\"$timestamp\"" >> /etc/one-click/ocb/meta.conf
   if [[ ! -f "$results_file" || ! -s "$results_file" ]]; then
     first_run=1
-    echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
+    echo "$timestamp|$single|$multi|$test_url|GB$version" >> "$results_file"
     printf "${blue}│${yellow}%-20s %-20s %-56s${blue}│${reset}\n" \
       "Benchmark Status" "GB$version" "First benchmark run recorded"
   else
     first_run=0
     last_line=$(tail -1 "$results_file")
-    IFS='|' read -r old_date old_single old_multi old_url <<< "$last_line"
+    IFS='|' read -r old_date old_single old_multi old_url gb_version <<< "$last_line"
     single_diff=$((single - old_single))
     multi_diff=$((multi - old_multi))
 	if [[ "$old_single" -ne 0 ]]; then
@@ -792,7 +796,7 @@ geekbench_table() {
       multi_trend="No Change"
       multi_symbol=""
     fi
-    echo "$timestamp|$single|$multi|$test_url" >> "$results_file"
+    echo "$timestamp|$single|$multi|$test_url|GB$version" >> "$results_file"
   fi
   if [[ "$single" -le 0 ]]; then
     single="Results blocked by Cloudflare"
@@ -806,12 +810,12 @@ geekbench_table() {
     "Result URL" "GB$version" "$test_url"
   if (( first_run == 0 )); then
     printf "${blue}│${magenta}%-20s %-20s %-56s${blue}│${reset}\n" \
-      "Previous Test" "GB$version" "$old_date" \
-      "Prev Single Core" "GB$version" "$old_single" \
-      "Prev Multi Core" "GB$version" "$old_multi" \
-      "Single Trend" "GB$version" \
+      "Previous Test" "$gb_version" "$old_date" \
+      "Prev Single Core" "$gb_version" "$old_single" \
+      "Prev Multi Core" "$gb_version" "$old_multi" \
+      "Single Trend" "$gb_version" \
       "$single_trend (${single_symbol}${single_diff}, ${single_symbol}${single_pct}%)" \
-      "Multi Trend" "GB$version" "$multi_trend (${multi_symbol}${multi_diff}, ${multi_symbol}${multi_pct}%)"
+      "Multi Trend" "$gb_version" "$multi_trend (${multi_symbol}${multi_diff}, ${multi_symbol}${multi_pct}%)"
   fi
   printf "${blue}%s${reset}\n" \
     "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
@@ -3411,6 +3415,7 @@ echo -e "${blue}================================================================
 }
 fleet_bench() {
   fleet_init
+  version="${1:-7}"
   local_host=$(hostname -s)
   build_vars
   if [[ -f "$fleet_root/controller.env" ]]; then
@@ -3613,15 +3618,16 @@ fleet_bench() {
         fi
         sudo rm -f \"\$bench_dir/COMPLETE\" \"\$bench_dir/job.state\" \"/etc/one-click/ocb/benchmarks/latest.json\"
         echo 'RUNNING' | sudo tee /etc/one-click/ocb/benchmarks/job.state
-        sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl\"  > /dev/null 2>&1 &
+        sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl $version\"  > /dev/null 2>&1 &
         sudo cp \"/etc/one-click/ocb/benchmarks/latest.json\" \"/etc/one-click/fleet/benchmarks/localhost.json\" &> /dev/null & || true
         rm -f /home/oneclick/one-click /home/oneclick/*.sh
     " < /dev/null &> /dev/null || true
     success "$name ($ip) is now running One-Click Bench!"
   done
-  fleet_local_bench
+  fleet_local_bench "$version"
 }
 fleet_local_bench() {
+  version="${1:-7}"
   if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
     if [[ $(cat /etc/one-click/ocb/benchmarks/job.state) == "RUNNING" ]]; then
 	  echo "${red}[$(tput setaf 216)[$(hostname -s)]${red}]${reset}: A benchmark is already running on the Controller"
@@ -3654,7 +3660,7 @@ fleet_local_bench() {
   fi
   mkdir -p /etc/one-click/ocb/benchmarks/
   echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-  nohup /bin/bash -lc "TERM=xterm-256color one-click fl" < /dev/null &> /dev/null &
+  nohup /bin/bash -lc "TERM=xterm-256color one-click fl $version" < /dev/null &> /dev/null &
   success "Controller (${sys_ip:-${sys_ipv6:-}}) is now running One-Click Bench!"
   cp "/etc/one-click/ocb/benchmarks/latest.json" "/etc/one-click/fleet/benchmarks/localhost.json" &> /dev/null || true
   success "${green}All benchmark jobs dispatched successfully!${reset}"
@@ -9640,7 +9646,7 @@ show_rules() {
         done <<< "$table_output"
       done 3< <(nft list tables)
     fi
-    tables=($(${fw_bin:-iptables}-save 2>/dev/null | grep '^*' | cut -d'*' -f2))
+    tables=($((${fw_bin:-iptables}-save 2>/dev/null | grep '^*' | cut -d'*' -f2) || true))
 	set +o pipefail
     printf '%s\n' \
       "${blue}╔══════════════════════════════╗" \
