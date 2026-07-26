@@ -1077,28 +1077,27 @@ fi
 if [[ "$1" == "fl" ]]; then
   build_vars
   load_ocb
-  swap_file="/etc/one-click/ocb/.ephemeral_swap"
+  swap_file="/etc/one-click/ocb/.gb_swap"
   created_swap=false
-  if [[ $(swapon --show --noheadings | wc -l) -eq 0 ]]; then
-    sudo swapoff "$swap_file" &>/dev/null || true
-    sudo rm -f "$swap_file"
-    if sudo dd if=/dev/zero of="$swap_file" bs=1M count=2048 status=none; then
-      sudo chmod 600 "$swap_file"
-      sudo mkswap "$swap_file" &>/dev/null
-      if sudo swapon "$swap_file" &>/dev/null; then
+  if [[ $(free -m | awk '/Mem:/ {print $2}') -lt 3500 ]]; then
+    if [[ ! -f "$swap_file" ]]; then
+      fallocate -l 2G "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count=2048
+      chmod 600 "$swap_file"
+      mkswap "$swap_file" &>/dev/null
+      if swapon "$swap_file" &>/dev/null; then
         created_swap=true
         trap '
-          sudo swapoff "'"$swap_file"'" &>/dev/null || true;
-          sudo rm -f "'"$swap_file"'";
+          swapoff "'"$swap_file"'" &>/dev/null || true;
+          rm -f "'"$swap_file"'";
         ' EXIT
       fi
     fi
   fi
-  cpu_sys &
+  cpu_sys "${2:-}" &
   if [[ "$created_swap" = true ]]; then
     trap - EXIT
-    sudo swapoff "$swap_file" &>/dev/null || true
-    sudo rm -f "$swap_file"
+    swapoff "$swap_file" &>/dev/null || true
+    rm -f "$swap_file"
   fi
   exit 0
 fi
@@ -1960,7 +1959,7 @@ if [[ "$1" == "fleet" ]]; then
 	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
-    fleet_bench
+    fleet_bench "${3:-7}"
     exit 0
   fi
   if [[ "$2" == "status" ]]; then
@@ -2575,7 +2574,7 @@ build_vars
 init_secret_key
 # ==== Fall immediately into the TMUX session to run the script ====
 session="one-click"
-arg="${1:-}"
+arg="$*"
 flag="seen"
 if [[ -z "${!flag:-}" ]]; then
   # ==== If session already exists, don't relaunch ====
@@ -2590,20 +2589,20 @@ if [[ -z "${!flag:-}" ]]; then
   printf '%s' "Launching a TMUX session for One-Click"
   for i in {1..13}; do printf '.'; sleep 0.3; done
   echo
-  tmux new-session -s "$session" "env $flag=1 bash '${path}' '$arg'; exec bash"
+  # ==== Enable TMUX features ====
+  tmux set -g mouse on
+  tmux set -g mode-keys vi
+  tmux set -g allow-rename off
+  tmux set -g automatic-rename off
+  tmux set -g default-terminal "tmux-256color"
+  tmux set -g terminal-overrides ',xterm-256color:Tc'
+  tmux new-session -s "$session" "env $flag=1 bash '${path}' '$1' '${2:-}'; exec bash"
   printf '%s\n' \
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
     "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
   exit 0
 fi
-# ==== Enable TMUX features ====
-tmux set -g mouse on
-tmux set -g mode-keys vi
-tmux set -g allow-rename off
-tmux set -g automatic-rename off
-tmux set -g default-terminal "tmux-256color"
-tmux set -g terminal-overrides ',xterm-256color:Tc'
 #################################*******************#################################
 #################################* RUN MAIN SCRIPT *#################################
 #################################*******************#################################
@@ -2616,13 +2615,60 @@ if [[ $# -gt 0 ]]; then
       ;;
     -c|--bench)
       load_ocb
-      run_ocb_pipe
+      swap_file="/etc/one-click/ocb/.gb_swap"
+      created_swap=false
+      if [[ $(free -m | awk '/Mem:/ {print $2}') -lt 3500 ]]; then
+        if [[ ! -f "$swap_file" ]]; then
+          fallocate -l 2G "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count=2048
+          chmod 600 "$swap_file"
+          mkswap "$swap_file" &>/dev/null
+          if swapon "$swap_file" &>/dev/null; then
+            created_swap=true
+            trap '
+              swapoff "'"$swap_file"'" &>/dev/null || true;
+              rm -f "'"$swap_file"'";
+            ' EXIT
+          fi
+        fi
+      fi
+	  run_ocb_pipe "${2:-}"
       shift
+      if [[ "$created_swap" = true ]]; then
+        trap - EXIT
+        swapoff "$swap_file" &>/dev/null || true
+        rm -f "$swap_file"
+      fi
       ;;
     -bench-cpu)
       load_ocb
-      cpu_sys
+	  swap_file="/etc/one-click/ocb/.gb_swap"
+      created_swap=false
+      if [[ $(free -m | awk '/Mem:/ {print $2}') -lt 3500 ]]; then
+        if [[ ! -f "$swap_file" ]]; then
+          fallocate -l 2G "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count=2048
+          chmod 600 "$swap_file"
+          mkswap "$swap_file" &>/dev/null
+          if swapon "$swap_file" &>/dev/null; then
+            created_swap=true
+            trap '
+              swapoff "'"$swap_file"'" &>/dev/null || true;
+              rm -f "'"$swap_file"'";
+            ' EXIT
+          fi
+        fi
+      fi
+      if [[ "$created_swap" = true ]]; then
+        trap - EXIT
+        swapoff "$swap_file" &>/dev/null || true
+        rm -f "$swap_file"
+      fi
+      cpu_sys "${2:-}"
       shift
+      if [[ "$created_swap" = true ]]; then
+        trap - EXIT
+        swapoff "$swap_file" &>/dev/null || true
+        rm -f "$swap_file"
+      fi
       ;;
     -d|--pv-drain)
       load_pv_drain
