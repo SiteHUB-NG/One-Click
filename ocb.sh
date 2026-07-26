@@ -271,17 +271,26 @@ run_ocb() {
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
   local version gb_path gb_url
-  version="${1:-6}"
-  gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+  version="${1}"
+  gb_path="/etc/one-click/ocb/geekbench_${version}"
   mkdir -p "$gb_path"
   # ==== Detect package ====
-  if [[ $version == "6" ]]; then
+  if [[ $version == "7" ]]; then
+    gb_url=$(get_latest_gb "$version") || return
+    gb_cmd="geekbench7"
+    gb_run="True"
+  elif [[ $version == "6" ]]; then
     gb_url=$(get_latest_gb "$version") || return
     gb_cmd="geekbench6"
     gb_run="True"
   elif [[ $version == "5" ]]; then
     gb_url=$(get_latest_gb "$version") || return
-    gb_cmd="geekbench5"
+    # Check if extracted file is geekbench_x86_64 or geekbench5
+    if [[ -f "$gb_path/geekbench_x86_64" ]]; then
+        gb_cmd="geekbench_x86_64"
+    else
+        gb_cmd="geekbench5"
+    fi
     gb_run="True"
   else
     return
@@ -298,7 +307,7 @@ run_ocb() {
   if (( no_gb == 1 )); then
     run_sysbench 
   else
-    geekbench_table "${version:-6}" "$gb_path" 
+    geekbench_table "${version}" "$gb_path" 
   fi
   set -e
 }
@@ -317,11 +326,12 @@ EOF
   trap bench_fail ERR
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  version="${1:-7}"
   gb_check
   if (( no_gb == 1 )); then
     bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').sysbench"
     echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-    run_ocb | tee -a "$bench_result"
+    run_ocb "$version" | tee -a "$bench_result"
     sed -Ei '
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
@@ -331,7 +341,9 @@ EOF
       /Preparing Geekbench/d
     ' "$bench_result"
     end=$(date +%s)
-    source /etc/one-click/ocb/meta.conf
+    if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+      source /etc/one-click/ocb/meta.conf
+    fi
     if [[ -n "$key" ]]; then
       raw=$(base64 -w 0 "$bench_result")
       response=$(
@@ -361,10 +373,12 @@ EOF
       url=$(echo "$response" | jq -r '.url')
     fi
   else
-    bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-6}"
+    bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-7}"
     echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-    run_ocb | tee -a "$bench_result"
-    source /etc/one-click/ocb/meta.conf
+    run_ocb "$version" | tee -a "$bench_result"
+    if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+      source /etc/one-click/ocb/meta.conf
+    fi
     sed -Ei '
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
@@ -405,7 +419,9 @@ EOF
     fi
   fi
   total_time "$start" "$end" "$url" "$key"
-  . /etc/one-click/ocb/meta.conf
+  if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+    . /etc/one-click/ocb/meta.conf
+  fi
   cat > "/etc/one-click/ocb/benchmarks/latest.json" <<EOF
 {
   "status":"COMPLETE",
@@ -424,6 +440,7 @@ EOF
   exit 0
 }
 geek() {
+  version="${1:-7}"
   header_notice "$ocb_header" "$ocb_banner" "3" "62"
   if (( no_gb == 1 )); then
     init
@@ -434,7 +451,7 @@ geek() {
     init
     expand_country "${country:-}"
     print_table
-    geekbench_table "${version:-6}" "$gb_path"
+    geekbench_table "${version}" "$gb_path"
   fi
 }
 cpu_sys() {
@@ -452,13 +469,14 @@ EOF
   trap bench_fail ERR
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
+  version="${1:-7}"
   mkdir -p /etc/one-click/ocb
   gb_check
   if (( no_gb == 1 )); then
     bench_ext="bench_$(date +'%F-%T').sysbench"
     bench_result="/etc/one-click/ocb/benchmarks/$bench_ext"
     echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-    geek | tee -a "$bench_result"
+    geek "$version" | tee -a "$bench_result"
     sed -Ei '
       s/^[^├└T┌│]*//g;
       s/(.*[^├└T┌│]).*$/\1/
@@ -477,7 +495,7 @@ EOF
           --arg raw "$raw" \
           --argjson single "$avg_time" \
           --argjson multi "$max_time" \
-          '{
+          '{geekbench_table
             id: $id,
             version: $version,
             tool: $tool,
@@ -495,12 +513,15 @@ EOF
       url=$(echo "$response" | jq -r '.url')
     fi
   else
-    version="${1:-6}"
-    gb_path="/etc/one-click/ocb/geekbench_${version:-6}"
+    gb_path="/etc/one-click/ocb/geekbench_${version}"
     bench_result="/etc/one-click/ocb/benchmarks/bench-only_$(date +'%F-%T').gb${1:-6}"
     mkdir -p "$gb_path"
     # ==== Detect package ====
-    if [[ $version == "6" ]]; then
+    if [[ $version == "7" ]]; then
+      gb_url=$(get_latest_gb "$version") || return
+      gb_cmd="geekbench7"
+      gb_run="True"
+    elif [[ $version == "6" ]]; then
       gb_url=$(get_latest_gb "$version") || return
       gb_cmd="geekbench6"
       gb_run="True"
@@ -512,7 +533,7 @@ EOF
       return
     fi
     echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-    geek | tee -a "$bench_result"
+    geek "$version" | tee -a "$bench_result"
     sed -Ei '
       s/\x1B\[[0-9;]*[mK]//g;
       s/\x0F|\r//g;
@@ -552,7 +573,9 @@ EOF
     fi
   fi
   total_time "$start" "$end" "${url:-}" "${key:-}"
-  . /etc/one-click/ocb/meta.conf
+  if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+    . /etc/one-click/ocb/meta.conf
+  fi
   cat > "/etc/one-click/ocb/benchmarks/latest.json" <<EOF
 {
   "status":"COMPLETE",
