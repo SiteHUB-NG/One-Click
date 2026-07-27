@@ -2589,13 +2589,6 @@ if [[ -z "${!flag:-}" ]]; then
   printf '%s' "Launching a TMUX session for One-Click"
   for i in {1..13}; do printf '.'; sleep 0.3; done
   echo
-  # ==== Enable TMUX features ====
-  tmux set -g mouse on
-  tmux set -g mode-keys vi
-  tmux set -g allow-rename off
-  tmux set -g automatic-rename off
-  tmux set -g default-terminal "tmux-256color"
-  tmux set -g terminal-overrides ',xterm-256color:Tc'
   tmux new-session -s "$session" "env $flag=1 bash '${path}' '$1' '${2:-}'; exec bash"
   printf '%s\n' \
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
@@ -2603,6 +2596,13 @@ if [[ -z "${!flag:-}" ]]; then
     "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
   exit 0
 fi
+# ==== Enable TMUX features ====
+tmux set -g mouse on
+tmux set -g mode-keys vi
+tmux set -g allow-rename off
+tmux set -g automatic-rename off
+tmux set -g default-terminal "tmux-256color"
+tmux set -g terminal-overrides ',xterm-256color:Tc'
 #################################*******************#################################
 #################################* RUN MAIN SCRIPT *#################################
 #################################*******************#################################
