@@ -1217,6 +1217,7 @@ if [[ "$1" == "--vps" ]]; then
       -c|--cpu)      vps_cpu="$2"         ; shift 2 ;;
       -p|--ip)       public_ip="$2"       ; shift 2 ;;
       -l|--language) language="$2"        ; shift 2 ;;
+	  -v|--virt)     virt_mac="$2"        ; shift 2 ;;
       create)        snap_action="create" ; shift 1 ;;
       delete)        snap_action="delete" ; shift 1 ;;
       restore)       snap_action="restore"; shift 1 ;;
@@ -1333,6 +1334,8 @@ if [[ "$1" == "--vps" ]]; then
       exit 0
       ;;
     create)
+	  build_vars
+	  collect_sysinfo
       if [[ -z "$vps_name" || -z "$target_host" || -z "$base_image_name" || -z "$disk_size" ]]; then
         error "Missing required parameters for creation loop."
         echo "Usage: one-click --vps create -n <name> -t <target> -i <image> -d <disk_size> [-m nat|public] [-r ram_mb] [-c cpus] --password <password>"
@@ -1461,6 +1464,17 @@ if [[ "$1" == "--vps" ]]; then
       else
         base_image_name="$resolved_filename"
       fi
+	  if [[ -n "$public_ip" ]]; then
+        read -rp "${cyan}[USER]${reset} Please provide the subnet mask prefix/CIDR for ${public_ip} (default: 24): " cidr
+        cidr="${cidr#/}"
+        cidr="${cidr:-24}"
+        public_ip="${public_ip}/${cidr}"
+        read -rp "${cyan}[USER]${reset} Does ${ip_upstream:-upstream} require a virtual MAC (y|N)? " v_mac
+        v_mac="${v_mac,,}"
+        if [[ "${v_mac:-}" =~ ^(yes|y)$ ]]; then
+          read -rp "$(tput setaf 67)[VMAC]${reset} Enter the Virtual MAC provided by ${ip_upstream:-upstream}: " virt_mac
+        fi
+      fi
       # ==== TMUX Call ====
       session="one-click"
       flag="seen"
@@ -1477,7 +1491,7 @@ if [[ "$1" == "--vps" ]]; then
         printf '%s' "Launching a TMUX session for Provisioning"
         for i in {1..5}; do printf '.'; sleep 0.2; done
         echo
-        tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip'; exec bash"
+        tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip' -v '${virt_mac:-}'; exec bash"
         tmux new-session -s "$session" "$tmux_cmd"
         printf '%s\n' \
           "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
@@ -2235,6 +2249,7 @@ _one_click() {
   cmds["--nextcloud-admin"]=""
   cmds["--proxy"]=""
   cmds["--ssh"]=""
+  cmds["--console"]=""
   cmds["mv"]=""
 
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -2393,6 +2408,7 @@ _one_click() {
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--proxy"]=""
   cmds["--ssh"]=""
+  cmds["--console"]=""
   cmds["mv"]=""
   
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
