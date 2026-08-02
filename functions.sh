@@ -1315,6 +1315,7 @@ EOF
   touch "$fleet_root/.initialized"
 }
 flbench_launch() {
+  version="${1:-}"
   rm -f \
     /etc/one-click/ocb/benchmarks/COMPLETE \
     /etc/one-click/ocb/benchmarks/job.state \
@@ -1322,7 +1323,7 @@ flbench_launch() {
 	cat > /etc/one-click/flbench.sh << EOF
 #!/bin/bash
 # Written by Chike Egbuna for One-Click Toolkit
-nohup sudo /bin/bash -c "/usr/local/bin/one-click fl >> /var/log/one-click/one-click-bench-stream.log 2>&1" &
+nohup sudo /bin/bash -c "/usr/local/bin/one-click fl "${version:-}" >> /var/log/one-click/one-click-bench-stream.log 2>&1" &
 echo "STARTED" | sudo tee /etc/one-click/ocb/benchmarks/job.state
 EOF
   sudo chmod +x /etc/one-click/flbench.sh
@@ -2486,6 +2487,10 @@ EOF
     porto=()
   fi
   set +e
+  if ! fleet_console "$host" &> /dev/null; then
+    /usr/local/bin/one-click --vps start --name "$host"
+	sleep 20
+  fi
   while true; do
     ssh \
         -n \
@@ -2557,7 +2562,11 @@ EOF
 	  /^fatal/s/(\[)([^]]*)/${red}\1${blue}\2${red}/;
     " || true
   if [[ "$server_type" == "init" || "$server_type" == "hypervisor" ]]; then
-    info "Initialization path. Progressing with setup."
+    if [[ "$server_type" == "init" ]]; then
+      info "Initialization path. Progressing with setup."
+	else
+	  info "Hypervisor path. Configuring wireguard."
+	fi
 	# ==== Configure WG on new peer ====
     local target_host_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --host $host | jq -r '.ansible_host')
     #fleet_wg_add $target_host_ip $host
@@ -2568,20 +2577,21 @@ EOF
       error "Hypervisor target identifier is undefined."
       return 1
     fi
-    info "Allocating Private Node IP from pool for hypervisor: $hv_node_name"
-    hv_private_ip=$(head -n 1 "$FLEET_AVAILABLE_IPS_FILE")
-    if [[ -z "$hv_private_ip" ]]; then
-      error "IP Pool Exhausted! Unable to register hypervisor network mesh tunnel."
-      return 1
-    fi
-    info "Generating Wireguard Cryptographic Keys locally on Controller for $hv_node_name."
-    local hv_private_key hv_public_key hv_preshared_key master_pub_key
-    hv_private_key=$(wg genkey)
-    hv_public_key=$(echo "$hv_private_key" | wg pubkey)
-    hv_preshared_key=$(wg genpsk)
-    master_pub_key=$(cat /etc/wireguard/public.key)
-    info "Registering Tunnel Endpoint locally in Controller configuration files."
-    cat >> /etc/wireguard/one-click.conf <<EOF
+	if [[ "$server_type" == "hypervisor" ]]; then
+      info "Allocating Private Node IP from pool for hypervisor: $hv_node_name"
+      hv_private_ip=$(head -n 1 "$FLEET_AVAILABLE_IPS_FILE")
+      if [[ -z "$hv_private_ip" ]]; then
+        error "IP Pool Exhausted! Unable to register hypervisor network mesh tunnel."
+        return 1
+      fi
+      info "Generating Wireguard Cryptographic Keys locally on Controller for $hv_node_name."
+      local hv_private_key hv_public_key hv_preshared_key master_pub_key
+      hv_private_key=$(wg genkey)
+      hv_public_key=$(echo "$hv_private_key" | wg pubkey)
+      hv_preshared_key=$(wg genpsk)
+      master_pub_key=$(cat /etc/wireguard/public.key)
+      info "Registering Tunnel Endpoint locally in Controller configuration files."
+      cat >> /etc/wireguard/one-click.conf <<EOF
 
 # ==== Hypervisor Cluster Node: $hv_node_name ====
 [Peer]
@@ -2590,15 +2600,15 @@ PresharedKey = ${hv_preshared_key}
 AllowedIPs = ${hv_private_ip}/32
 PersistentKeepalive = 25
 EOF
-    local hv_resolved_public_ip
-    hv_resolved_public_ip="${ip}"
-    export WG_HIDE_KEYS=never
-    echo "$hv_preshared_key" | wg set one-click peer "$hv_public_key" preshared-key /dev/stdin allowed-ips "${hv_private_ip}/32" endpoint "${hv_resolved_public_ip}:51821"
-    sed -i "1d" "$FLEET_AVAILABLE_IPS_FILE"
-    echo "$hv_private_ip" >> "$FLEET_USED_IPS_FILE"
-    local hv_wg_stage="/tmp/wg_build_${hv_node_name}.conf"
-    info "Rendering WireGuard interface credentials into staging layout."
-    cat > "$hv_wg_stage" <<EOF
+      local hv_resolved_public_ip
+      hv_resolved_public_ip="${ip}"
+      export WG_HIDE_KEYS=never
+      echo "$hv_preshared_key" | wg set one-click peer "$hv_public_key" preshared-key /dev/stdin allowed-ips "${hv_private_ip}/32" endpoint "${hv_resolved_public_ip}:51821"
+      sed -i "1d" "$FLEET_AVAILABLE_IPS_FILE"
+      echo "$hv_private_ip" >> "$FLEET_USED_IPS_FILE"
+      local hv_wg_stage="/tmp/wg_build_${hv_node_name}.conf"
+      info "Rendering WireGuard interface credentials into staging layout."
+      cat > "$hv_wg_stage" <<EOF
 [Interface]
 Address = ${hv_private_ip}/16
 MTU = 1412
@@ -2614,73 +2624,76 @@ AllowedIPs = 10.10.0.0/16
 Endpoint = ${CONTROLLER_IP}:51821
 PersistentKeepalive = 25
 EOF
-    chmod 600 "$hv_wg_stage"
-    info "Wireguard config prepared and shared out to target machine [$host]."
-    ANSIBLE_HOST_KEY_CHECKING=False \
-	  ANSIBLE_SSH_TIMEOUT=3 \
-      ANSIBLE_GATHERING=explicit \
-	  ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-	  ansible "$host" \
-      -i /etc/one-click/fleet/inventory.yml \
-      -u oneclick --become \
-      -m copy -a "src=$hv_wg_stage dest=/etc/wireguard/one-click.conf owner=root group=root mode=0600" &>/dev/null
-    rm -f "$hv_wg_stage"
-	mkdir -p "$(dirname "$hypervisor_wg_file")"
-    if [[ ! -f "$hypervisor_wg_file" ]] || [[ ! -s "$hypervisor_wg_file" ]] || ! jq empty "$hypervisor_wg_file" 2>/dev/null; then
-        echo "{}" > "$hypervisor_wg_file"
-    fi
-    jq --arg hv "$host" --arg ip "$hv_private_ip" \
-       '.[$hv] = $ip' "$hypervisor_wg_file" > "${hypervisor_wg_file}.tmp" && mv "${hypervisor_wg_file}.tmp" "$hypervisor_wg_file"
-    info "Invoking runtime network shifts and restarting service on hypervisor host."
-	set +e
-    ANSIBLE_HOST_KEY_CHECKING=False \
-	  ANSIBLE_SSH_TIMEOUT=3 \
-      ANSIBLE_GATHERING=explicit \
-	  ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-	  ansible "$host" \
-      -i /etc/one-click/fleet/inventory.yml \
-      -u oneclick --become \
-      -m shell -a "
-	    if ! command -v wg > /dev/null; then
-		  if command -v apt > /dev/null; then
-		    apt -y install wireguard-tools &> /dev/null
-		  else
-		    dnf -y install wireguard-tools &> /dev/null
-		  fi
-		fi
-	    sysctl -w net.ipv4.ip_forward=1 && \
-        echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
-		echo 'net.ipv4.conf.all.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
-		echo 'net.ipv4.conf.default.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
-		echo 'net.ipv4.conf.one-click.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
-        (if command -v iptables >/dev/null; then 
-          iptables -C INPUT -p udp --dport 51821 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 51821 -j ACCEPT 2>/dev/null || true;
-          iptables -C INPUT -p udp --dport 67 --sport 68 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 67 --sport 68 -j ACCEPT 2>/dev/null || true;
-          iptables -C OUTPUT -p udp --dport 68 --sport 67 -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --dport 68 --sport 67 -j ACCEPT 2>/dev/null || true;
-		  iptables -C INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || true;
-		  iptables -C INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || true;
-        fi) && \
-        (if command -v firewall-cmd >/dev/null; then
-          local fw_changed=0;
-          if ! firewall-cmd --zone=public --query-port=51821/udp --permanent &>/dev/null; then
-            firewall-cmd --zone=public --add-port=51821/udp --permanent &>/dev/null && fw_changed=1 || true;
-          fi;
-          if ! firewall-cmd --zone=public --query-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"67\" source-port=\"68\" accept' --permanent &>/dev/null; then
-            firewall-cmd --zone=public --add-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"67\" source-port=\"68\" accept' --permanent &>/dev/null && fw_changed=1 || true;
-          fi;
-          if ! firewall-cmd --zone=public --query-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"68\" source-port=\"67\" accept' --permanent &>/dev/null; then
-            firewall-cmd --zone=public --add-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"68\" source-port=\"67\" accept' --permanent &>/dev/null && fw_changed=1 || true;
-          fi;
-          if [ \"\$fw_changed\" -eq 1 ]; then
-            firewall-cmd --reload &>/dev/null || true;
-          fi;
-        fi) && \
-        systemctl daemon-reload && \
-        systemctl enable wg-quick@one-click 2>/dev/null && \
-        systemctl restart wg-quick@one-click 2>/dev/null
-      " &>/dev/null   
-	set -e
-    success "Hypervisor mesh pipe successfully initialized. Interface link live at:$(tput setaf 97) $hv_private_ip ${reset}"
+      chmod 600 "$hv_wg_stage"
+      info "Wireguard config prepared and shared out to target machine [$host]."
+      ANSIBLE_HOST_KEY_CHECKING=False \
+	    ANSIBLE_SSH_TIMEOUT=3 \
+        ANSIBLE_GATHERING=explicit \
+	    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+	    ansible "$host" \
+        -i /etc/one-click/fleet/inventory.yml \
+        -u oneclick --become \
+        -m copy -a "src=$hv_wg_stage dest=/etc/wireguard/one-click.conf owner=root group=root mode=0600" &>/dev/null
+      rm -f "$hv_wg_stage"
+	  mkdir -p "$(dirname "$hypervisor_wg_file")"
+      if [[ ! -f "$hypervisor_wg_file" ]] || [[ ! -s "$hypervisor_wg_file" ]] || ! jq empty "$hypervisor_wg_file" 2>/dev/null; then
+          echo "{}" > "$hypervisor_wg_file"
+      fi
+      jq --arg hv "$host" --arg ip "$hv_private_ip" \
+         '.[$hv] = $ip' "$hypervisor_wg_file" > "${hypervisor_wg_file}.tmp" && mv "${hypervisor_wg_file}.tmp" "$hypervisor_wg_file"
+      info "Invoking runtime network shifts and restarting service on hypervisor host."
+	  set +e
+      ANSIBLE_HOST_KEY_CHECKING=False \
+	    ANSIBLE_SSH_TIMEOUT=3 \
+        ANSIBLE_GATHERING=explicit \
+        ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+	    ansible "$host" \
+        -i /etc/one-click/fleet/inventory.yml \
+        -u oneclick --become \
+        -m shell -a "
+	      if ! command -v wg > /dev/null; then
+		    if command -v apt > /dev/null; then
+		      apt -y install wireguard-tools &> /dev/null
+		    else
+		      dnf -y install wireguard-tools &> /dev/null
+		    fi
+          fi
+	      sysctl -w net.ipv4.ip_forward=1 && \
+          echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
+		  echo 'net.ipv4.conf.all.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
+          echo 'net.ipv4.conf.default.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
+          echo 'net.ipv4.conf.one-click.rp_filter=2' > /etc/sysctl.d/99-oneclick-vps-routing.conf && \
+          (if command -v iptables >/dev/null; then 
+            iptables -C INPUT -p udp --dport 51821 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 51821 -j ACCEPT 2>/dev/null || true;
+            iptables -C INPUT -p udp --dport 67 --sport 68 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 67 --sport 68 -j ACCEPT 2>/dev/null || true;
+            iptables -C OUTPUT -p udp --dport 68 --sport 67 -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --dport 68 --sport 67 -j ACCEPT 2>/dev/null || true;
+		    iptables -C INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || true;
+		    iptables -C INPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --dport 53 --sport 53 -j ACCEPT 2>/dev/null || true;
+          fi) && \
+          (if command -v firewall-cmd >/dev/null; then
+            local fw_changed=0;
+            if ! firewall-cmd --zone=public --query-port=51821/udp --permanent &>/dev/null; then
+              firewall-cmd --zone=public --add-port=51821/udp --permanent &>/dev/null && fw_changed=1 || true;
+            fi;
+            if ! firewall-cmd --zone=public --query-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"67\" source-port=\"68\" accept' --permanent &>/dev/null; then
+              firewall-cmd --zone=public --add-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"67\" source-port=\"68\" accept' --permanent &>/dev/null && fw_changed=1 || true;
+            fi;
+            if ! firewall-cmd --zone=public --query-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"68\" source-port=\"67\" accept' --permanent &>/dev/null; then
+              firewall-cmd --zone=public --add-rich-rule='rule family=\"ipv4\" protocol=\"udp\" port port=\"68\" source-port=\"67\" accept' --permanent &>/dev/null && fw_changed=1 || true;
+            fi;
+            if [ \"\$fw_changed\" -eq 1 ]; then
+              firewall-cmd --reload &>/dev/null || true;
+            fi;
+          fi) && \
+          systemctl daemon-reload && \
+          systemctl enable wg-quick@one-click 2>/dev/null && \
+          systemctl restart wg-quick@one-click 2>/dev/null
+        " &>/dev/null   
+	  set -e
+      success "Hypervisor mesh pipe successfully initialized. Interface link live at:$(tput setaf 97) $hv_private_ip ${reset}"
+	else
+	  success "Fleet Member initialized successfully."
+	fi
   elif [[  "$server_type" == "vps" ]]; then
     info "VPS path deployment."
     ANSIBLE_HOST_KEY_CHECKING=False \
@@ -3425,7 +3438,7 @@ fleet_bench() {
       return 1
     fi
   fi
-  info "Checking fleet for active benchmark jobs..."
+  info "Checking fleet for active benchmark jobs."
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
   [[ ! -f "$private_key" ]] && private_key="/home/oneclick/.ssh/id_ed25519"
   local tmp_check_dir="/tmp/fleet_bench_check_${local_host}"
@@ -3453,7 +3466,7 @@ fleet_bench() {
              bash /tmp/one-click.sh setup && \\
              rm -f /tmp/one-click.sh
          fi
-		 if [[ -f /etc/one-click/ocb/benchmarks/job.state ]]; then
+		 if [[ -f /etc/one-click/ocb/benchmarks/job.state && \$(cat /etc/one-click/ocb/benchmarks/job.state) == "RUNNING" ]]; then
            file_age=\$((\$(date +%s) - \$(stat -c %Y /etc/one-click/ocb/benchmarks/job.state)))
            if [[ \$file_age -lt 3600 ]]; then
              exit 0
@@ -3485,10 +3498,10 @@ fleet_bench() {
                sudo rm -f /var/cache/debconf/config.dat-lock
                sudo rm -f /var/cache/debconf/passwords.dat-lock
              fi
-             sudo dpkg --configure -a --force-confdef --force-confold
-             sudo apt-get update -y
-             sudo apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\"
-			 sudo apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iperf3 fio
+             sudo dpkg --configure -a --force-confdef --force-confold &> /dev/null
+             sudo apt-get update -y &> /dev/null
+             sudo apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" &> /dev/null
+			 sudo apt-get install -f -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iperf3 fio &> /dev/null
            fi
            if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
              dnf_lock=\"/var/run/dnf.pid\"
@@ -3504,12 +3517,13 @@ fleet_bench() {
              pkg_mgr=\$(command -v dnf || command -v yum)
              sudo \$pkg_mgr clean all
              if command -v dnf &> /dev/null; then
-               sudo dnf history redo last -y &> /dev/null || true
+               sudo dnf history redo last -y &> /dev/null || true 
              fi
-             sudo \$pkg_mgr makecache
-             sudo \$pkg_mgr check-update -y || [ \$? -eq 100 ]
-			 sudo \$pkg_mgr install -y --setopt=install_weak_deps=False iperf3 fio
+             sudo \$pkg_mgr makecache &> /dev/null
+             sudo \$pkg_mgr check-update -y &> /dev/null || [ \$? -eq 100 ]
+			 sudo \$pkg_mgr install -y --setopt=install_weak_deps=False iperf3 fio &> /dev/null
            fi
+		   exit 1
          fi" 2>/dev/null; then
          echo "$host" > "${tmp_check_dir}/${host}.active"
       fi
@@ -3618,13 +3632,13 @@ fleet_bench() {
         fi
         sudo rm -f \"\$bench_dir/COMPLETE\" \"\$bench_dir/job.state\" \"/etc/one-click/ocb/benchmarks/latest.json\"
         echo 'RUNNING' | sudo tee /etc/one-click/ocb/benchmarks/job.state
-        sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl $version\"  > /dev/null 2>&1 &
+        sudo nohup /bin/bash -lc \"TERM=xterm-256color /usr/local/bin/one-click fl ${version:-}\"  > /dev/null 2>&1 &
         sudo cp \"/etc/one-click/ocb/benchmarks/latest.json\" \"/etc/one-click/fleet/benchmarks/localhost.json\" &> /dev/null & || true
         rm -f /home/oneclick/one-click /home/oneclick/*.sh
     " < /dev/null &> /dev/null || true
     success "$name ($ip) is now running One-Click Bench!"
   done
-  fleet_local_bench "$version"
+  fleet_local_bench "${version:-}"
 }
 fleet_local_bench() {
   version="${1:-7}"
@@ -3659,12 +3673,19 @@ fleet_local_bench() {
 	fi
   fi
   mkdir -p /etc/one-click/ocb/benchmarks/
-  echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
-  nohup /bin/bash -lc "TERM=xterm-256color one-click fl $version" < /dev/null &> /dev/null &
-  success "Controller (${sys_ip:-${sys_ipv6:-}}) is now running One-Click Bench!"
-  cp "/etc/one-click/ocb/benchmarks/latest.json" "/etc/one-click/fleet/benchmarks/localhost.json" &> /dev/null || true
-  success "${green}All benchmark jobs dispatched successfully!${reset}"
-  info "Run ${orange}'one-click fleet status'${reset} to check on progress or find logs in '$fleet_root/benchmarks/'"
+  nohup /bin/bash -lc "TERM=xterm-256color /usr/local/bin/one-click fl ${version:-}" < /dev/null &> /dev/null &
+  if pgrep -af '/usr/local/bin/one-click fl' &> /dev/null; then
+    echo "RUNNING" > /etc/one-click/ocb/benchmarks/job.state
+    success "Controller (${sys_ip:-${sys_ipv6:-}}) is now running One-Click Bench!"
+    cp "/etc/one-click/ocb/benchmarks/latest.json" "/etc/one-click/fleet/benchmarks/localhost.json" &> /dev/null || true
+    success "${green}All benchmark jobs dispatched successfully!${reset}"
+    info "Run ${orange}'one-click fleet status'${reset} to check on progress or find logs in '$fleet_root/benchmarks/'"
+	return 0
+  else
+    error "Failed to run local benchmark"
+	rm -f /etc/one-click/ocb/benchmarks/job.state
+	return 1
+  fi
 }
 fleet_status() {
   fleet_init
@@ -5574,6 +5595,7 @@ fleet_vps_provision() {
   vps_ram=$(normalize_memory "$vps_ram")
   local vps_cpu="${8:-2}"
   local public_ip="${9:-}"
+  local virtual_mac="${10:-}"
   local LOCK_FILE="/tmp/vps_ip_allocation.lock"
   local target_wg_port
   local storage_script="/etc/one-click/virtualization/initialize_storage.sh"
@@ -6297,23 +6319,31 @@ EOF
   esac
   cp "$user_data_file" "$archive_user_data"
   info "Configuring peer VPS networking"
-  local net_flag="network network=oneclick-nat"
+  local net_flag="--network network=oneclick-nat"
   local cloud_init_net_argument="--cloud-init user-data=$user_data_file"
   if [[ "$network_mode" == "public" ]]; then
     if [[ -z "$public_ip" ]]; then
       error "Public networking mode requested, but no manual --ip assignment address was passed."
       return 1
     fi
-    net_flag="network bridge=br0"
+    net_flag="--network bridge=br0,mac=$virtual_mac"
     local host_gateway
     host_gateway=$(ip route show default | awk '{print $3}')
+	local net_mac_block=""
+    if [[ -n "$virtual_mac" ]]; then
+      net_mac_block="match:\n      macaddress: \"${virtual_mac}\""
+    else
+      net_mac_block="match:\n      name: \"e*\""
+    fi
     cat > "$network_config_file" <<EOF
 version: 2
 ethernets:
-  eth0:
+  pub_iface:
+    $(echo -e "$net_mac_block")
+    set-name: eth0
     dhcp4: false
     addresses:
-      - ${public_ip}/24
+      - ${public_ip}
     routes:
       - to: default
         via: ${host_gateway}
@@ -6445,7 +6475,7 @@ EOF
       --vcpus $vps_cpu \
       --disk path="$disk_path",format=qcow2,bus=virtio,boot.order=1 \
       --disk path="$iso_path",device=cdrom,format=raw,boot.order=2 \
-      --network network=oneclick-nat,model=virtio \
+      $net_flag,model=virtio \
       $VIRT_TYPE_FLAG \
       --osinfo generic \
       --import \
@@ -6623,7 +6653,7 @@ EOF
           --vcpus $vps_cpu \
           --disk path=\"$disk_path\",format=qcow2,bus=virtio,boot.order=1 \
           --disk path=\"\$iso_path\",device=cdrom,format=raw,boot.order=2 \
-          --network network=oneclick-nat,model=virtio \
+          $net_flag,model=virtio \
           \$VIRT_TYPE_FLAG \
           --osinfo detect=on,require=off \
           --import \
@@ -6703,6 +6733,10 @@ EOF
     \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"
   }]" "$ledger_file")
   echo "$updated_json" > "$ledger_file"
+  if [[ "$network_mode" == "public" ]]; then
+    local_vps_ip="${public_ip%%/*}"
+    remote_vps_ip="${public_ip%%/*}"
+  fi
   if [ -z "${remote_vps_ip:-${local_vps_ip:-}}" ]; then
     error "Failed to capture allocation state for $vps_name"
     exit 1
@@ -6747,20 +6781,22 @@ EOF
   local loop_counter=0
   set +e
   while [ $loop_counter -lt 45 ]; do
-    if [[ "$target_host" == "$(hostname -s)" ]]; then
-      local_vps_ip=$(virsh net-dhcp-leases oneclick-nat | awk -v m="$target_mac" '$3==m {print $5}' | cut -d'/' -f1 | grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n 1)
-	else
-      printf "\r$(tput setaf 49)[POLL]${reset} Querying network lease table (Attempt $((loop_counter + 1))/45).$(tput el)"
-      remote_vps_ip=$(ANSIBLE_HOST_KEY_CHECKING=False \
-	    ANSIBLE_SSH_TIMEOUT=3 \
-        ANSIBLE_GATHERING=explicit \
-        ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-        ansible "$target_host" \
-        -i /etc/one-click/fleet/inventory.yml \
-        -u oneclick --become \
-        -m shell -a "virsh net-dhcp-leases oneclick-nat | awk -v m='$target_mac' '\$3==m {print \$5}' | cut -d'/' -f1" 2>/dev/null \
-        | grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n 1)
-	fi	
+    if [[ "$mode" != "public" ]]; then
+      if [[ "$target_host" == "$(hostname -s)" ]]; then
+        local_vps_ip=$(virsh net-dhcp-leases oneclick-nat | awk -v m="$target_mac" '$3==m {print $5}' | cut -d'/' -f1 | grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n 1)
+	  else
+        printf "\r$(tput setaf 49)[POLL]${reset} Querying network lease table (Attempt $((loop_counter + 1))/45).$(tput el)"
+        remote_vps_ip=$(ANSIBLE_HOST_KEY_CHECKING=False \
+	      ANSIBLE_SSH_TIMEOUT=3 \
+          ANSIBLE_GATHERING=explicit \
+          ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+          ansible "$target_host" \
+            -i /etc/one-click/fleet/inventory.yml \
+            -u oneclick --become \
+            -m shell -a "virsh net-dhcp-leases oneclick-nat | awk -v m='$target_mac' '\$3==m {print \$5}' | cut -d'/' -f1" 2>/dev/null \
+            | grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n 1)
+	  fi
+	fi
     if [ -n "${remote_vps_ip:-${local_vps_ip}}" ]; then
       break
     fi
@@ -6773,7 +6809,11 @@ EOF
     error "Target failed to broadcast a DHCP lease request in time."
     exit 1
   fi
-  success "Captured Target DHCP Allocated Address: [${remote_vps_ip:-${local_vps_ip}}]"
+  if [[ "$mode" != "public" ]]; then
+    success "Captured Target DHCP Allocated Address: [${remote_vps_ip:-${local_vps_ip}}]"
+  else
+    success "IP [${remote_vps_ip:-${local_vps_ip}}] will be binded to the build"
+  fi
   sleep 2
   info "Finalizing the build of $vps_name (${remote_vps_ip:-${local_vps_ip:-$vps_private_ip}})"
   set +e
@@ -6946,7 +6986,9 @@ EOC
     dns_bind_create_zone "$current_domain"
   done
   info "Ensuring One-Click Binaries"
+  set +e
   fl_ssh "${vps_private_ip:-${public_ip}}"
+  set -e
   sleep 5
   clear
   printf "$(tput setaf 197)[VPS] ${blue}%s${reset}\n" \
@@ -6958,7 +7000,7 @@ EOC
     "${cyan}Operating System${reset}   $base_image_name" \
     "${cyan}Network Profile:${reset}   ${network_mode^^}"
   if [[ "$network_mode" == "public" ]]; then
-    echo -e "$(tput setaf 197)[VPS] ${cyan}Public Static IP:${reset}  $public_ip"
+    echo -e "$(tput setaf 197)[VPS] ${cyan}Public Static IP:${reset}  ${public_ip%%/*}"
   else
     echo -e "$(tput setaf 197)[VPS] ${cyan}NAT Internal IP:${reset}   ${remote_vps_ip:-${local_vps_ip}}"
   fi
@@ -7385,12 +7427,16 @@ fleet_console() {
   . "/etc/one-click/fleet/controller.env"
   local inventory="/etc/one-click/fleet/inventory.yml"
   local json_inv="/etc/one-click/virtualization/inventory.json"
-  local parent_host=$(jq -r --arg vm "$target" '.[] | select(.name == $vm) | .host' "$json_inv")
-  local facts=$(ansible-inventory -i "$inventory" --list)
-  local hypervisor=$(echo "$facts" | jq -r --arg host "$parent_host" '._meta.hostvars[$host].ansible_host // empty')
   if [[ ! -f "$inventory" ]]; then
     error "Inventory file missing at $inventory"
     return 1
+  fi
+  local parent_host=$(jq -r --arg vm "$target" '.[] | select(.name == $vm) | .host' "$json_inv" &> /dev/null)
+  local facts=$(ansible-inventory -i "$inventory" --list)
+  local hypervisor=$(echo "$facts" | jq -r --arg host "$parent_host" '._meta.hostvars[$host].ansible_host // empty')
+  if [[ -z "$parent_host" || -z "$hypervisor" ]]; then
+    warn "$target is not a VM"
+	return 1
   fi
   local host_details
   host_details=$(awk -v target="$target" '
