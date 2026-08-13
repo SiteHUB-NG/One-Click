@@ -10,9 +10,10 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ======================= # ======================== # ======================= #
-# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.2.5 ==== #
 # ====== One-Click ====== #
 # ==== WordPress ====
+. /etc/os-release
 if [[ "$pkg_mgr" == "apt" ]]; then
   dig_pkg=dnsutils
   php_pkg="php"
@@ -25,7 +26,7 @@ if command -v install_dep &> /dev/null; then
   if [[ "$pkg_mgr" == "apt" ]]; then
     install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
   else
-    $pkg_mgr install -y epel-release &> /dev/null
+    $pkg_mgr install -y epel-release &> /dev/null || $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-${VERSION_ID}.rpm &> /dev/null
     $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm &> /dev/null
     $pkg_mgr module reset php -y &> /dev/null
     install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php) | tail -1)
@@ -4336,8 +4337,7 @@ sitemap_robots() {
   info "Generating sitemap for $domain..."
   cat > "$sitemap" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset
-    xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 EOF
   cat > "$html" <<EOF
 <!DOCTYPE html>
@@ -4431,7 +4431,7 @@ EOF
     fi
     cat >> "$sitemap" <<EOF
     <url>
-      <loc>$url</loc>
+      <loc>https://${url}</loc>
       <lastmod>$lastmod</lastmod>
       <priority>$priority</priority>
     </url>
