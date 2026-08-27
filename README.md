@@ -1399,26 +1399,37 @@ performance benchmarking without manually deploying heavyweight testing suites.
 
 ## Log Management Console
 
-- Interactive terminal-based log browser with:
-- Arrow-key navigation
-- Live preview pane
-- Search filtering
-- Priority highlighting
-- Journalctl service browsing
-- Safe deletion controls
-- Cache + system log visibility
+A dual-mode logging suite providing both an interactive terminal interface and real-time browser-based monitoring dashboards for single nodes and multi-node clusters.
 
-Built for fast diagnostics in headless environments.
+### Features
+- **Interactive Terminal Browser:** Arrow-key navigation, live preview panes, and `journalctl` service inspection.
+- **Web-Based Log Analytics (GoAccess):** Real-time web server metrics, bandwidth tracking, and multi-node HTTP access stream parsing.
+- **Native System Log Console:** Real-time multi-node system log streaming with Tailwind-powered color-coded severity levels (`ERROR`, `WARN`, `INFO`), regex search, host tab switching, and persistent log archiving.
+- **Strict Web Security Architecture:**
+  - **Tokenized Session Paths:** Web interfaces are served under randomized, high-entropy token paths (e.g., `/<32-char-token>/`), preventing directory scanning or unauthorized index access.
+  - **Dynamic Client IP Isolation:** Automatically detects the connecting SSH client (supporting dual-stack IPv4 and encapsulated `[IPv6]` endpoints) and applies temporary firewall rules (`iptables` / `ip6tables`) locking access exclusively to your IP.
+  - **Ephemeral Port Allocation:** Dashboards bind to dynamically selected high ports, avoiding persistent background listeners.
+  - **Automatic Session Expiry & Teardown:** VHosts, stream harvesters, web server aliases, and firewall grants automatically collapse upon session expiration.
+  - **Container-Free & Unbuffered:** Serves live streams natively through existing web servers (Nginx/Apache) without container dependencies or registry overhead.
+- **Safe Maintenance Controls:** Direct log vacuuming, service-level log flushing, and automated session cleanup.
 
 **Command:** `one-click logs` or `one-click log-browser`  
 
-**Subcommands:**
+**Terminal Browser Subcommands:**
 
-| Subcommand     | Description                  |
-|----------------|-----------------------------|
-| `Ctrl+E`       | Go back to previous menu     |
-| `Ctrl+F`       | Delete selected log file     |
-| `Ctrl+A`       | Vacuum all log files         |
+| Keybind | Action | Description |
+| :--- | :--- | :--- |
+| `Enter` | **View Service Log** | Opens full pager stream for selected `journalctl` unit |
+| `Ctrl+F` | **Flush Unit Logs** | Rotates and vacuums logs exclusively for the selected service |
+| `Ctrl+A` | **Vacuum All Logs** | Truncates and vacuums all system journal logs across the host |
+| `Ctrl+E` | **Back** | Return to previous management menu |
+
+**Live Web Console Subcommands:**
+
+| Subcommand | Engine | Description |
+| :--- | :--- | :--- |
+| `one-click logs --live` | GoAccess | Real-time web access analytics dashboard over tokenized WebSocket |
+| `one-click logs --syslog` | Tailwind / Native UI | Multi-node tail-based system log console with live filtering & search |
 
 ---
 
@@ -1472,10 +1483,19 @@ One-Click is engineered for environments where:
 
 ## Security Notice
 
-One-Click uses standard, widely available system binaries and does not build,
-compile, or embed third-party executable code outside of Geekbench.
+One-Click relies primarily on standard, widely available system binaries and distribution packages. It avoids custom binary compilation during normal operation, pulling dependencies like GoAccess directly from standard package repositories or verified sources, and utilizing Adminer as a single-file PHP management script and Tailwind CSS via official CDN distributions.
 
-Core operations rely on tools such as:
+### Web Dashboard & Session Security
+Web-based GUIs and live streaming log dashboards operate under strict ephemeral lockdown principles:
+
+- **Tokenized Single-Session Endpoints:** Web interfaces are served under randomized, high-entropy token paths (e.g., `/<32-char-token>/`), preventing unauthorized path traversal or scanning.
+- **Dynamic Client IP Isolation:** Automatically detects the requesting client's connecting address (IPv4 or dual-stack IPv6) and enforces strict firewall rules (`iptables` / `ip6tables`) to lock web ports exclusively to that single IP during the active session.
+- **Ephemeral Port Allocation:** Web consoles bind to non-standard, dynamically generated ephemeral ports, avoiding persistent background listeners.
+- **Timed Auto-Destruction:** All VHost configurations, web server aliases, background stream harvesters, and firewall grants automatically collapse and clean up upon session expiration.
+- **Container-Free Execution:** Integrates directly with native host web servers (Nginx, Apache, or Httpd) using unbuffered streams without external container runtime vulnerabilities or registry dependencies.
+
+### Core Utilities
+System operations rely on standard toolchains:
 
 - curl
 - tmux
@@ -1483,9 +1503,12 @@ Core operations rely on tools such as:
 - rclone
 - dd
 - sgdisk
+- GoAccess
+- Adminer (PHP script)
+- Tailwind CSS
 - standard GNU/Linux utilities
 
-No custom binaries are downloaded or compiled during normal operation outside of Geekbench.
+Outside of verified utilities (such as Geekbench, GoAccess, or Adminer), no unverified custom binaries are compiled or downloaded during normal operation.
 
 ### Remote Script Delivery
 
@@ -1523,7 +1546,10 @@ All actions are explicit and user-initiated.
 - Bash 4+
 - curl
 - sudo or root access
-Additional packages are installed automatically as required by specific modules.
+- Transport & Networking: OpenSSH client/server, iptables / ip6tables
+- Supported Web Servers: Nginx or Apache (httpd / apache2)
+
+Additional optional packages (e.g., ansible, goaccess, journalctl, jq) are detected and installed automatically as required by specific operational modules.
 
 ## Acknowledgements
 
@@ -1537,8 +1563,14 @@ patterns were influenced by the following open-source projects:
 - [reinstall by bin456789](https://github.com/bin456789/reinstall)  
   Influenced aspects of OS deployment methodology and reinstall logic.
 
-- [Adminer by vrana](https://github.com/vrana/adminer/)
+- [Adminer by vrana](https://github.com/vrana/adminer/)  
   Adminer is a full-featured database management tool written in PHP. One-Click utilizes it as our single token database management GUI.
+
+- [GoAccess by allinurl](https://github.com/allinurl/goaccess)  
+  Provided inspiration and structural patterns for lightweight, real-time log analysis, stream harvesting, and embedded web-based analytics dashboards.
+
+- [Tailwind CSS by Tailwind Labs](https://github.com/tailwindlabs/tailwindcss)  
+  Utility-first CSS framework utilized for rendering responsive, dark-mode web dashboards without external build dependencies.
 
 One-Click may embed these projects directly or incorporates concepts,
 ideas, and selected implementation approaches adapted to fit its modular
