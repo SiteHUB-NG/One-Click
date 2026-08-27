@@ -10,18 +10,29 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: July 2026 == # == Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.0.0 ==== #
 # ====== One-Click ====== #
-# ==== Initialization ==== 
+# ==== Initialization ====
 # ==== CONFIGURABLE CONFIGURATIONS ====
 # Enable the fleet VPS functionality of One-Click
 ENABLE_VPS=false # true or flase
-# Threshold that LVM will operate with. Default is 5GB
+# ==== LOGICAL VOLUME POOL ALLOCATION ====
+VG_ALLOC=50 # 50% of disk space allocated to virtual machines
+# Minimum buffer space for Windows deployments. Default is 20G
+REQ_BUFFER=20
+# ==== NoVNC ephemeral Timeout Websocket
+VNC_WEB_TIMEOUT=600 # 10 minutes by default
+# RAM Threshold that LVM will operate with. Default is 5GB
 ALLOC_THRESHOLD=5120
 # The location where the .img loop file is generated
 IMG_STORAGE_PATH="/etc/one-click/virtualization/storage"
 # Firewall monitoring and mitigation
 AUTO_MITIGATION=0 # Flag: 0 = passive, 1 = auto mitigation
+# IPv4 over IPv6-Only functionality. Controller must be dual stacked
+# Default set to false. If enabled, IPv6-Only peer members get IPv4 functionality
+IPv6_ONLY_2_v4=false
+# Log viewer web UI session timeout in minutes. Default is 20 minutes
+LOG_VIEWER_SESSION=20
 # ============================================
 export TERM="${TERM:-xterm}"
 set -euo pipefail
@@ -45,7 +56,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "$(tput bold)Global Commands$(tput sgr0)" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  backup                  Backup or restore system data using rsync + rclone." \
-    "  bench                   Run automated system benchmarks (CPU, disk, network)." \
+    "  bench <version>         Run automated system benchmarks (CPU, disk, network)." \
     "  bench-sys               Run only geekbench/sysbench benchmark." \
     "  cron                    Create or modify scheduled cron jobs." \
     "  engine | rule-engine    Natural-language firewall interface for iptables." \
@@ -57,6 +68,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  fleet                   Run remote commands to your fleet of registered servers" \
     "  reinstall               Perform a full operating system reinstallation." \
     "  net-repair              Diagnose and repair network configuration issues." \
+    "  net                     View network stats" \
     "  system | sys-info       Display detailed system information." \
     "  uninstall               Remove one-click and all associated files." \
     "  clone-site              Clone any website/app to any of your fleet peers" \
@@ -79,6 +91,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --ssl                   Install SSL for wordpress or any other virtual host." \
     "  --php                   Manage system-wide or per site php settings." \
     "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments." \
+	"  --console               Start a serial console session to any VPS from controller." \
+	"  --vnc                   Start an ephemeral NoVNC to a VPS." \
     "  --version               Check version" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -185,7 +199,11 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  update-keys             Rotate SSH Keys on controller and fleet" \
     "  update                  Run 'one-click update' simultaneously across the active fleet." \
     "  audit                   Gather real-time hardware architecture profiles and save locally as JSON." \
-    "  bench                   Execute async hardware benchmarks across hosts and fetch result payloads." \
+    "  bench <version>         Execute async hardware benchmarks across hosts and fetch result payloads." \
+	"  bench --exclude <vm>    Add the -e or --exclude flag to exclude a peer from fleet bench." \
+	"  bench --summary <vm?>   View historic benchmarks taken on a single host or entire fleet." \
+	"  status                  View the status of the most recent benchmarks run across all peers." \
+	"  list                    List all fleet members and their IPs." \
 	"  migrate-master          Migrate the controller to another server in the fleet." \
 	"  --sync                  Synchronise all nodes in the fleet ensuring controller is authoratative." \
     "  rule-engine | engine    Fleet firewall management via rule-engine" \
@@ -214,6 +232,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  stop                    Stop a VPS instance " \
 	"  info                    View stats of VM such as storage, RAM and resources utilized." \
     "  view                    View available snapshots" \
+	"  list|menu               List All VPS, mapped IPs and their hypervisor peer" \
     "$(tput smul)$(tput bold)Core Command Options$(tput sgr0)$(tput rmul)" \
     "    -n|--name             Instance name" \
     "    -t|--target           Fleet member hypervisor to deploy to" \
@@ -245,6 +264,16 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
     "  Port:  one-click --proxy --target <vm name> --source 22 --port 8822" \
     "  Web: one-click --proxy --target analytics-vm --website dashboard.internal.net --proto http" \
+	 "────────────────────────────────────────────────────────────────────────────" \
+    "  --vnc|--console             Provides secure, direct out-of-band access to target VMs across your hypervisor fleet." \
+    "                              Dynamically bridges interactive text and graphical sessions directly to libvirt/virsh," \
+    "                              ensuring full host-level management even if remote SSH or network stacks fail." \
+    "$(tput smul)$(tput bold)Core Commands$(tput sgr0)$(tput rmul)" \
+    "    --console <vm_name> [host]  Attach a text serial tty console directly via libvirt ('virsh console')." \
+    "    --vnc <vm_name> [duration]  Spawn a temporary, token-authenticated WebVNC graphical session (via QEMU/virsh)." \
+    "$(tput smul)$(tput bold)Example$(tput sgr0)$(tput rmul)" \
+    "  one-click --vnc db1 1200    Expose a 20-minute, IP-restricted WebVNC URL for GUI recovery (default is 10 minutes)." \
+    "  one-click --console db1     Connect directly to the virsh serial console across the hypervisor fleet." \
     "────────────────────────────────────────────────────────────────────────────" \
     "  --wireguard               The WireGuard user engine carves an isolated /24 network slice from your internal" \
     "                            mesh backplane, dynamically provisioning secure cryptographic access profiles that allow" \
@@ -281,16 +310,17 @@ recovery_config="${recovery_base}/structure.conf"
 secret_key="${base}/.backup_secret.key"
 nic=$(ip route show default | awk '{print $5}')
 if [[ -z "$nic" ]]; then
-  nic=$(awk '{print $5}' <(ip -6 r s default))
+  nic=$(awk '{print $5}' <(ip -6 r s default) &> /dev/null)
 fi
+nic=$(echo "$nic" | tr -d '\r' | head -n 1 | xargs)
 if ip link show br0 &> /dev/null; then
-  nic=br0
-else
-  nic="$nic"
+  if ! grep 'DOWN' <(ip link show br0) &> /dev/null; then
+    nic=br0
+  fi
 fi
-sys_ip="$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))"
+sys_ip=$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))
 updated="June 2026"
-version="1.2.0"
+version="1.2.1"
 priv1="-----END PRIVATE KEY-----"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
@@ -313,6 +343,7 @@ green="$(tput setaf 2)"
 warning="$(tput setaf 3)"
 orange="$(tput setaf 208)"
 magenta=$(tput setaf 5)
+lime="$(tput setaf 193)"
 bold="$(tput bold)"
 reset="$(tput sgr 0)"
 ul="$(tput smul)"
@@ -376,7 +407,7 @@ install_dependancies() {
         install_dep "iostat" "type iostat" "sysstat" "$pkg_mgr"
         install_dep "pv" "type pv" "pv" "$pkg_mgr"
         install_dep "whois" "type whois" "whois" "$pkg_mgr"
-        install_dep "tree" "type tree" "tree" "$pkg_mgr" 
+        install_dep "tree" "type tree" "tree" "$pkg_mgr"
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
 		install_dep "tar" "type tar" "tar" "$pkg_mgr"
@@ -398,7 +429,7 @@ install_dependancies() {
         install_dep "pv" "type pv" "pv" "$pkg_mgr"
         install_dep "iostat" "type iostat" "sysstat" "$pkg_mgr"
         install_dep "whois" "type whois" "whois" "$pkg_mgr"
-        install_dep "tree" "type tree" "tree" "$pkg_mgr" 
+        install_dep "tree" "type tree" "tree" "$pkg_mgr"
         install_dep "fzf" "type fzf" "fzf" "$pkg_mgr"
         install_dep "jq" "type jq" "jq" "$pkg_mgr"
 		install_dep "tar" "type tar" "tar" "$pkg_mgr"
@@ -427,10 +458,10 @@ load_body() {
     file_time=$(date -r "$cache_file" +%s 2>/dev/null || echo 0)
     cache_age=$((now - file_time))
   else
-    cache_age=$((ttl + 1)) # Force download if file is missing
+    cache_age=$((ttl + 1))
   fi
   if [[ ! -f "$cache_file" || $cache_age -gt $ttl ]]; then
-    printf "$blue[INFO]:$reset %s\n" "Cache missing or expired. Checking mirrors for module updates..."
+    printf "$blue[INFO]:$reset %s\n" "Cache missing or expired. Checking mirrors for module updates."
     # ==== Try and pull from Github ====
     if curl -fsSL --connect-timeout 5 --max-time 10 \
         "$url" -o "$cache_file.tmp" &> /dev/null; then
@@ -499,7 +530,7 @@ $priv1 " > "$pub2"
   chmod 600 "$pub2"
 fi
 check_for_updates() {
-  local version_check current_version 
+  local version_check current_version
   current_version="$version"
   version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
   remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
@@ -915,15 +946,15 @@ show_nodejs_menu() {
 show_fleet_menu() {
   local target name proto src p_port action
   while true; do
-    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+    printf "${blue}┌────┬────────────────────────────────┬───────────────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
+    printf "${blue}├────┼────────────────────────────────┼───────────────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" \
       "${magenta}1${blue}"  "${blue}List Fleet Members${blue}"          "${blue}one-click fleet list${blue}" \
-      "${magenta}3${blue}"  "${blue}Basic Fleet Management${blue}"      "${blue}one-click fleet patch <all|node>${blue}" \
-      "${magenta}2${blue}"  "${blue}VPS Cluster Management${blue}"      "${blue}one-click fleet stop <target>${blue}" \
+      "${magenta}2${blue}"  "${blue}Basic Fleet Management${blue}"      "${blue}one-click fleet patch <all|node>${blue}" \
+      "${magenta}3${blue}"  "${blue}VPS Cluster Management${blue}"      "${blue}one-click fleet stop <target>${blue}" \
       "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
-    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    printf "${blue}└────┴────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
     case "$sub_ch" in
       1) one-click fleet list  ;;
@@ -934,21 +965,56 @@ show_fleet_menu() {
     esac
   done
 }
+fleet_manager_menu() {
+  local target name proto src p_port action
+  while true; do
+    printf "${blue}┌────┬────────────────────────────────────────┬───────────────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-48s │ %-55s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
+    printf "${blue}├────┼────────────────────────────────────────┼───────────────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-48s │ %-55s │${reset}\n" \
+      "${magenta}1${blue}"  "${blue}Run Fleet Wide Benchmark${blue}"           "${blue}one-click fleet bench <ver>${blue}" \
+      "${magenta}2${blue}"  "${blue}View summary of all benchmarks run${blue}" "${blue}one-click fleet bench --summary${blue}" \
+      "${magenta}3${blue}"  "${blue}Track benchmark status${blue}"             "${blue}one-click fleet status${blue}" \
+	  "${magenta}4${blue}"  "${blue}Verify Fleet members connectivity${blue}"  "${blue}one-click fleet verify${blue}" \
+	  "${magenta}5${blue}"  "${blue}View system stats of peer members${blue}"  "${blue}one-click fleet audit${blue}" \
+      "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"           "${blue}return${blue}"
+    printf "${blue}└────┴────────────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
+    read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
+    case "$sub_ch" in
+      1)
+	    read -rp "${cyan}[USER]${reset} Would you like to exclude a peer from the benchmark (y|n): " exclude_peer
+		if [[ "${exclude_peer,,}" =~ ^(y|yes)$ ]]; then
+		  read -rp "${cyan}[USER]${reset} Please enter the virtual machine name(s) to exclude seperated by a comma: " peer_to_exclude
+		fi
+		read -rp "${cyan}[USER]${reset} What version of Geekbench do you want to run (5|6|7): " gb_version
+		fleet_bench "$gb_version" "${peer_to_exclude:-}"
+		;;
+      2) geekbench_results     ;;
+      3) fleet_status          ;;
+	  4) fleet_verify          ;;
+	  5) fleet_audit           ;;
+      0) break                 ;;
+      *) echo "Invalid option" ;;
+    esac
+  done
+}
 vps_manager_menu() {
   local target name proto src p_port action
   while true; do
-    printf "${blue}┌────┬───────────────────────────────┬──────────────────────────────────────┐${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
-    printf "${blue}├────┼───────────────────────────────┼──────────────────────────────────────┤${reset}\n"
-    printf "${blue}│ %-12s │ %-39s │ %-46s │${reset}\n" \
+    printf "${blue}┌────┬────────────────────────────────┬───────────────────────────────────────────────┐${reset}\n"
+    printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
+    printf "${blue}├────┼────────────────────────────────┼───────────────────────────────────────────────┤${reset}\n"
+    printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" \
       "${magenta}1${blue}"  "${blue}Start VM Instance${blue}"              "${blue}one-click --vps start <vm_name>${blue}" \
       "${magenta}2${blue}"  "${blue}Stop VM Instance${blue}"               "${blue}one-click --vps stop <vm_name>${blue}" \
       "${magenta}3${blue}"  "${blue}Cluster Node Patch${blue}"             "${blue}one-click --vps patch <all|vm_name> -f${blue}" \
       "${magenta}4${blue}"  "${blue}NAT DNS Forwarder${blue}"              "${blue}one-click --proxy --target -s <port> -d <port>${blue}" \
       "${magenta}5${blue}"  "${blue}Snapshot Manager${blue}"               "${blue}N/A${blue}" \
       "${magenta}6${blue}"  "${blue}View Available Snapshots${blue}"       "${blue}one-click --vps view${blue}" \
+	  "${magenta}7${blue}"  "${blue}Create browser VNC session${blue}"     "${blue}one-click --vnc <vm_name${blue}" \
+	  "${magenta}6${blue}"  "${blue}Access a virsh console session${blue}" "${blue}one-click --console <vm_name>${blue}" \
       "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"              "${blue}return${blue}"
-    printf "${blue}└────┴───────────────────────────────┴──────────────────────────────────────┘${reset}\n"
+    printf "${blue}└────┴────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
     case "$sub_ch" in
       1)
@@ -992,7 +1058,7 @@ vps_manager_menu() {
             "${magenta}5${blue}"  "${blue}Return to Fleet Infrastructure Menu${blue}"
           printf "${blue}└────┴──────────────────────────────────────────────────────────────────────────────┘${reset}\n"
           read -rp "${cyan}[USER]:${reset} Select snapshot action number: " snap_ch
-          
+
           case "$snap_ch" in
             1)
               echo -e "\n${orange}--- CURRENT REGISTERED FLEET SNAPSHOTS ---${reset}"
@@ -1028,10 +1094,58 @@ vps_manager_menu() {
           echo
         done
         ;;
+	  6)
+	    read -rp "Please enter the VM name: " vm_vnc_name
+		fleet_vps_web_console "$vm_vnc_name"
+		;;
+	  7)
+	    read -rp "Please enter the VM name: " vm_console_name
+		fleet_console "$vm_vnc_name"
+		;;
       0) break                 ;;
       *) echo "Invalid option" ;;
     esac
   done
+}
+validate_subnet() {
+  local subnet_input="$1"
+  local min_prefix="${2:-8}"
+  local max_prefix="${3:-30}"
+  local regex="^([0-9]{1,3}\.){3}[0-9]{1,3}\/([0-9]{1,2})$"
+  if [[ ! "$subnet_input" =~ $regex ]]; then
+    error "Invalid CIDR format. Expected format: X.X.X.X/YY (e.g. 192.168.250.0/24)" >&2
+    return 1
+  fi
+  local ip="${subnet_input%/*}"
+  local prefix="${subnet_input#*/}"
+  if (( prefix < min_prefix || prefix > max_prefix )); then
+    echo -e "\e[31m[ERROR]\e[0m Prefix length /${prefix} is out of bounds. Allowed range: /${min_prefix} to /${max_prefix}" >&2
+    return 1
+  fi
+  IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+  for octet in "$o1" "$o2" "$o3" "$o4"; do
+    if (( octet < 0 || octet > 255 )); then
+      echo -e "\e[31m[ERROR]\e[0m Invalid IP address octet '${octet}'. Must be 0-255." >&2
+      return 1
+    fi
+  done
+  if command -v python3 &>/dev/null; then
+    local is_valid
+    is_valid=$(python3 -c "
+import ipaddress
+try:
+    net = ipaddress.IPv4Network('$subnet_input', strict=True)
+    print('VALID')
+except ValueError:
+    print('INVALID')
+")
+    if [[ "$is_valid" != "VALID" ]]; then
+      error "'$subnet_input' is not a canonical network address. Did you mean '$(python3 -c "import ipaddress; print(ipaddress.IPv4Network('$subnet_input', strict=False).network_address)")/$prefix'?" >&2
+      return 1
+    fi
+  fi
+  error "Subnet '$subnet_input' is valid."
+  return 0
 }
 if [[ $1 == "menu" ]]; then
   clear
@@ -1067,6 +1181,29 @@ if [[ "$1" == "--console" ]]; then
   fleet_console "$2" "${3:-}"
   exit 0
 fi
+# ==== Fleet VNC ====
+if [[ "$1" == "--vnc" ]]; then
+  found=0
+  shopt -s nullglob
+  state_files=("/etc/one-click/fleet/state"/*.conf)
+  shopt -u nullglob
+  for file in "${state_files[@]}"; do
+  filename="${file##*/}"
+  peer_name="${filename%.conf}"
+  if [[ "$2" == "$peer_name" ]]; then
+    success "$2 found in inventory"
+    found=1
+  fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    error "$2 not found in inventory"
+    warn "Please use a valid fleet peer"
+    exit 1
+  fi
+  build_vars
+  fleet_vps_web_console "$2" "${3:-}" "${4:-600}"
+  exit 0
+fi
 # ==== Fleet Bench ====
 if [[ "$1" == "flbench" ]]; then
   build_vars
@@ -1096,7 +1233,7 @@ if [[ "$1" == "fl" ]]; then
   cpu_sys "${2:-}" &
   if [[ "$created_swap" = true ]]; then
     trap - EXIT
-    swapoff "$swap_file" &>/dev/null || true
+    swapoff "$swap_file" &>/dev/null &
     rm -f "$swap_file"
   fi
   exit 0
@@ -1111,10 +1248,10 @@ fi
 # ==== Fleet Proxy ====
 if [[ "$1" == "--proxy" ]]; then
   shift
-  target_vm="" 
-  website="" 
-  proto="http" 
-  src_port="" 
+  target_vm=""
+  website=""
+  proto="http"
+  src_port=""
   dest_port=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1126,11 +1263,23 @@ if [[ "$1" == "--proxy" ]]; then
       *) shift ;;
     esac
   done
-  fleet_proxy_provision "$target_vm" "${website:-}" "${proto-}" "${src_port:-}" "${dest_port:-}" 
+  fleet_proxy_provision "$target_vm" "${website:-}" "${proto-}" "${src_port:-}" "${dest_port:-}"
   exit 0
 fi
 # ==== Fleet Hypervisor ====
 if [[ "$1" == "--vps" ]]; then
+  if [[ "${ENABLE_VPS,,}" == "false" ]]; then
+    error "VPS creation is not enabled"
+	read -rp "${cyan}[USER]${reset} Enable KVM VPS Virtualization now? " enable_virt
+	if [[ "$enable_virt" =~ ^(y|Y|Yes|yes|YES)$ ]]; then
+	  warn "Enabling Virtualization!"
+	  sed -Ei 's/(ENABLE_VPS=)false/\1true/' /usr/local/bin/one-click
+	  success "Virtuaization is now enabled. Enjoy!!"
+	else
+	  warn "Auto enable cancelled!" "Enable manually in /usr/local/bin/one-click"
+	  exit 1
+	fi
+  fi
   if [[ "$2" == "console" ]]; then
     fleet_console "$2" "${3:-}"
 	exit 0
@@ -1196,14 +1345,18 @@ if [[ "$1" == "--vps" ]]; then
     fleet_vps_info "$3"
 	exit 0
   fi
+  if [[ "$action" == "menu" || "$action" == "list" ]]; then
+    fleet_vps_list
+	exit 0
+  fi
   shift 2
-  vps_name="" 
-  target_host="" 
-  network_mode="nat" 
+  vps_name=""
+  target_host=""
+  network_mode="nat"
   base_image_name=""
-  disk_size="" 
-  vps_ram="2048" 
-  vps_cpu="2" 
+  disk_size=""
+  vps_ram="2048"
+  vps_cpu="2"
   public_ip=""
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
@@ -1227,6 +1380,7 @@ if [[ "$1" == "--vps" ]]; then
   done
   case "$action" in
     reinstall)
+      inventory="/etc/one-click/fleet/inventory.yml"
       if [[ "${target_host}" == "all" ]]; then
         die "Cannot target all peers for an OS reinstallation"
       fi
@@ -1235,10 +1389,35 @@ if [[ "$1" == "--vps" ]]; then
         echo "Usage: one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>"
         exit 1
       fi
+      is_windows=0
+      if [[ "$base_image_name" =~ (win\b|windows) && "${disk_size/G}" -lt 12 ]]; then
+        is_windows=1
+      fi
+      if [[ -z "$target_host" ]]; then
+        target_host=$(sed -En '/'"$vps_name"'/{n;s/[^:]*: "([^"]*).*/\1/p}' /etc/one-click/virtualization/inventory.json)
+      fi
+      host_details=$(awk -v target="$vps_name" '
+        $0 ~ "^[[:space:]]*" target ":" { found=1; next }
+        found && /^[[:space:]]*ansible_host:/ { host=$2 }
+        found && /^[[:space:]]*ansible_port:/ { port=$2 }
+        found && /^[[:space:]]*[A-Za-z0-9_-]+:/ && !/ansible_/ { found=0 }
+        END { if (host) print host, (port ? port : "22") }
+      ' "$inventory" | tr -d '"\027')
+      reinstall_ip=$(echo "$host_details" | awk '{print $1}')
+      if [[ "$reinstall_ip" =~ : ]]; then
+        reinstall_ip="[${reinstall_ip}]"
+      fi
+      reinstall_port=$(echo "$host_details" | awk '{print $2}')
       found=0
       shopt -s nullglob
       state_files=("/etc/one-click/fleet/state"/*.conf)
       shopt -u nullglob
+	  ###===WIN_BUILD===###
+	  if [[ "$vps_name" =~ _win_path ]]; then
+	    vps_name=${vps_name//_win_path}
+	    warn "Windows deployement detected for $vps_name"
+	    found=1
+	  fi
       for file in "${state_files[@]}"; do
         filename="${file##*/}"
         peer_name="${filename%.conf}"
@@ -1252,7 +1431,8 @@ if [[ "$1" == "--vps" ]]; then
         warn "Please use a valid fleet peer"
         exit 1
       fi
-      fleet_vps_reinstall "$vps_name" "$base_image_name" "$raw_password" "${language:-}"
+	  ###===END_WIN_BUILD===###
+      fleet_vps_reinstall "$vps_name" "$base_image_name" "$raw_password" "${language:-"en-GB"}" "$reinstall_ip" "$is_windows"
       exit 0
       ;;
     backup)
@@ -1336,27 +1516,26 @@ if [[ "$1" == "--vps" ]]; then
     create)
 	  build_vars
 	  collect_sysinfo
+	  inventory_file="/etc/one-click/fleet/inventory.yml"
       if [[ -z "$vps_name" || -z "$target_host" || -z "$base_image_name" || -z "$disk_size" ]]; then
         error "Missing required parameters for creation loop."
         echo "Usage: one-click --vps create -n <name> -t <target> -i <image> -d <disk_size> [-m nat|public] [-r ram_mb] [-c cpus] --password <password>"
         exit 1
       fi
+	  if [[ "$base_image_name" =~ (win\b|windows) && "$vps_cpu" -lt 2 ]]; then
+	    die "Windows installations require a minimum of 2 Cores"
+	  fi
+	  if [[ "$base_image_name" =~ (win\b|windows) && "$vps_ram" -lt 2047 ]]; then
+	    die "Windows installations require a minimum of 2GB RAM"
+	  fi
+	  if [[ "$base_image_name" =~ (win\b|windows) && "${disk_size/G}" -lt 12 ]]; then
+	    die "Windows installations require a minimum of 12GB Disk space"
+	  fi
       if [[ "$network_mode" == "public" && -z "$public_ip" ]]; then
         error "Public network bridge mode requested, but no valid manual external --ip argument was specified."
         exit 1
       fi
       init_check_cmd="[ -d '/etc/one-click/virtualization/images' ]"
-      if [[ "$target_host" == "localhost" ]]; then
-        if ! eval "$init_check_cmd" &>/dev/null; then
-          info "Local environment uninitialized. Triggering virtualization engine setup..."
-          fleet_vps_init || exit 1
-        fi
-      else
-        if ! ansible "$target_host" -i /etc/one-click/fleet/inventory.yml -u oneclick --become -m shell -a "$init_check_cmd" &>/dev/null; then
-          info "Target node [$target_host] is uninitialized. Running remote cluster hypervisor orchestration..."
-          fleet_vps_init || exit 1
-        fi
-      fi
       target_url=""
       resolved_filename=""
       case "${base_image_name,,}" in
@@ -1371,12 +1550,12 @@ if [[ "$1" == "--vps" ]]; then
           fi
           ;;
         nixos*|nix-os*)
-          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]{2}\.[0-9]{2}' || echo "24.11")
+          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]+(\.[0-9]+)?' || echo "24.11")
           target_url="https://channels.nixos.org/nixos-${ver}/latest-nixos-openstack-x86_64-linux.qcow2"
           resolved_filename="nixos-${ver}.img"
           ;;
         alpine*|alpine-linux*)
-          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]\.[0-9]+')
+          ver=$(echo "${base_image_name,,}" | grep -oE '[0-9]+(\.[0-9]+)?')
           if [[ -z "$ver" ]]; then
             target_url="https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-virt-latest-x86_64.iso"
             resolved_filename="alpine-latest.img"
@@ -1384,6 +1563,18 @@ if [[ "$1" == "--vps" ]]; then
             target_url="https://dl-cdn.alpinelinux.org/alpine/v${ver}/releases/x86_64/alpine-virt-${ver}-x86_64.iso"
             resolved_filename="alpine-${ver}.img"
           fi
+          ;;
+        centos8|centos-8|centos-stream-8|centosstream8)
+          target_url="https://cloud.centos.org/centos/8-stream/x86_64/images/CentOS-Stream-GenericCloud-8-latest.x86_64.qcow2"
+          resolved_filename="centos8.img"
+          ;;
+        centos9|centos-9|centos-stream-9|centosstream9)
+          target_url="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+          resolved_filename="centos9.img"
+          ;;
+        centos10|centos-10|centos-stream-10|centosstream10)
+          target_url="https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2"
+          resolved_filename="centos10.img"
           ;;
 	    ubuntu26|ubuntu-26)
           target_url="https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
@@ -1437,46 +1628,46 @@ if [[ "$1" == "--vps" ]]; then
           target_url="https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
           resolved_filename="alma10.img"
           ;;
-        fedora[0-9]*|fedora-[0-9]*|fedora-latest|fedora)
-          if [[ "${base_image_name,,}" =~ [0-9]+ ]]; then
-            v_num=$(echo "${base_image_name,,}" | tr -cd '0-9')
+        fedora*)
+          if [[ "${base_image_name,,}" =~ ([0-9]+) ]]; then
+            v_num="${BASH_REMATCH[1]}"
           else
-            v_num=$(curl -fsSL https://download.fedoraproject.org/pub/fedora/linux/releases/ | grep -oE '[0-9]{2}/' | tr -d '/' | sort -n | tail -1)
+            v_num=$(curl -fsSL https://getfedora.org/releases.json 2>/dev/null | grep -oE '"version": "[0-9]+"' | head -n 1 | grep -oE '[0-9]+' || echo "41")
           fi
-          target_url="https://download.fedoraproject.org/pub/fedora/linux/releases/${v_num}/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-${v_num}.x86_64.qcow2"
+          target_url="https://download.fedoraproject.org/pub/fedora/linux/releases/${v_num}/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64.qcow2"
           resolved_filename="fedora${v_num}.img"
+          ;;
+		win2025*|windows2025*|win25*|windows25*)
+          target_url="https://software-static.download.prss.microsoft.com/db_stuff/26100.1.240331-1435.ge_release_SERVER_EVAL_x64FRE_en-us.iso"
+          resolved_filename="win2025.qcow2"
+          ;;
+        win2022*|windows2022*|win22*|windows22*)
+          target_url="https://software-download.microsoft.com/download/sg/20348.169.210806-2348.fe_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso"
+          resolved_filename="win2022.qcow2"
+          ;;
+        win2019*|windows2019*|win19*|windows19*)
+          target_url="https://software-static.download.prss.microsoft.com/pr/17763.737.190906-1024.rs5_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso"
+          resolved_filename="win2019.qcow2"
+          ;;
+        win2016*|windows2016*|win16*|windows16*)
+          target_url="https://software-static.download.prss.microsoft.com/pr/14393.0.160715-1616.RS1_RELEASE_SERVER_EVAL_X64FRE_EN-US.ISO"
+          resolved_filename="win2016.qcow2"
+          ;;
+        win11*|windows11*)
+          target_url="https://software-static.download.prss.microsoft.com/db_stuff/26100.1.240331-1435.ge_release_CLIENT_ENTERPRISEEVAL_x64FRE_en-us.iso"
+          resolved_filename="win11.qcow2"
+          ;;
+        win10*|windows10*)
+          target_url="https://software-static.download.prss.microsoft.com/pr/19045.2006.220908-0225.22h2_release_svc_refresh_CLIENT_ENTERPRISEEVAL_x64FRE_en-us.iso"
+          resolved_filename="win10.qcow2"
           ;;
         *)
           resolved_filename="$base_image_name"
           ;;
       esac
       master_image_source="/etc/one-click/virtualization/images/${resolved_filename}"
-      if [[ ! -f "$master_image_source" ]]; then
-        if [[ -n "$target_url" ]]; then
-          info "Shorthand image profile alias detected. Auto-fetching target base cloud image..."
-          fleet_vps_image_fetch "$target_url" "$resolved_filename"
-          base_image_name="$resolved_filename"
-        else
-          warn "Image asset '$base_image_name' not cached and no cloud download URL exists."
-          info "Routing deployment to automated netboot.xyz pipeline."
-          base_image_name="netboot_${resolved_filename}"
-        fi
-      else
-        base_image_name="$resolved_filename"
-      fi
-	  if [[ -n "$public_ip" ]]; then
-        read -rp "${cyan}[USER]${reset} Please provide the subnet mask prefix/CIDR for ${public_ip} (default: 24): " cidr
-        cidr="${cidr#/}"
-        cidr="${cidr:-24}"
-        public_ip="${public_ip}/${cidr}"
-        read -rp "${cyan}[USER]${reset} Does ${ip_upstream:-upstream} require a virtual MAC (y|N)? " v_mac
-        v_mac="${v_mac,,}"
-        if [[ "${v_mac:-}" =~ ^(yes|y)$ ]]; then
-          read -rp "$(tput setaf 67)[VMAC]${reset} Enter the Virtual MAC provided by ${ip_upstream:-upstream}: " virt_mac
-        fi
-      fi
       # ==== TMUX Call ====
-      session="one-click"
+      session="one-click-$vps_name"
       flag="seen"
       path="$(realpath "$0")"
       if [[ -z "${!flag:-}" ]]; then
@@ -1492,27 +1683,91 @@ if [[ "$1" == "--vps" ]]; then
         for i in {1..5}; do printf '.'; sleep 0.2; done
         echo
         tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip' -v '${virt_mac:-}'; exec bash"
-        tmux new-session -s "$session" "$tmux_cmd"
         printf '%s\n' \
           "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
           "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
-          "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}" 
+          "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
         echo "Provisioning running in background. Attach with: tmux attach -t $session"
+		sleep 2
+		tmux new-session -s "$session" "$tmux_cmd"
         exit 0
       fi
+      tmux set -g mouse on || true
+      tmux set -g mode-keys vi || true
+      tmux set -g allow-rename off || true
+      tmux set -g automatic-rename off || true
+      tmux set -g default-terminal "tmux-256color" || true
+      tmux set -g terminal-overrides ',xterm-256color:Tc' || true
+	  if ansible-inventory -i "$inventory_file" --list | jq -e --arg name "$vps_name" '._meta.hostvars[$name] != null' &>/dev/null; then
+        error "VPS name '$vps_name' already exists in inventory! Aborting build." >&2
+		sleep 2
+        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
+      else
+        success "VPS name '$vps_name' is available. Proceeding with build."
+      fi
+	  if [[ ! -f "$master_image_source" ]]; then
+	    if [[ "${base_image_name,,}" =~ win|windows ]]; then
+		  fleet_vps_image_fetch "$target_url" "$resolved_filename" 1 "$target_host"
+		  base_image_name="$resolved_filename"
+        elif [[ -n "$target_url" ]]; then
+          info "Shorthand image profile alias detected. Auto-fetching target base cloud image."
+          fleet_vps_image_fetch "$target_url" "$resolved_filename" 0 "$target_host"
+          base_image_name="$resolved_filename"
+        else
+          warn "Image asset '$base_image_name' not cached and no cloud download URL exists."
+          info "Routing deployment to automated netboot.xyz pipeline."
+		  if [[ ! "$base_image_name" =~ _ ]]; then
+            base_image_name="netboot_${resolved_filename}"
+		  fi
+        fi
+      else
+        base_image_name="$resolved_filename"
+      fi
+	  vps_state=$(one-click fleet verify | sed -Eun "s/${vps_name}\b[^O]*(.*)/\1/p" || true) &> /dev/null
+	  if [[ "$vps_state" =~ OFFLINE ]]; then
+	    warn "$vps_name is offline."
+		read -rp "${cyan}[USER]${reset} Start $vps_name (y|n): " start_vm
+		start_vm="${start_vm,,}"
+		if [[ "$start_vm" =~ ^(y|yes)$ ]]; then
+          one-click --vps start -n "$vps_name"
+		fi
+	  fi
+	  if [[ -n "$public_ip" ]]; then
+        read -rp "${cyan}[USER]${reset} Please provide the subnet mask prefix/CIDR for ${public_ip} (default: 24): " cidr
+        cidr="${cidr#/}"
+        cidr="${cidr:-24}"
+        public_ip="${public_ip}/${cidr}"
+		validate_subnet "$public_ip"
+        read -rp "${cyan}[USER]${reset} Does ${ip_upstream:-upstream} require a virtual MAC (y|N)? " v_mac
+        v_mac="${v_mac,,}"
+        if [[ "${v_mac:-}" =~ ^(yes|y)$ ]]; then
+          read -rp "$(tput setaf 67)[VMAC]${reset} Enter the Virtual MAC provided by ${ip_upstream:-upstream}: " virt_mac
+        fi
+      fi
+	  if [[ "$target_host" == "$(hostname -s)" ]]; then
+        if ! eval "$init_check_cmd" &>/dev/null; then
+          info "Local environment uninitialized. Triggering virtualization engine setup."
+          fleet_vps_init || exit 1
+        fi
+      else
+        if ! ansible "$target_host" -i /etc/one-click/fleet/inventory.yml -u oneclick --become -m shell -a "$init_check_cmd" &>/dev/null; then
+          info "Target node [$target_host] is uninitialized. Running remote cluster hypervisor orchestration."
+          fleet_vps_init || exit 1
+        fi
+      fi
 	  cat << 'EOF'
-  ___                    ____ _ _      _    
+  ___                    ____ _ _      _
  / _ \ _ __   ___       / ___| (_) ___| | __
 | | | | '_ \ / _ \_____| |   | | |/ __| |/ /
-| |_| | | | |  __/_____| |___| | | (__|   < 
+| |_| | | | |  __/_____| |___| | | (__|   <
  \___/|_| |_|\___|      \____|_|_|\___|_|\_\
-                                            
-__     ___      _        _____             _            
-\ \   / (_)_ __| |_     | ____|_ __   __ _(_)_ __   ___ 
+
+__     ___      _        _____             _
+\ \   / (_)_ __| |_     | ____|_ __   __ _(_)_ __   ___
  \ \ / /| | '__| __|    |  _| | '_ \ / _` | | '_ \ / _ \
   \ V / | | |  | ||     | |___| | | | (_| | | | | |  __/
    \_/  |_|_|   \__|    |_____|_| |_|\__, |_|_| |_|\___|
-                                     |___/              
+                                     |___/
 EOF
       fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip"
       exit 0
@@ -1544,13 +1799,13 @@ EOF
       fleet_vps_modify "$vps_name" "$target_host" $mod_flags
       exit 0
       ;;
-    start) 
+    start)
       if [[ -z "$vps_name" ]]; then
         error "Missing instance name for modifications."
         echo "Usage: one-click --vps start -n <vps_name>"
         exit 1
       fi
-      fleet_vps_power_control "start" "$vps_name" 
+      fleet_vps_power_control "start" "$vps_name"
       exit 0
       ;;
     stop)
@@ -1607,7 +1862,7 @@ EOF
           fi
         "
       fi
-      info "Transmitting payload to targeted infrastructure cluster..."
+      info "Transmitting payload to targeted infrastructure cluster."
       if ANSIBLE_HOST_KEY_CHECKING=False ansible "$ansible_target" \
         -i "$inventory_file" \
         -u oneclick --become \
@@ -1896,7 +2151,7 @@ if [[ "$1" == "fleet" ]]; then
       error "'$3' is neither a valid IPv4 nor IPv6 address."
       exit 1
     fi
-    fleet_add "$3" "$4" "${5:-22}" "init"
+    fleet_add "$3" "$4" "${5:-22}" "hypervisor" "" "yes"
     exit 0
   fi
   if [[ "$2" == "remove" || "$2" == "rm" || "$2" == "del" || "$2" == "delete" ]]; then
@@ -1946,7 +2201,7 @@ if [[ "$1" == "fleet" ]]; then
     exit 0
   fi
   if [[ "$2" == "verify" ]]; then
-    fleet_verify 
+    fleet_verify
     exit 0
   fi
   if [[ "$2" == "update" ]]; then
@@ -1973,7 +2228,27 @@ if [[ "$1" == "fleet" ]]; then
 	    "Run ${yellow}one-click fleet --init${reset} first"
 	    exit 1
     fi
-    fleet_bench "${3:-7}"
+	shift 2
+    version="7"
+    exclude_str=""
+    while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -e|--exclude)
+        exclude="$2"
+        shift 2
+        ;;
+	  -s|--summary)
+	    host="${2:-}"
+		geekbench_results "${host:-}"
+		exit 0
+		;;
+      *)
+        version="$1"
+        shift
+        ;;
+    esac
+  done
+  fleet_bench "$version" "${exclude:-}"
     exit 0
   fi
   if [[ "$2" == "status" ]]; then
@@ -1989,8 +2264,8 @@ if [[ "$1" == "fleet" ]]; then
     if [[ -z "${3:-}" || -z "${4:-}" || -z "${5:-}" ]]; then
       printf '%s\n' \
       "${red}╔════════════════════════════════════════════════════════╗${reset}" \
-      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet get ? web1 ?                    ${red}║${reset}" \
-      "${red}║${reset}        one-click fleet get /remote/file peer /file     ${red}║${reset}" \
+      "${red}║${reset} ${cyan}Usage:${reset} one-click fleet get web1 ?  ?                  ${red}║${reset}" \
+      "${red}║${reset}        one-click fleet get peer /remote/file /file     ${red}║${reset}" \
       "${red}╚════════════════════════════════════════════════════════╝${reset}"
       exit 1
     fi
@@ -2137,12 +2412,12 @@ if [[ "$1" == "update-y" ]]; then
     if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
       mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
       mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
-      cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
-      rm -rf /var/cache/one-click
+      cp -R "$cache_dir/"* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
+      rm -rf "$cache_dir"
       if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
         if [[ ! -s "$manpage" ]]; then
           wget -P "$man_dir" "$one_click_1" &> /dev/null
-		  if ! mandb > /dev/null; then 
+		  if ! mandb > /dev/null; then
 		    $pkg_mgr -y install man-db
 		  fi
           mandb -q &> /dev/null
@@ -2150,14 +2425,14 @@ if [[ "$1" == "update-y" ]]; then
         if [[ ! -f /usr/local/bin/one-click ]]; then
           error "Upgrade failed"
           warn "Reverting old version"
-          mkdir -p /var/cache/one-click/
-          mv -f /etc/one-click/upgrade-staging/modules/ /var/cache/one-click/ 2>/dev/null
+          mkdir -p "$cache_dir/"
+          mv -f /etc/one-click/upgrade-staging/modules/ "$cache_dir/" 2>/dev/null
           mv -f /usr/localbin/one-click/one-click /etc/one-click/upgrade-staging/
           mv -f /etc/one-click/upgrade-staging$(basename "$manpage") "$manpage"
           exit 1
         fi
         success "Successfully updated to $remote_version"
-        chmod +x /usr/local/bin/one-click 
+        chmod +x /usr/local/bin/one-click
         rm -rf /etc/one-click/upgrade-staging/
         exit 0
       else
@@ -2173,8 +2448,8 @@ if [[ "$1" == "update-y" ]]; then
   fi
 fi
 if [[ "$1" == "--dns" ]]; then
-  build_vars
   load_wordpress
+  build_vars
   dns_menu
   exit 0
 fi
@@ -2216,6 +2491,8 @@ _one_click() {
   cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
   cmds["migrator"]=""
   cmds["net-repair"]=""
+  cmds["net"]=""
+  cmds["net-info"]=""
   cmds["reinstall"]=""
   cmds["recovery"]=""
   cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
@@ -2250,6 +2527,7 @@ _one_click() {
   cmds["--proxy"]=""
   cmds["--ssh"]=""
   cmds["--console"]=""
+  cmds["--vnc"]=""
   cmds["mv"]=""
 
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
@@ -2283,14 +2561,14 @@ _one_click() {
   cmds["fleet:'verify'"]=
   cmds["fleet:'update'"]=
   cmds["fleet:'audit'"]=
-  cmds["fleet:'bench'"]=
+  cmds["fleet:'bench' '--exclude' '--summary'"]=
   cmds["fleet:'put'"]=
   cmds["fleet:'get'"]=
   cmds["fleet:'raw'"]=
   cmds["fleet:'status'"]=
   cmds["fleet:'dir'"]=
   cmds["fleet:'update-keys'"]=
-  cmds["fleet: 'engine'"]=
+  cmds["fleet: 'migrate-master'"]=
 
   cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
   cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -2327,7 +2605,7 @@ _one_click() {
     COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
     return 0
   fi
-  
+
   _complete_tree() {
     local path="$1"
     local cur="$2"
@@ -2352,7 +2630,7 @@ _one_click() {
   for ((i=1; i<COMP_CWORD; i++)); do
     path+="${COMP_WORDS[i]}:"
   done
-  path="${path%:}"  # remove trailing colon
+  path="${path%:}"
   _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
@@ -2367,7 +2645,7 @@ _one_click() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   declare -A cmds
-    
+
   cmds["backup"]=""
   cmds["bench"]=""
   cmds["bench-sys"]=""
@@ -2375,6 +2653,8 @@ _one_click() {
   cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
   cmds["migrator"]=""
   cmds["net-repair"]=""
+  cmds["net"]=""
+  cmds["net-info"]=""
   cmds["reinstall"]=""
   cmds["recovery"]=""
   cmds["rule-engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
@@ -2409,8 +2689,9 @@ _one_click() {
   cmds["--proxy"]=""
   cmds["--ssh"]=""
   cmds["--console"]=""
+  cmds["--vnc"]=""
   cmds["mv"]=""
-  
+
   cmds["rule-engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
   cmds["engine:'show alias'"]=
   cmds["rule-engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -2443,7 +2724,7 @@ _one_click() {
   cmds["fleet:'verify'"]=
   cmds["fleet:'update'"]=
   cmds["fleet:'audit'"]=
-  cmds["fleet:'bench'"]=
+  cmds["fleet:'bench' '--exclude' '--summary'"]=
   cmds["fleet:'put'"]=
   cmds["fleet:'get'"]=
   cmds["fleet:'raw'"]=
@@ -2451,6 +2732,7 @@ _one_click() {
   cmds["fleet:'dir'"]=
   cmds["fleet:'update-keys'"]=
   cmds["fleet: 'engine'"]=
+  cmds["fleet: 'migrate-master'"]=
 
   cmds["engine:'open filter' 'open mangle' 'open raw'"]=
   cmds["engine:'show alias'"]=
@@ -2478,7 +2760,6 @@ _one_click() {
   cmds["engine:audit"]=
   cmds["engine:'audit' 'audit ssh' 'audit block' 'audit unblock' 'audit history' 'audit key' 'audit lookup' 'audit banlist' 'audit jail' 'audit scan' 'audit scan --deep' 'audit scan --remediate'"]=
   cmds["engine:--dry-run"]=""
-
   if [[ "$prev" == "--ssh" || "$prev" == "--console" ]]; then
     hosts=$(
       ansible all \
@@ -2489,7 +2770,6 @@ _one_click() {
     COMPREPLY=( $(compgen -W "$hosts" -- "$cur") )
     return 0
   fi
-  
     _complete_tree() {
       local path="$1"
       local cur="$2"
@@ -2514,12 +2794,15 @@ _one_click() {
     for ((i=1; i<COMP_CWORD; i++)); do
       path+="${COMP_WORDS[i]}:"
     done
-    path="${path%:}" 
+    path="${path%:}"
     _complete_tree "$path" "$cur"
 }
 complete -F _one_click one-click
 EOF
   fi
+fi
+if [[ "$1" == "cron" || "$1" =~ log.* || "$1" =~ net(-(repair|info))? || "$1" =~ --[a-z]+(-admin)?$ ]]; then
+  seen=1
 fi
 map_one_click() {
   for i in "$@"; do
@@ -2530,6 +2813,8 @@ map_one_click() {
       engine)             echo "$i"            ;;
       migrator)           echo "--migrator"    ;;
       net-repair)         echo "--repair"      ;;
+      net)                echo "--net"         ;;
+      net-info)           echo "--net"         ;;
       reinstall)          echo "--reinstall"   ;;
       recovery)           echo "--recovery"    ;;
       rule-engine)        echo "$i"            ;;
@@ -2607,18 +2892,18 @@ if [[ -z "${!flag:-}" ]]; then
   echo
   tmux new-session -s "$session" "env $flag=1 bash '${path}' '$1' '${2:-}'; exec bash"
   printf '%s\n' \
-    "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
+    "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" \
     "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
-    "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
+    "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
+  # ==== Enable TMUX features ====
+  tmux set -g mouse on
+  tmux set -g mode-keys vi
+  tmux set -g allow-rename off
+  tmux set -g automatic-rename off
+  tmux set -g default-terminal "tmux-256color"
+  tmux set -g terminal-overrides ',xterm-256color:Tc'
   exit 0
 fi
-# ==== Enable TMUX features ====
-tmux set -g mouse on
-tmux set -g mode-keys vi
-tmux set -g allow-rename off
-tmux set -g automatic-rename off
-tmux set -g default-terminal "tmux-256color"
-tmux set -g terminal-overrides ',xterm-256color:Tc'
 #################################*******************#################################
 #################################* RUN MAIN SCRIPT *#################################
 #################################*******************#################################
@@ -2700,6 +2985,11 @@ if [[ $# -gt 0 ]]; then
       os_reinstall_run
       shift
       ;;
+    -n|--net)
+      load_net_repair
+      health_check
+      shift
+      ;;
     -r|--repair)
       load_net_repair
       fix_network
@@ -2717,7 +3007,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     --log)  log_browser_menu ;;
     --cron) cron_menu        ;;
-    -r|--update) 
+    -r|--update)
       if command -v one-click >/dev/null 2>&1; then
         mkdir -p /etc/one-click/upgrade-staging/modules
         warn "This will update one-click to the latest version $remote_version"
@@ -2727,8 +3017,8 @@ if [[ $# -gt 0 ]]; then
         if [[ "$update_version" == "y" || "$update_version" == "yes" ]]; then
           mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/one-click
           mv -f "$manpage" /etc/one-click/upgrade-staging$(basename "$manpage")
-          cp -R /var/cache/one-click/* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
-          rm -rf /var/cache/one-click
+          cp -R "$cache_dir/"* /etc/one-click/upgrade-staging/modules/ 2>/dev/null
+          rm -rf "$cache_dir"
           if curl -fsSL https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh -o /usr/local/bin/one-click ; then
             if [[ ! -s "$manpage" ]]; then
               wget -P "$man_dir" "$one_click_1" &> /dev/null
@@ -2764,7 +3054,7 @@ if [[ $# -gt 0 ]]; then
         keep_file="$(mktemp)"
         remove_file="$(mktemp)"
         catch() {
-          rm -f "$keep_file" "$remove_file" 
+          rm -f "$keep_file" "$remove_file"
         }
         trap catch EXIT
         state_dir="${base}/state"
@@ -2782,26 +3072,32 @@ if [[ $# -gt 0 ]]; then
             if [[ -d /etc/nginx ]]; then
               if mv -f /etc/nginx/nginx.conf.one-click.bak /etc/nginx/nginx.conf &> /dev/null; then
                 info "Nginx default conf restored"
-              else 
+              else
                 error "Default conf file has been moved! Please manually replace"
               fi
             elif [[ -d /etc/apache2 ]]; then
               if mv -f /etc/apache2/apache2.conf.one-click.bak /etc/apache2/apache2.conf &> /dev/null; then
                 info "Nginx default conf restored"
-              else 
+              else ip=
                 error "Default conf file has been moved! Please manually replace"
               fi
             elif [[ -d /etc/httpd ]]; then
               if mv -f /etc/httpd/httpd.conf.one-click.bak /etc/httpd/httpd.conf &> /dev/null; then
                 info "Nginx default conf restored"
-              else 
+              else
                 error "Default conf file has been moved! Please manually replace"
               fi
             fi
 		  else
 		    info "No sites or apps found!"
 		  fi
-          info "Loading protected paths from state files..."
+		  info "Backing up and removing wireguard configurations"
+		  if [[ -f /etc/wireguard/one-click.conf ]];  then
+		    mv -f /etc/wireguard/one-click.conf /etc/wireguard/one-click.conf_uninstalled
+		    mv -f /etc/wireguard/oc_private.key /etc/wireguard/oc_private.key_uninstalled
+		    mv -f /etc/wireguard/oc_public.key /etc/wireguard/oc_public.key_uninstalled
+          fi
+          info "Loading protected paths from state files."
           find "$state_dir" -type f | while read -r state; do
             while read -r line; do
               [[ -z "$line" ]] && continue
@@ -2816,7 +3112,7 @@ if [[ $# -gt 0 ]]; then
           add_keep_path "$state_dir" "$keep_file"
           sort -u "$keep_file" -o "$keep_file"
           info "Protected paths loaded: $(wc -l < "$keep_file")"
-          echo "Scanning One-Click managed areas..."
+          echo "Scanning One-Click managed areas."
           scan_paths=(
             "/etc"
             "/var"
@@ -2835,7 +3131,7 @@ if [[ $# -gt 0 ]]; then
             \) 2>/dev/null >> "$remove_file"
           done
           sort -u "$remove_file" -o "$remove_file"
-          info "Filtering protected entries..."
+          info "Filtering protected entries."
           filtered="$(mktemp)"
           trap 'rm -f "$filtered"' EXIT
           while read -r path; do
@@ -2863,7 +3159,7 @@ if [[ $# -gt 0 ]]; then
             error "Aborted."
           exit 0
         fi
-        warn "Removing unmanaged One-Click artifacts..."
+        warn "Removing unmanaged One-Click artifacts."
         while read -r target; do
           [[ -z "$target" ]] && continue
             if [[ -e "$target" ]]; then
@@ -2934,6 +3230,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -njs-admin)
       load_wordpress
+      clear
       apps_menu nodejs
       exit 0
       ;;
@@ -2953,11 +3250,13 @@ if [[ $# -gt 0 ]]; then
       ;;
     -dns)
       load_wordpress
+      clear
       dns_menu
       exit 0
       ;;
     -php)
       load_wordpress
+      clear
       php_menu
       exit 0
       ;;
@@ -3004,13 +3303,13 @@ if [[ $# -gt 0 ]]; then
           nft list ruleset > "$preinstall_state/nft.state"
         fi
         printf '%s\n' \
-"  ___                 ____ _ _      _    
+"  ___                 ____ _ _      _
  / _ \ _ __   ___    / ___| (_) ___| | __
 | | | | '_ \ / _ \  | |   | | |/ __| |/ /
-| |_| | | | |  __/  | |___| | | (__|   < 
+| |_| | | | |  __/  | |___| | | (__|   <
  \___/|_| |_|\___|   \____|_|_|\___|_|\\_\\
-                                            
- ___           _        _ _          _ 
+
+ ___           _        _ _          _
 |_ _|_ __  ___| |_ __ _| | | ___  __| |
  | || '_ \\/ __| __/ _\` | | |/ _ \\/ _\` |
  | || | | \\__ \\ || (_| | | |  __/ (_| |
@@ -3039,6 +3338,7 @@ if [[ $# -gt 0 ]]; then
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  fleet                   Run remote commands to your fleet of registered servers" \
         "  net-repair              Repair network (Includes snapshots and backup of network files)" \
+        "  net                     View network stats" \
         "  (system|sys-info)       System Information" \
         "  (log-browser|logs)      System Log File Browswer" \
         "  cron                    Configure a cron job" \
@@ -3046,7 +3346,7 @@ if [[ $# -gt 0 ]]; then
         "  uninstall               Remove one-click and all associated files and configurations." \
         "  clone-site              Clone any website/app to any of your fleet peers" \
         "  restore-site            Package and restore from a fleet peer remote site/app to localhost" \
-        "  mv                      Move directory and contents to fleet member. \
+        "  mv                      Move directory and contents to fleet member." \
         "  --web-admin             Create a backup of selected static site." \
         "  --web-create            Install a blank static html or php website." \
         "  --wp                    Basic wordpress and cron management." \
@@ -3063,7 +3363,9 @@ if [[ $# -gt 0 ]]; then
         "  --dns                   Manage DNS with Cloudflare" \
         "  --ssl                   Install SSL for wordpress or any other virtual host." \
         "  --php                   Manage system-wide or per site php settings." \
-        "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments. \
+        "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments." \
+        "  --console               Start a serial console session to any VPS from controller." \
+        "  --vnc                   Start an ephemeral NoVNC to a VPS." \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)net-repair$(tput sgr 0)    Run network repair" \
