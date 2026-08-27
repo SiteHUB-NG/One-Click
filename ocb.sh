@@ -10,9 +10,9 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: July 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
-# ==== OCB Module ==== 
+# ==== OCB Module ====
 collect_sysinfo
 if ! command -v iperf3 &> /dev/null; then
   if command -v apt &> /dev/null; then
@@ -29,32 +29,52 @@ install_dep "sysbench" "type sysbench" "sysbench" "$pkg_mgr" true
 install_dep "openssl" "type openssl" "openssl" "$pkg_mgr" true
 mkdir -p /etc/one-click/ocb/benchmarks
 # ==== Check System Resources ====
-challenge=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-challenge | jq -r .challenge 2>/dev/null)
+local proto="-4"
+toggle_proto() { [[ "$proto" == "-4" ]] && proto="-6" || proto="-4"; }
+local retries=0
+local max_retries=10
+set +e
+until challenge=$(curl "$proto" -s -m 5 -X POST http://api.oneclick.i.ng:4000/v1/request-challenge | jq -r .challenge 2>/dev/null || true) && [[ -n "$challenge" && "$challenge" != "null" ]]; do
+  ((retries++))
+  if (( retries >= max_retries )); then
+    error "Failed to obtain challenge after $max_retries attempts. Aborting."
+    return 1
+  fi
+  toggle_proto
+  sleep 1
+done
+set -e
 if [[ -n "$challenge" && "$challenge" != "null" ]]; then
   echo -n "$challenge" > /tmp/ocb.txt
   challenged=$(openssl pkeyutl -sign \
     -inkey /etc/one-click/ocb/ocb.pem -rawin \
     -in /tmp/ocb.txt | base64 -w0)
   sleep 2
-  key=$(curl -s -X POST http://api.oneclick.i.ng:4000/v1/request-token \
+  local retries=0
+  local max_retries=10
+  set +e
+  until ocb_key=$(curl "$proto" -s -m 5 -X POST http://api.oneclick.i.ng:4000/v1/request-token \
     -H "Content-Type: application/json" \
     -d "{
       \"challenge\": \"$challenge\",
       \"signature\": \"$challenged\"
-    }" | jq -r .token)
-else
-  key=""
-fi
-if [[ -z "$key" || "$key" == "null" ]]; then
-  warn "Token unavailable. Will not be able to publish results"
-  sleep 3
+    }" | jq -r .token 2>/dev/null || true) && [[ -n "$ocb_key" && "$ocb_key" != "null" ]]; do
+    ((retries++))
+    if (( retries >= max_retries )); then
+      error "Failed to obtain API token after $max_retries attempts. Aborting."
+      return 1
+    fi
+    toggle_proto
+    sleep 1
+  done
+  set -e
 fi
 no_gb=0
 bench_dir=/etc/one-click/ocb/benchmarks
 bench_ext="bench_$(date +'%F-%T').sysbench"
 start=$(date +%s)
 disk=($(ls -1 /sys/block/))
-cpu_model=$(awk -F: '/model name/ {name=$2} END {print name}' /proc/cpuinfo | sed 's/^[ \t]*//;s/[ \t]*$//')
+cpu_model=$(awk -F: '$1 ~ /Model name/{gsub("  ","");print $2}' <(lscpu))
 size="$ram"
 read_ram=$(sysbench memory --memory-block-size=1M --memory-total-size="$size" --memory-oper=read run)
 write_ram=$(sysbench memory --memory-block-size=1M --memory-total-size="$size" --memory-oper=write run)
@@ -64,6 +84,20 @@ ops=$(awk '/operations:/{print $3}' <<< "$read_ram")
 write_throughput=($(awk -F'[)(]' '/MiB/{print $2}' <<< "$write_ram"))
 write_total=$(awk '/transferred/{print $1}' <<< "$write_ram")
 write_ops=$(awk '/operations:/{print $3}' <<< "$write_ram")
+if [[ -n "$sys_ip" ]]; then
+  isp_response=$(curl -s http://ip-api.com/line?fields=isp,country,as,location,countryCode,query)
+  isp=$(awk 'NR==3' <<< "$isp_response")
+  isp3=$(awk 'NR==4 {print $1}' <<< "$isp_response")
+  isp5=$(awk 'NR==1' <<< "$isp_response")
+  isp6=$(awk 'NR==2' <<< "$isp_response")
+else
+  isp=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
+  isp2=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
+  isp3="AS$(jq -r '.network.autonomous_system.asn' <<< $api_response)"
+  isp4=$(jq -r '.network.cidr' <<< $api_response)
+  isp5=$(jq -r '.location.country' <<< $api_response)
+  isp6=$(jq -r '.network.autonomous_system.country' <<< $api_response)
+fi
 init() {
 if [[ "${#ram}" -eq 4 ]]; then
   ram="$(awk '/Mem/{print $2}' <(free -h))B"
@@ -153,7 +187,7 @@ print_table() {
   printf "${blue}│ %-*s │${reset}\n" "$((total_width-4))" "Basic System Information"
   printf "${blue}├%s┤${reset}\n" "$border"
   print_row "$key_width" "$val_width" "Uptime" "$uptime"
-  print_row "$key_width" "$val_width" "Processor" "$cpu_model @ $freq"
+  print_row "$key_width" "$val_width" "Processor" "$cpu_model"
   print_row "$key_width" "$val_width" "Cores" "$cpu_cores $core_plural"
   print_row "$key_width" "$val_width" "AES-NI" "$aes"
   print_row "$key_width" "$val_width" "VM-x/AMD-V" "$x_v"
@@ -172,15 +206,15 @@ print_table() {
       name="Unknown Disk"
     fi
     print_row "$key_width" "$val_width" "Disk Name$((++n))" "$(tput setaf 214)$name${blue}"
-  done 
+  done
   print_row "$key_width" "$val_width" "Distro" "$distro"
   print_row "$key_width" "$val_width" "Kernel" "$kernel"
   print_row "$key_width" "$val_width" "VM Type" "$virt"
   print_row "$key_width" "$val_width" "Connectivity" "$ipv4 / $ipv6"
-  print_row "$key_width" "$val_width" "ISP" "$ip_upstream"
-  print_row "$key_width" "$val_width" "ASN" "${ip_asn:-Unknown}"
-  print_row "$key_width" "$val_width" "Location" "$location"
-  print_row "$key_width" "$val_width" "Country" "$country"
+  print_row "$key_width" "$val_width" "ISP" "${isp:-${ip_upstream}}"
+  print_row "$key_width" "$val_width" "ASN" "${isp3:-${ip_asn}}"
+  print_row "$key_width" "$val_width" "Location" "${isp6:-${location}}"
+  print_row "$key_width" "$val_width" "Country" "${isp5:-${country}}"
   printf "${blue}└%s┘${reset}\n" "$border"
 }
 ram_bench() {
@@ -305,9 +339,9 @@ run_ocb() {
   iperf_run
   set +e
   if (( no_gb == 1 )); then
-    run_sysbench 
+    run_sysbench
   else
-    geekbench_table "${version}" "$gb_path" 
+    geekbench_table "${version}" "$gb_path"
   fi
   set -e
 }
@@ -322,8 +356,13 @@ run_ocb_pipe() {
 EOF
     echo "FAILED" > "$bench_dir/job.state"
     touch "$bench_dir/COMPLETE"
+    return 1
   }
   trap bench_fail ERR
+  local proto="-4"
+  if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+    . /etc/one-click/ocb/meta.conf
+  fi
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
   avail_disk=$(awk 'NR != 1 {print $4}' <(sed 's/G//g' <(df -BG /)))
   version="${1:-7}"
@@ -344,9 +383,13 @@ EOF
     if [[ -f /etc/one-click/ocb/meta.conf ]]; then
       source /etc/one-click/ocb/meta.conf
     fi
-    if [[ -n "$key" ]]; then
+    if [[ -n "$ocb_key" ]]; then
       raw=$(base64 -w 0 "$bench_result")
-      response=$(
+      local retries=0
+      local max_retries=10
+      local url=""
+      local json_payload
+      json_payload=$(
         jq -n \
           --arg id "$bench_ext" \
           --arg version "1" \
@@ -365,12 +408,21 @@ EOF
               multi: $multi
             },
             raw_output: $raw
-          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
-            -H "Content-Type: application/json" \
-            -H "x-ocb-token: '"$key"'" \
-            --data-binary @-
+          }'
       )
-      url=$(echo "$response" | jq -r '.url')
+      until response=$(curl "$proto" -s -m 5 -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+        -H "Content-Type: application/json" \
+        -H "x-ocb-token: ${ocb_key:-}" \
+        --data-binary "$json_payload" || true) && url=$(echo "$response" | jq -r '.url 2>/dev/null') && [[ -n "$url" && "$url" != "null" ]]; do
+        ((retries++))
+        if (( retries >= max_retries )); then
+          error "Failed to publish benchmark results after $max_retries attempts. Aborting."
+          break
+        fi
+        warn "Publish failed on attempt $retries/$max_retries (IPv${proto#-}). Toggling IP mode and retrying..."
+        toggle_proto
+        sleep 1
+      done
     fi
   else
     bench_result="/etc/one-click/ocb/benchmarks/bench_$(date +'%F-%T').gb${version:-7}"
@@ -387,12 +439,16 @@ EOF
       s/(hostname[^│]*│ ).*/\1ONE-CLICK REDACTED/I
     '  "$bench_result"
     end=$(date +%s)
-    if [[ -n "$key" && "$no_gb" -eq 0 ]]; then
+    if [[ -n "$ocb_key" && "$no_gb" -eq 0 ]]; then
       raw=$(base64 -w 0 "$bench_result")
-      response=$(
+      local retries=0
+      local max_retries=10
+      local url=""
+      local json_payload
+      json_payload=$(
         jq -n \
           --arg id "$gb_id" \
-          --arg version "$version" \
+          --arg version "1" \
           --arg tool "One-Click Bench" \
           --arg provider "One-Click Bench" \
           --arg raw "$raw" \
@@ -408,17 +464,24 @@ EOF
               multi: $multi
             },
             raw_output: $raw
-          }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
-            -H "Content-Type: application/json" \
-            -H "x-ocb-token: '"$key"'" \
-            --data-binary @-
+         }'
       )
-      url=$(echo "$response" | jq -r '.url')
-      total_time "$start" "$end" "$url" "$key"
-      exit 0
+      until response=$(curl "$proto" -s -m 5 -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
+        -H "Content-Type: application/json" \
+        -H "x-ocb-token: ${ocb_key:-}" \
+        --data-binary "$json_payload" || true) && url=$(echo "$response" | jq -r '.url 2>/dev/null') && [[ -n "$url" && "$url" != "null" ]]; do
+        ((retries++))
+        if (( retries >= max_retries )); then
+          error "Failed to publish benchmark results after $max_retries attempts. Aborting."
+          break
+        fi
+        warn "Publish failed on attempt $retries/$max_retries (IPv${proto#-}). Toggling IP mode and retrying..."
+        toggle_proto
+        sleep 1
+      done
     fi
   fi
-  total_time "$start" "$end" "$url" "$key"
+  total_time "$start" "$end" "$url" "$ocb_key"
   if [[ -f /etc/one-click/ocb/meta.conf ]]; then
     . /etc/one-click/ocb/meta.conf
   fi
@@ -437,7 +500,7 @@ EOF
   echo "COMPLETE" > "/etc/one-click/ocb/benchmarks/job.state"
   touch "/etc/one-click/ocb/benchmarks/COMPLETE"
   rm -f /etc/one-click/ocb/meta.conf
-  exit 0
+  return 0
 }
 geek() {
   version="${1:-7}"
@@ -465,6 +528,7 @@ cpu_sys() {
 EOF
     echo "FAILED" > "$bench_dir/job.state"
     touch "$bench_dir/COMPLETE"
+    return 1
   }
   trap bench_fail ERR
   avail_mem=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
@@ -483,9 +547,13 @@ EOF
       /Preparing Geekbench/d
     ' "$bench_result"
     end=$(date +%s)
-    source /etc/one-click/ocb/meta.conf
-    if [[ -n "$key" ]]; then
+    if [[ -f /etc/one-click/ocb/meta.conf ]]; then
+      . /etc/one-click/ocb/meta.conf
+    fi
+    if [[ -n "${ocb_key:-}" ]]; then
       raw=$(base64 -w 0 "$bench_result")
+      response=
+      until [[ "${response:-}" != "" ]]; do
       response=$(
         jq -n \
           --arg id "$bench_ext" \
@@ -495,7 +563,7 @@ EOF
           --arg raw "$raw" \
           --argjson single "$avg_time" \
           --argjson multi "$max_time" \
-          '{geekbench_table
+          '{
             id: $id,
             version: $version,
             tool: $tool,
@@ -507,9 +575,10 @@ EOF
             raw_output: $raw
           }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
             -H "Content-Type: application/json" \
-            -H "x-ocb-token: '"$key"'" \
+            -H "x-ocb-token: ${ocb_key:-}" \
             --data-binary @-
       )
+      done
       url=$(echo "$response" | jq -r '.url')
     fi
   else
@@ -543,12 +612,14 @@ EOF
     '  "$bench_result"
     . /etc/one-click/ocb/meta.conf
     end=$(date +%s)
-    if [[ -n "${key:-}" ]]; then
+    if [[ -n "${ocb_key:-}" ]]; then
       raw=$(base64 -w 0 "$bench_result")
+      response=
+      until [[ "${response:-}" != "" ]]; do
       response=$(
         jq -n \
           --arg id "$gb_id" \
-          --arg version "$version" \
+          --arg version "1" \
           --arg tool "One-Click Bench" \
           --arg provider "One-Click Bench" \
           --arg raw "$raw" \
@@ -566,13 +637,14 @@ EOF
             raw_output: $raw
           }' | curl -s -X POST "http://api.oneclick.i.ng:4000/v1/publish" \
             -H "Content-Type: application/json" \
-            -H "x-ocb-token: '"$key"'" \
+            -H "x-ocb-token: ${ocb_key:-}" \
             --data-binary @-
       )
+      done
       url=$(echo "$response" | jq -r '.url')
     fi
   fi
-  total_time "$start" "$end" "${url:-}" "${key:-}"
+  total_time "$start" "$end" "${url:-}" "${ocb_key:-}"
   if [[ -f /etc/one-click/ocb/meta.conf ]]; then
     . /etc/one-click/ocb/meta.conf
   fi
