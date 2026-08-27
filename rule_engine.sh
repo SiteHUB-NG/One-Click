@@ -10,9 +10,35 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # === Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
+# ==== Helper: Ensure nftables IP Filter Base Chains Exist ====
+ensure_nftables_base_chains() {
+  if command -v nft &>/dev/null; then
+    nft add table ip filter &>/dev/null || true
+    nft add chain ip filter INPUT '{ type filter hook input priority 0 ; policy accept ; }' &>/dev/null || true
+    nft add chain ip filter FORWARD '{ type filter hook forward priority 0 ; policy accept ; }' &>/dev/null || true
+    nft add chain ip filter OUTPUT '{ type filter hook output priority 0 ; policy accept ; }' &>/dev/null || true
+  fi
+}
+expand_multiport_command() {
+  local cmd="$1"
+  if [[ "$cmd" =~ -m[[:space:]]+multiport[[:space:]]+--(dports|sports)[[:space:]]+([^[:space:]]+) ]]; then
+    local flag="${BASH_REMATCH[1]}"
+    local ports_str="${BASH_REMATCH[2]}"
+    local single_flag="${flag%s}"
+    IFS=',' read -ra ports <<< "$ports_str"
+    for port in "${ports[@]}"; do
+      local unrolled_cmd
+      unrolled_cmd=$(echo "$cmd" | sed -E "s/-m[[:space:]]+multiport[[:space:]]+--${flag}[[:space:]]+[^[:space:]]+/--${single_flag} ${port}/")
+      echo "$unrolled_cmd"
+    done
+  else
+    echo "$cmd"
+  fi
+}
+# ==== Firewall RuleEngine ====
 rule_engine() {
   if ! systemctl is-active --quiet firewalld; then
     fail2ban_failed=true
@@ -31,7 +57,7 @@ rule_engine() {
     fi
     install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
     install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
-    systemctl enable fail2ban --now
+    systemctl enable fail2ban --now &> /dev/null
   elif [[ "$pkg_mgr" == "dnf" ]]; then
     if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
       dnf -y install rsyslog &> /dev/null
@@ -52,7 +78,7 @@ rule_engine() {
   duplicate_skipped=0
   y_interactive=0
   if [[ "$rule" == "--dry-run" ]]; then
-    if  [[ "$flag" == "-y" || "$y_int" == "-y" ]]; then
+    if [[ "$flag" == "-y" || "$y_int" == "-y" ]]; then
       y_interactive=1
     fi
     dry_run=1
@@ -70,8 +96,7 @@ rule_engine() {
   mkdir -p "$engine_dir"
   mkdir -p "${engine_dir}guard/"
   touch "$alias_file"
-  #touch "${engine_dir}guard/"{ssh,ddos}
-  # ==== Default Sensitive Ports (Remove from here) ====
+  # ==== Default Sensitive Ports ====
   declare -A default_sensitive_ports=(
     ["${real_ssh:-22}"]="SSH (Remote Access)"
     [21]="FTP (Unencrypted File Transfer)"
@@ -95,8 +120,9 @@ rule_engine() {
   last_action=""
   last_proto=""
   generated_cmds=()
+  # ==== Detect Backend Environment ====
   detect_firewall_backend
-  if iptables -V 2>/dev/null | grep -qi nf_tables; then
+  if command -v iptables &>/dev/null && iptables -V 2>/dev/null | grep -qi nf_tables; then
     if [[ "$dry_run" -eq 1 ]]; then
       printf "${magenta}[DRY-RUN]${reset} %s\n" "iptables is running in nf_tables compatibility mode."
     else
@@ -120,27 +146,48 @@ rule_engine() {
       last_action="DELETE"; break
     fi
   done
-  # ==== Parse all subcommands first ====
+  # ==== Parse Subcommands ====
   for sub in "${subcommands[@]}"; do
     parse_firewall_command "$sub" "$last_proto"
   done
-  # ==== Deduplicate against kernel ====
+  # ==== Backend-Aware Deduplication Against Live System ====
   unique_cmds=()
   for cmd in "${generated_cmds[@]}"; do
-    read -r -a arr <<< "$cmd"
-    if [[ "${fw_bin:-}" == "iptables" || "${fw_bin:-}" == "ip6tables" ]]; then
-        if "${fw_bin:-}" -C "${arr[@]}" &>/dev/null; then
-            info "Skipping duplicate rule already in kernel: $cmd"
-            duplicate_skipped=1
-            continue
+    local is_dup=0
+    case "${firewall_backend:-iptables}" in
+      iptables|ip6tables)
+        read -r -a arr <<< "$cmd"
+        if "${fw_bin:-iptables}" -C "${arr[@]:1}" &>/dev/null; then
+          is_dup=1
         fi
+        ;;
+      nft)
+        if nft list ruleset 2>/dev/null | grep -F -q "$cmd"; then
+          is_dup=1
+        fi
+        ;;
+      ufw)
+        if ufw status 2>/dev/null | grep -F -q "$cmd"; then
+          is_dup=1
+        fi
+        ;;
+      firewalld)
+        if firewall-cmd --zone=public --query-port="${cmd#*--add-port=}" &>/dev/null 2>&1; then
+          is_dup=1
+        fi
+        ;;
+    esac
+    if [[ "$is_dup" -eq 1 ]]; then
+      info "Skipping duplicate rule already active in kernel: $cmd"
+      duplicate_skipped=1
+      continue
     fi
     unique_cmds+=("$cmd")
   done
   if [[ ${#unique_cmds[@]} -eq 0 ]]; then
     if [[ "$duplicate_skipped" == "1" ]]; then
-        info "All rules already exist. Nothing to change."
-        exit 0
+      info "All rules already exist. Nothing to change."
+      exit 0
     fi
     if [[ "$dry_run" -eq 1 ]]; then
       printf "${red}[DRY-RUN]${reset} %s\n" "No valid commands generated." "DRY-RUN Failed!"
@@ -149,19 +196,13 @@ rule_engine() {
       die "No valid commands generated."
     fi
   fi
-  # ==== Preview & Confirm ==== 
+  # ==== Preview Commands ====
   if [[ "$dry_run" -eq 1 ]]; then
     printf "${magenta}[DRY-RUN]${reset} %s\n" "The following commands will be executed:"
   else
     info "The following commands will be executed:"
   fi
   for cmd in "${unique_cmds[@]}"; do
-    # ==== Capitalize RAW Display Entries ====
-    cmd=$(
-        sed -E '
-        s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
-        s/input|output|forward|prerouting/\U&/g
-    ' <<< "$cmd")
     if [[ "$dry_run" -eq 1 ]]; then
       printf "${magenta}[DRY-RUN]${cyan} %s${reset}\n" "$cmd"
     else
@@ -180,76 +221,95 @@ rule_engine() {
     confirm="${confirm,,}"
   fi
   if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
-    i=""
-    fw_bin="${fw_bin:-iptables}"
-    save_cmd="${fw_bin}-save"
-    case "$fw_bin" in
-      ip6tables)
-        restore_cmd="ip6tables-restore"
-        ;;
-      *)
-        restore_cmd="iptables-restore"
-        ;;
-    esac
-    tmp_snapshot=$(mktemp /tmp/${fw_bin}_backup.XXXXXX)
+    tmp_snapshot=$(mktemp /tmp/fw_backup.XXXXXX)
     confirm_file=$(mktemp /tmp/fw_confirmed.XXXXXX)
     state_file=$(mktemp /tmp/fw_state.XXXXXX)
     echo "APPLYING" > "$state_file"
-    trap '
-      rm -f "${tmp_snapshot:-}" "${confirm_file:-}" "${state_file:-}" 2>/dev/null
-    ' EXIT INT TERM
-    if ! "$save_cmd" > "$tmp_snapshot"; then
-      error "Failed to create firewall snapshot!"
-      exit 1
-    fi
+    trap 'rm -f "${tmp_snapshot:-}" "${confirm_file:-}" "${state_file:-}" 2>/dev/null' EXIT INT TERM
+    # ==== Backend-Aware Snapshot Creation ====
+    case "${firewall_backend:-iptables}" in
+      nft)
+        nft list ruleset > "$tmp_snapshot" 2>/dev/null || true
+        ;;
+      ufw)
+        ufw status verbose > "$tmp_snapshot" 2>/dev/null || true
+        ;;
+      firewalld)
+        firewall-cmd --runtime-to-permanent &>/dev/null || true
+        firewall-cmd --zone=public --list-all > "$tmp_snapshot" 2>/dev/null || true
+        ;;
+      *)
+        ${fw_bin:-iptables}-save -c > "$tmp_snapshot" 2>/dev/null || true
+        ;;
+    esac
     fail=()
     fatal=0
-    # ==== Dry Run ====
+    # ==== Dry Run Verification ====
     if [[ "$dry_run" -eq 1 ]]; then
-      dry_run "${unique_cmds[@]}" || {
-        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" \
-          "Dry run failed. Exiting without applying rules."
-        exit 1
-      }
+      if ! dry_run "${unique_cmds[@]}"; then
+        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" "Dry run failed. Exiting without applying rules."
+        return 1 2>/dev/null || exit 1
+      fi
     fi
-    # ==== Apply Rules ====
+    # ==== Ensure base nftables chains exist ====
+    ensure_nftables_base_chains
+    # ==== Execute Rules ====
     for cmd in "${unique_cmds[@]}"; do
-      cmd="${cmd#raw: }"
-      cmd=$(
-        sed -E '
-          s/^([^-]*)(-[a-ik-lnoq-su-z])(.*[ \t])(.*)/\1\U\2\L\3\U\4/;
-          s/input|output|forward|prerouting/\U&/g;
-        ' <<< "$cmd"
-      )
-      read -r -a arr <<< "$cmd"
-      if "${arr[@]}"; then
-        info "Rule applied: $cmd"
-      else
-        warn "Failed to apply rule: $cmd"
-        fail+=("$cmd")
-        fatal=1
-      fi
-    done
-    # ==== Rollback ====
-    rollback() {
-      warn "Rolling back firewall state..."
-      if "$restore_cmd" < "$tmp_snapshot"; then
-        success "Firewall restored successfully."
-        echo "ROLLED_BACK" > "$state_file"
-      else
-        error "CRITICAL: Restore failed!"
-        warn "Emergency recovery engaged..."
-        "${fw_bin}" -P INPUT ACCEPT
-        "${fw_bin}" -P OUTPUT ACCEPT
-        "${fw_bin}" -P FORWARD ACCEPT
-        "${fw_bin}" -F
-        "${fw_bin}" -X
-        if [[ -n "${real_ssh:-}" ]]; then
-          "${fw_bin}" -A INPUT -p tcp --dport "$real_ssh" -j ACCEPT
+      mapfile -t runnable_cmds < <(expand_multiport_command "$cmd")
+      for exec_cmd in "${runnable_cmds[@]}"; do
+        if eval "$exec_cmd" &>/dev/null; then
+          info "Rule applied: $exec_cmd"
+        else
+          warn "Failed to apply rule: $exec_cmd"
+          fail+=("$exec_cmd")
+          fatal=1
         fi
-        "${fw_bin}" -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-        echo "ROLLED_BACK" > "$state_file"
+      done
+    done
+    # ==== Universal Rollback Function ====
+    rollback() {
+      warn "Rolling back firewall state."
+      case "${firewall_backend:-iptables}" in
+        nft)
+          nft flush ruleset
+          if nft -f "$tmp_snapshot" &>/dev/null; then
+            success "nftables restored successfully."
+            echo "ROLLED_BACK" > "$state_file"
+            return 0
+          fi
+          ;;
+        ufw)
+          ufw disable &>/dev/null
+          ufw reload &>/dev/null
+          success "UFW state reset."
+          echo "ROLLED_BACK" > "$state_file"
+          return 0
+          ;;
+        firewalld)
+          firewall-cmd --reload &>/dev/null
+          success "Firewalld reloaded from permanent store."
+          echo "ROLLED_BACK" > "$state_file"
+          return 0
+          ;;
+        *)
+          if sanitize_and_restore_iptables "$tmp_snapshot"; then
+            echo "ROLLED_BACK" > "$state_file"
+            return 0
+          fi
+          ;;
+      esac
+      # ==== Emergency Flush Fail-Safe ====
+      error "CRITICAL: Native restore failed! Emergency recovery engaged."
+      if command -v iptables &>/dev/null; then
+        iptables -P INPUT ACCEPT
+        iptables -P OUTPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+        iptables -F
+        iptables -X
+        [[ -n "${real_ssh:-}" ]] && iptables -A INPUT -p tcp --dport "$real_ssh" -j ACCEPT
+        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
       fi
+      echo "ROLLED_BACK" > "$state_file"
     }
     if [[ "$fatal" -eq 1 ]]; then
       warn "Rule application failures detected:"
@@ -263,7 +323,8 @@ rule_engine() {
     fi
     success "All rules successfully applied."
     echo "PENDING_CONFIRM" > "$state_file"
-    # ==== Confirmation ====
+
+    # ==== Safety Confirmation Loop ====
     echo
     confirmed=0
     if [[ "$y_interactive" -eq 1 ]]; then
@@ -279,17 +340,17 @@ rule_engine() {
         confirmed=1
       fi
     fi
+
     if [[ "$confirmed" -eq 1 ]]; then
       echo "COMMITTED" > "$state_file"
       success "Firewall changes confirmed and committed."
       info "Please save your rules with ${cyan}one-click engine backup${reset}"
       sleep 1
-      success "Firewall rules persisted."
       rm -f "$tmp_snapshot" "$confirm_file"
     else
-      warn "Confirmation not received. Triggering rollback..."
+      warn "Confirmation not received. Triggering rollback."
       rollback
-      warn "No changes applied"
+      warn "No changes applied."
     fi
   else
     warn "No changes applied."
