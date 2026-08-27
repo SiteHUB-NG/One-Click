@@ -10,36 +10,32 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ======================= # ======================== # ======================= #
-# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.2.5 ==== #
-# ====== One-Click ====== #
-# ==== WordPress ====
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.0.0 ==== #
+# ====== One-Click ====== ## ==== NodeJS ==== ## ==== DNS ==== # ==== SSL ==== #
+# ==== WordPress ==== # ==== PHP ==== ## ==== NexCloud ==== # ==== Static ==== #
 . /etc/os-release
-if [[ "$pkg_mgr" == "apt" ]]; then
+if [[ "$pkg_mgr" == "apt" && "$1" != "--monitor" ]]; then
   dig_pkg=dnsutils
   php_pkg="php"
-else
+  "$pkg_mgr" -y install php-cli php-fpm php-curl php-gd php-mbstring php-xml php-zip php-mysql &> /dev/null
+elif [[ "$1" != "--monitor" ]]; then
   dig_pkg=bind-utils
   php_pkg="$($pkg_mgr search php 2> /dev/null | awk '$0 !~ /=/ {print $1}' | head -1 || true)"
   php_pkg="${php_pkg//.*}"
+  $pkg_mgr install -y epel-release &> /dev/null
+  $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-${VERSION_ID}.rpm &> /dev/null
+  $pkg_mgr module reset php -y &> /dev/null
+  install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php 2> /dev/null) | tail -1)
+  $pkg_mgr module enable php:remi-${install_php_ver} -y &> /dev/null
+  install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
+  install_dep "php-cli" "command -v php" "php-cli" "$pkg_mgr" true
+  install_dep "php-fpm" "command -v "$pkg_mgr" -y install php-cli php-fpm php-curl php-gd php-mbstring php-xml php-zip php-mysql &> /dev/nullphp" "php-fpm" "$pkg_mgr" true
+  install_dep "php-mysqlnd" "command -v php" "php-mysqlnd" "$pkg_mgr" true
 fi
-if command -v install_dep &> /dev/null; then
-  if [[ "$pkg_mgr" == "apt" ]]; then
-    install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
-  else
-    $pkg_mgr install -y epel-release &> /dev/null || $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-${VERSION_ID}.rpm &> /dev/null
-    $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm &> /dev/null
-    $pkg_mgr module reset php -y &> /dev/null
-    install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php) | tail -1)
-    $pkg_mgr module enable php:remi-${install_php_ver} -y &> /dev/null
-    install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
-    install_dep "php-cli" "command -v php" "php-cli" "$pkg_mgr" true
-    install_dep "php-fpm" "command -v php" "php-fpm" "$pkg_mgr" true
-    install_dep "php-mysqlnd" "command -v php" "php-mysqlnd" "$pkg_mgr" true
-    #dnf install -y php php-cli php-fpm php-mysqlnd
-  fi
-  install_dep "git" "command -v git" "git" "$pkg_mgr" true
-  install_dep "dig" "command -v dig" "$dig_pkg" "$pkg_mgr" true
-  install_dep "bzip2" "command -v bzip2" "bzip2" "$pkg_mgr" true
+if [[ "$1" != "--monitor" ]]; then
+  install_dep "git" "command -v git" "git" "$pkg_mgr" true || true
+  install_dep "dig" "command -v dig" "$dig_pkg" "$pkg_mgr" true || true
+  install_dep "bzip2" "command -v bzip2" "bzip2" "$pkg_mgr" true || true
 fi
 . /etc/os-release
 base_dir="/etc/one-click"
@@ -56,8 +52,8 @@ current_profile_file="$config_dir/current_profile"
 webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
 centos_ver=$(grep -Eo [0-9]+ /etc/centos-release 2> /dev/null || true)
 app_dir="/etc/one-click/apps"
-app_port_start=5000
-app_port_end=5999
+app_port_start=15000
+app_port_end=15999
 dns_api_root="/etc/one-click/dns"
 dns_provider_root="${dns_api_root}/providers"
 dns_domain_root="${dns_api_root}/domains"
@@ -71,8 +67,13 @@ if [[ "$ID" == "debian" ]]; then
   php_ver=$(awk '/^PHP/{split($2,arr,".");print arr[1]"."arr[2]}' <(php -v))
 fi
 dns_check() {
-  dns=$(dig "$domain" +short @8.8.8.8 | tail -n1)
-  dns_www=$(dig +short "www.$domain" | tail -n1)
+  if [[ ! "$sys_ip" ]]; then
+    dns=$((dig AAAA "$domain" +short @2001:4860:4860::8888 2> /dev/null | tail -n1) || true )
+    dns_www=$((dig AAAA "www.$domain" +short @2001:4860:4860::8888 2> /dev/null | tail -n1) || true)
+  else
+    dns=$((dig "$domain" +short @8.8.8.8 2> /dev/null | tail -n1) || true )
+    dns_www=$((dig +short "www.$domain" 2> /dev/null | tail -n1) || true )
+  fi
   if [[ "$dns" != "$sys_ip" || "$dns" != "$sys_ipv6" ]]; then
     warn "Domain does not resolve to this server (${sys_ip:-${sys_ipv6}})"
   fi
@@ -83,6 +84,7 @@ resolve_type() {
   [[ -e "/etc/one-click/wordpress/$domain" ]] && matches+=("wordpress")
   [[ -e "/etc/one-click/sites/$domain" ]] && matches+=("sites")
   [[ -e "/etc/one-click/apps/nodejs/$domain" ]] && matches+=("apps/nodejs")
+  [[ -e "/etc/one-click/nextcloud/$domain" ]] && matches+=("nextcloud")
   case "${#matches[@]}" in
     0)
       type="unknown"
@@ -110,7 +112,6 @@ wp_backup() {
   timestamp=$(date +%Y%m%d-%H%M%S)
   web_user="$SITE_USER"
   snap="${3:-}"
-  #web_user=$(awk 'NR != 1 && NR != 2 {print $3}' <(ls -l /etc/one-click/{wordpress,sites}/$domain 2> /dev/null) 2> /dev/null | head -1)
   [[ ! -d "$site" ]] && {
     error "Site directory not found"
     return 1
@@ -142,7 +143,7 @@ wp_backup() {
   db_pass=$(grep DB_PASSWORD "$config_path" | cut -d"'" -f4)
   info "Dumping Database"
   mysqldump -u"$db_user" -p"$db_pass" "$db_name" | pv | gzip > "$backup/$timestamp/db.sql.gz"
-  info "Archiving files..."
+  info "Archiving files."
   tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" . -C "$(dirname "$config_path")" "wp-config.php"
   info "Building manifest"
   # ==== Metadata ====
@@ -195,16 +196,16 @@ wp_restore() {
   if [[ "$remote_enabled" == "true" ]]; then
     loc="remote"
     dest="$profile_host"
-    info "Fetching remote backup from $profile_host..."
+    info "Fetching remote backup from $profile_host."
     run_rsync \
       "${profile_user}@${profile_host}:${profile_base}/${domain}/" \
       "$backup_dir/"
   fi
-  info "Loading metadata..."
+  info "Loading metadata."
   . "$backup_dir/meta.conf" 2>/dev/null
   . "$base/$domain/meta.conf" 2>/dev/null
 
-  info "Clearing current site directory..."
+  info "Clearing current site directory."
   find "$site_dir" -mindepth 1 -delete
   rm -f "$config_path"
   info "Restoring from $loc ($dest) -> $backup_dir"
@@ -212,11 +213,11 @@ wp_restore() {
   tar -xzf "$backup_dir/files.tar.gz" -C "$site_dir"
   # ==== Relocate wp-config ====
   if [[ -f "$site_dir/wp-config.php" ]]; then
-    info "Relocating wp-config.php to secure parent directory..."
+    info "Relocating wp-config.php to secure parent directory."
     mv "$site_dir/wp-config.php" "$config_path"
   fi
   # ==== Restore database ====
-  info "Restoring database..."
+  info "Restoring database."
   db_name=$(grep DB_NAME "$config_path" | cut -d"'" -f4)
   db_user=$(grep DB_USER "$config_path" | cut -d"'" -f4)
   db_pass=$(grep DB_PASSWORD "$config_path" | cut -d"'" -f4)
@@ -299,7 +300,7 @@ web_logs() {
       1) web_log_view "$domain" access     ;;
       2) web_log_view "$domain" error      ;;
       3) web_log_view "$domain" access 200 ;;
-      4) 
+      4)
         while true; do
           read -rp "${cyan}[USER]${reset} Enter the port number to filter: " filter_port
           if [[ ! "$filter_port" =~ ^[0-9]+$ ]]; then
@@ -485,7 +486,7 @@ main_board() {
             read -rp "${cyan}[USER]${reset} Select an option [1-3]: " choice
             case "$choice" in
               1)
-                warn "${yellow}[*]${yellow} Removing automation..."
+                warn "${yellow}[*]${yellow} Removing automation."
                 rm -f /etc/cron.d/one-click-sitemap_robots
                 rm -f "/etc/one-click/sites/${domain}/www/sitemap.xml"
                 rm -f "/etc/one-click/sites/${domain}/www/robots.txt"
@@ -515,27 +516,10 @@ main_board() {
         fi
         ;;
       9) check_permissions $domain ;;
-      10)
-        read -rp "${cyan}[USER]${reset} This action will delete the domain $domain."
-        read -rp "${cyan}[USER]${reset} Are you sure you want to continue (y|n): " del_domain
-        del_domain="${del_domain,,}"
-        if [[ "$del_domain" != "y" && "$del_domain" != "yes" ]]; then
-          error "Not progressing with domain deleteion of $domain"
-        else
-          if [[ -d /etc/one-click/wordpress/$domain ]]; then
-            rm -rf /etc/one-click/wordpress/$domain
-          else
-            rm -rf /etc/one-click/sites/$domain
-          fi
-          rm -f /etc/nginx/conf.d/${domain}.conf
-          rm -f /etc/nginx/sites-enabled/${domain}.conf
-          rm -f /etc/nginx/sites-available/${domain}.conf
-          rm -f /etc/httpd/conf.d/${domain}.conf
-        fi
-        ;;
+      10) delete_site "$domain" ;;
       11) web_logs ;;
       0)
-        error "Exiting..."
+        error "Exiting."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
         ;;
       *) error "Invalid option" ;;
@@ -596,16 +580,17 @@ install_wp_cli() {
 # ==== Configure DB ====
 install_db() {
   info "Updating System"
-  "$pkg_mgr" -y update
+  "$pkg_mgr" -y update 2> /dev/null
   info "Installing dependencies"
   "$pkg_mgr" install -y \
    mariadb-server \
   php-fpm \
   php-posix \
   unzip \
-  curl > /dev/null
+  curl &> /dev/null
 }
 configure_nc_db() {
+  provision_success=0
   local nc_db="one_click:${domain//./-}:$(openssl rand -hex 4):$nc_db_user"
   echo "DB_NAME=$nc_db" >> /etc/one-click/nextcloud/$domain/meta.conf
   install_db
@@ -618,9 +603,12 @@ configure_nc_db() {
     info "Creating database user '$nc_db_user'"
     mysql -e "CREATE USER '$nc_db_user'@'localhost' IDENTIFIED BY '$nc_db_pass';"
   fi
-  mysql -e "GRANT ALL PRIVILEGES ON \`$nc_db\`.* TO '$nc_db_user'@'localhost'; FLUSH PRIVILEGES;"
+  if ! mysql -e "GRANT ALL PRIVILEGES ON \`$nc_db\`.* TO '$nc_db_user'@'localhost'; FLUSH PRIVILEGES;"; then
+    warn "$nc_db_user already has required privileges on $nc_db"
+  fi
 }
 configure_db() {
+  provision_success=0
   local db="one_click:${domain}:$(openssl rand -hex 4):$dbuser"
   echo "DB_NAME=$db" >> /etc/one-click/wordpress/$domain/meta.conf
   systemctl enable mariadb --now
@@ -632,7 +620,9 @@ configure_db() {
     info "Creating database user '$dbuser'"
     mysql -e "CREATE USER '$dbuser'@'localhost' IDENTIFIED BY '$dbpass';"
   fi
-  mysql -e "GRANT ALL PRIVILEGES ON \`$db\`.* TO '$dbuser'@'localhost'; FLUSH PRIVILEGES;"
+  if ! mysql -e "GRANT ALL PRIVILEGES ON \`$db\`.* TO '$dbuser'@'localhost'; FLUSH PRIVILEGES;"; then
+    warn "$dbuser already has required privileges on $db"
+  fi
 }
 # ==== Download WP ====
 download_wp() {
@@ -646,20 +636,21 @@ download_wp() {
     cp "$site/wp-config.php" "$site/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
   fi
   mkdir -p "$site"
-  sed -Ei 's/(memory_limit = ).*/\11024M/' /etc/php.ini
+  sed -Ei 's/(memory_limit = ).*/\11024M/' /etc/one-click/php/${domain}/php.ini
   chown "$web_user":"${webserver_user:-${webserver}}" "$site"
   cd "$site" || return
   if [[ ! -f "${site}/wp-config.php" ]]; then
-    $wp_cmd core download  || {
-      warn "WP available in this location."
-    }
+    if ! $wp_cmd core download ; then
+      error "wp core download failed to unpack."
+      return 1
+    fi
   fi
   # ==== Ensure mysqli ====
   vers=$(sed -En '1s/[^.]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
   if [[ "$pkg_mgr" == "apt" ]]; then
-    "$pkg_mgr" -y install php${vers}-mysql php-mysql php-posix || true
+    "$pkg_mgr" -y install php${vers}-mysql php-mysql php-posix 2> /dev/null || true
   else
-    "$pkg_mgr" -y install php-mysqlnd php-posix || true
+    "$pkg_mgr" -y install php-mysqlnd php-posix 2> /dev/null || true
   fi
   # ==== Configure WP ====
   $wp_cmd config create \
@@ -677,7 +668,7 @@ install_wp() {
       --title="$title" \
       --admin_user="$admin" \
       --admin_password="$pass" \
-      --admin_email="$email"
+      --admin_email="$email" 2> /dev/null
   fi
 }
 # ==== Harden ====
@@ -722,7 +713,7 @@ wp_plugins() {
     # ==== Install Redis ====
     if [[ "$pkg_mgr" == "apt" ]]; then
       $pkg_mgr install -y redis-server php-redis
-      $pkg_mgr -y install redis || $pkg_mgr install -y valkey 
+      $pkg_mgr -y install redis || $pkg_mgr install -y valkey
       systemctl enable redis-server --now > /dev/null || systemctl enable --now valkey > /dev/null
       local service="redis-${domain}"
       redis_conf="/etc/redis/redis.conf"
@@ -762,7 +753,6 @@ wp_plugins() {
         for red in /usr/bin/valkey-*; do
           cp -f $red /usr/bin/redis-${red##*-}
         done
-        #cp -f /usr/bin/valkey-cli /usr/bin/redis-cli
       fi
     fi
     # ==== Configure Redis ====
@@ -813,6 +803,20 @@ EOF
 # ==== REDIS ====
 setup_redis() {
   local domain="$1"
+  if [[ -d /run/valkey ]]; then
+    sock="/run/valkey/redis-${domain}.sock"
+    readpath=/run/valkey/
+    redis_user=valkey
+    redis_dir=valkey
+    for red in /usr/bin/valkey-*; do
+      cp -f $red /usr/bin/redis-${red##*-}
+    done
+  else
+    sock="/run/redis/redis-${domain}.sock"
+    readpath=/run/redis/
+    redis_user=redis
+    redis_dir=redis
+  fi
   if ! command -v redis-server > /dev/null; then
     redis_execstart=/usr/bin/valkey-server
     conf="/etc/valkey/one-click/${domain}.conf"
@@ -843,6 +847,11 @@ maxmemory-policy allkeys-lru
 daemonize no
 supervised systemd
 EOF
+  if [[ -f /etc/one-click/nextcloud/${domain}/www/config/config.php ]]; then
+    sed -Ei.oc_bak "/^    'port' => 0,/ {p;s,port.*,password' => '$redis_pw'\,,};" /etc/one-click/nextcloud/${domain}/www/config/config.php
+  else
+    echo "$redis_pw" > /tmp/nc_redis
+  fi
 }
 redis_service() {
   local domain="$1"
@@ -914,7 +923,7 @@ redis_menu() {
       4)
         echo -e "${cyan}--- Last 20 lines of logs for $domain ---${reset}"
         journalctl -u "$instance_service" -n 20 --no-pager
-        read -p "Press Enter to continue..."
+        read -p "Press Enter to continue."
         ;;
       5) nano "$instance_conf" && systemctl restart "$instance_service" ;;
       6)
@@ -940,11 +949,12 @@ redis_menu() {
 }
 # ==== WP Staging ====
 wp_staging() {
+  provision_success=0
   prod="/etc/one-click/wordpress/$domain/"
   stage="/etc/one-click/wordpress/staging/$domain"
   db_user=$(sed -En "/DB_USER/s/^[^)]*'([^']*)'.*/\1/p" "$prod/wp-config.php")
   db_pass=$(sed -En "/DB_PASSWORD/s/^[^)]*'([^']*)'.*/\1/p" "$prod/wp-config.php")
-  local wp_cmd="sudo -u $web_user /usr/local/bin/wp --path=$stage/www"
+  local wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$stage/www"
   info "Creating staging environment"
   mkdir -p "$stage"
   rsync -a "$prod/" "$stage/"
@@ -963,9 +973,9 @@ wp_staging() {
       read -rp "${cyan}[USER]${reset} Enter choice [1-3]: " choice
       case "$choice" in
         1)
-          echo "Dropping existing database..."
+          echo "Dropping existing database."
           mysql -e "DROP DATABASE $stage_db;"
-          echo "Creating new database..."
+          echo "Creating new database."
           mysql -e "CREATE DATABASE $stage_db;"
           break
           ;;
@@ -997,7 +1007,7 @@ wp_staging_push() {
   create_rollback_snapshot "$domain" "wordpress"
   prod="/etc/one-click/wordpress/$domain"
   stage="/etc/one-click/wordpress/staging/$domain"
-  local wp_cmd="sudo -u $web_user /usr/local/bin/wp --path=$prod/www"
+  local wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$prod/www"
   printf '%s\n' "$(tput setaf 165)[PUSH}${reset} Deploying staging to production"
   rsync -a --delete "$stage/" "$prod/"
   cd "$prod"
@@ -1009,15 +1019,15 @@ staging_vhost_nginx() {
   local domain stage_root
   domain="$1"
   stage_root="/etc/one-click/wordpress/staging/$domain"
-  mkdir -p /var/log/nginx/${domain}_staging
+  mkdir -p /var/log/one-click/${domain}/nginx
   cat > "/etc/nginx/conf.d/staging.$domain.conf" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name staging.$domain;
 
-    access_log /var/log/nginx/${domain}_staging/access.log oneclick;
-    error_log /var/log/nginx/${domain}_staging/error.log warn;
+    access_log /var/log/one-click/${domain}/nginx/staging_access.log oneclick;
+    error_log /var/log/one-click/${domain}/nginx/staging_error.log warn;
 
     root $stage_root;
     index index.php index.html;
@@ -1055,16 +1065,16 @@ default_nginx() {
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    
+
     server_name _;
-    
-    return 444; 
+
+    return 444;
 }
 
 server {
     listen 443 default_server ssl;
     listen [::]:443 default_server ssl;
-    
+
     server_name _;
 
     ssl_certificate /etc/ssl/certs/ssl-cert-default_site.pem;
@@ -1110,8 +1120,8 @@ staging_vhost_apache() {
         SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
     </FilesMatch>
 
-    ErrorLog ${apache_log_dir}/$domain-error.log
-    CustomLog ${apache_log_dir}/$domain-access.log combined
+    ErrorLog ${apache_log_dir}/error.log
+    CustomLog ${apache_log_dir}/access.log combined
 
 </VirtualHost>
 EOF
@@ -1150,7 +1160,7 @@ wp_menu() {
   map_file="$config_dir/domain_map.conf"
   current_profile_file="$config_dir/current_profile"
   site="/etc/one-click/wordpress/$domain/www"
-  wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
+  wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$site"
   mkdir -p "$config_dir" && touch "$map_file" "$profiles_file"
   wp_submenu "$domain"
 }
@@ -1179,12 +1189,12 @@ wp_submenu() {
       3) wp_backup "$domain"         ;;
       4)
         resolve_profile "$domain"
-        wp_restore_int "$domain"    ;;
-      5) wp_staging_menu "$domain"  ;;
-      6) wp_rollback_menu "$domain" ;;
-      7) wp_staging_push "$domain"  ;;
-      8) delete_site "$domain"      ;;
-      9) wp_magic_login "$domain"   ;;
+        wp_restore_int "$domain"     ;;
+      5) wp_staging_menu "$domain"   ;;
+      6) wp_rollback_menu "$domain"  ;;
+      7) wp_staging_push "$domain"   ;;
+      8) delete_site "$domain"       ;;
+      9) wp_magic_login "$domain"    ;;
       10) web_logs                   ;;
       0) echo "Exiting..."
         ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
@@ -1254,6 +1264,7 @@ install_webserver() {
     mode_ver="sites"
   fi
   site_dir="${3:-}"
+  mkdir -p "/var/log/one-click/${domain}/${webserver}/"
   if [[ "$pkg_mgr" == "apt" ]]; then
     if [[ "$webserver" == "nginx" ]]; then
       if (systemctl is-active apache2 || systemctl is-active httpd) > /dev/null; then
@@ -1289,9 +1300,9 @@ EOF
         default_nginx
       fi
       if [[ "$mode" == "nextcloud" ]]; then
-        nc_nginx_conf "$enable_hsts"
+        nc_nginx_conf "${enable_hsts:-}"
       else
-        nginx_conf
+        nginx_conf "${enable_hsts:-}"
       fi
     else
       if systemctl is-active nginx > /dev/null; then
@@ -1299,10 +1310,12 @@ EOF
       fi
       "$pkg_mgr" install -y apache2 libapache2-mod-php
       if [[ "$mode" == "wordpress" ]]; then
-        apache_conf
+        apache_conf "${enable_hsts:-}"
         apache_ssl_conf
-      else 
-        apache_static_conf "$domain" "$site_dir"
+      elif [[ "$mode" == "nextcloud" ]]; then
+        nc_apache_conf "${enable_hsts:-}"
+      else
+        apache_static_conf "$domain" "$site_dir" "${enable_hsts:-}"
       fi
       a2ensite "${domain}.conf"
       #a2ensite "$domain-le-ssl.conf"
@@ -1314,15 +1327,12 @@ EOF
       fi
       "$pkg_mgr" install -y nginx
       if [[ "$mode" == "wordpress" ]]; then
-        nginx_conf
+        nginx_conf "${enable_hsts:-}"
       elif [[ "$mode" == "nextcloud" ]]; then
-        nc_nginx_conf "$enable_hsts"
+        nc_nginx_conf "${enable_hsts:-}"
         sed -Ei "/^types \{/ {n;p;s/[[:alpha:]]+[^ \t]*([ \t]+).*/text\/javascript\1mjs;/}" /etc/nginx/mime.types
-      #else
-      #  nginx_conf
-      #fi
       else
-        nginx_static_conf "$domain" "$site_dir"
+        nginx_static_conf "$domain" "$site_dir" "${enable_hsts:-}"
       fi
     else
       if systemctl is-active nginx > /dev/null; then
@@ -1330,12 +1340,14 @@ EOF
       fi
       "$pkg_mgr" install -y httpd php php-fpm
       if [[ "$mode" == "wordpress" ]]; then
-        apache_conf
+        apache_conf "${enable_hsts:-}"
         apache_ssl_conf
-      else 
-        apache_static_conf "$domain" "$site_dir"
+      elif [[ "$mode" == "nextcloud" ]]; then
+        nc_apache_conf "${enable_hsts:-}"
+      else
+        apache_static_conf "$domain" "$site_dir" "${enable_hsts:-}"
       fi
-      httpd -t
+      #httpd -t
     fi
   fi
   return 0
@@ -1381,15 +1393,17 @@ install_php_mods() {
 }
 # ==== Nginx ====
 nginx_conf() {
+  enable_hsts="${1:-}"
+  mkdir -p /var/log/one-click/${domain}/nginx
   if [[ "$pkg_mgr" == "apt" ]]; then
     nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   else
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   fi
   echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
-  mkdir -p /var/log/nginx/${domain}
+  mkdir -p /var/log/one-click/${domain}/nginx
   cat << EOF > "$nginx_conf_file"
 server {
     listen 80;
@@ -1399,8 +1413,8 @@ server {
     root /etc/one-click/$mode_ver/$domain/www;
     index index.php index.html;
 
-    access_log /var/log/nginx/${domain}/access.log oneclick;
-    error_log /var/log/nginx/${domain}/error.log warn;
+    access_log /var/log/one-click/${domain}/nginx/access.log oneclick;
+    error_log /var/log/one-click/${domain}/nginx/error.log warn;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$args;
@@ -1429,22 +1443,29 @@ EOF
     fi
     find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
   done
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -Ei '
+     N;/add_header.*\n$/ {
+    p;s/add_header.*\n/add_header Strict-Transport-Security "max-age=15552000; includeSubDomains; preload" always;/;
+    }' "$nginx_conf_file"
+  fi
   nginx -t
   systemctl enable nginx --now
   systemctl reload nginx
 }
 # ==== NextCloud Nginx Conf ====
 nc_nginx_conf() {
-  enable_hsts=$1
+  enable_hsts="${1:-no}"
+  mkdir -p /var/log/one-click/${domain}/nginx
   if [[ "$pkg_mgr" == "apt" ]]; then
     nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   else
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   fi
   echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
-  mkdir -p /var/log/nginx/${domain}
+  mkdir -p /var/log/one-click/${domain}/nginx
   cat << EOF > "$nginx_conf_file"
 server {
     listen 80;
@@ -1478,7 +1499,7 @@ server {
         location ^~ /.well-known/caldav    { return 301 https://\$host/remote.php/dav/; }
         location ^~ /.well-known/webfinger { return 301 https://\$host/index.php/.well-known/webfinger; }
         location ^~ /.well-known/nodeinfo  { return 301 https://\$host/index.php/.well-known/nodeinfo; }
-        
+
         try_files \$uri \$uri/ /index.php\$request_uri;
     }
 
@@ -1493,7 +1514,7 @@ server {
     location ^~ /ocm-provider/ {
         try_files \$uri \$uri/ /index.php\$request_uri;
     }
-    
+
     location ^~ /ocs-provider/ {
         try_files \$uri \$uri/ /index.php\$request_uri;
     }
@@ -1507,13 +1528,13 @@ server {
         include fastcgi_params;
         fastcgi_split_path_info ^(.+?\\.php)(\/.*)\$;
         try_files \$fastcgi_script_name =404;
-        
+
         fastcgi_pass unix:/run/one-click/${domain}/php.sock;
         fastcgi_index index.php;
-        
+
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param PATH_INFO \$fastcgi_path_info;
-        
+
         fastcgi_intercept_errors on;
         fastcgi_request_buffering off;
     }
@@ -1522,14 +1543,14 @@ server {
       fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
       set \$path_info \$fastcgi_path_info;
       try_files \$fastcgi_script_name =404;
-    
+
       include fastcgi_params;
       fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
       fastcgi_param PATH_INFO \$path_info;
       fastcgi_param HTTPS on;
       fastcgi_param modHeadersAvailable true;
       fastcgi_param front_controller_active true;
-    
+
       fastcgi_pass unix:/run/one-click/${domain}/php.sock;
       fastcgi_intercept_errors on;
       fastcgi_request_buffering off;
@@ -1562,8 +1583,92 @@ EOF
   systemctl enable nginx --now
   systemctl reload nginx
 }
+# ==== NextCloud Apache Conf ====
+nc_apache_conf() {
+  local enable_hsts="${1:-no}"
+  if [[ "$pkg_mgr" == "apt" ]]; then
+    apache_confi="/etc/apache2/sites-available/$domain.conf"
+    apache_log_dir="/var/log/one-click/${domain}/apache2"
+    mkdir -p /var/log/one-click/${domain}/apache2
+  else
+    apache_confi="/etc/httpd/conf.d/$domain.conf"
+    apache_log_dir="/var/log/one-click/${domain}/httpd"
+    mkdir -p /var/log/one-click/${domain}/httpd
+  fi
+  echo "VHOST=$apache_confi" >> "/etc/one-click/${mode_ver}/${domain}/meta.conf"
+  mkdir -p "/run/one-click/${domain}"
+  mkdir -p "$apache_log_dir"
+  chown -R www-data:www-data "/run/one-click/${domain}" 2>/dev/null || true
+  if command -v a2enmod &>/dev/null; then
+    a2enmod proxy proxy_fcgi rewrite headers env dir mime &>/dev/null || true
+  fi
+  cat << EOF > "$apache_confi"
+<VirtualHost *:80>
+    ServerName $domain
+    ServerAlias www.$domain
+
+    DocumentRoot /etc/one-click/$mode_ver/$domain/www
+
+    <Directory /etc/one-click/${mode_ver}/${domain}/www>
+        Options +FollowSymlinks -Indexes
+        AllowOverride All
+        Require all granted
+
+        <IfModule mod_dav.c>
+            Dav off
+        </IfModule>
+
+        SetEnv HOME /etc/one-click/${mode_ver}/${domain}/www
+        SetEnv HTTP_HOME /etc/one-click/${mode_ver}/${domain}/www
+    </Directory>
+
+    <FilesMatch "\.php$">
+        SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
+    </FilesMatch>
+
+    Header always set Referrer-Policy "no-referrer"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Permitted-Cross-Domain-Policies "none"
+    Header always set X-Robots-Tag "noindex, nofollow"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set X-Download-Options "noopen"
+
+    RewriteEngine On
+    RewriteRule ^/\.well-known/carddav /remote.php/dav/ [R=301,L]
+    RewriteRule ^/\.well-known/caldav /remote.php/dav/ [R=301,L]
+    RewriteRule ^/\.well-known/webfinger /index.php/.well-known/webfinger [R=301,L]
+    RewriteRule ^/\.well-known/nodeinfo /index.php/.well-known/nodeinfo [R=301,L]
+
+    ErrorLog ${apache_log_dir}/error.log
+    CustomLog ${apache_log_dir}/access.log combined
+</VirtualHost>
+EOF
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -i '/Header always set X-Download-Options/a \    Header always set Strict-Transport-Security "max-age=15552000; includeSubDomains; preload"' "$apache_confi"
+  fi
+  if [[ "$pkg_mgr" == "apt" && -d /etc/apache2/sites-available ]]; then
+    ln -sf "/etc/apache2/sites-available/$domain.conf" "/etc/apache2/sites-enabled/$domain.conf"
+  fi
+  if command -v systemctl &>/dev/null; then
+    if [[ "$pkg_mgr" == "apt" ]]; then
+      apachectl configtest
+      systemctl reload apache2
+    else
+      if ! systemctl is-active httpd &> /dev/null; then
+        systemctl start httpd 2> /dev/null
+        apachectl configtest
+        systemctl reload httpd
+      else
+        apachectl configtest
+        systemctl reload httpd
+      fi
+    fi
+  fi
+}
 # ==== Apache ====
 apache_conf() {
+  enable_hsts="${1:-}"
   if [[ "$mode" == "static" ]]; then
     mode="sites"
   fi
@@ -1574,9 +1679,11 @@ apache_conf() {
   fi
   echo "VHOST=$apache_confi" >> /etc/one-click/${mode_ver}/${domain}/meta.conf
   if [[ -d /etc/apache2 ]]; then
-    apache_log_dir="/var/log/apache2"
+    apache_log_dir="/var/log/one-click/${domain}/apache2"
+    mkdir -p /var/log/one-click/${domain}/apache2
   else
-    apache_log_dir="/var/log/httpd"
+    apache_log_dir="/var/log/one-click/${domain}/httpd"
+    mkdir -p /var/log/one-click/${domain}/httpd
   fi
   cat << EOF > "$apache_confi"
 <VirtualHost *:80>
@@ -1595,11 +1702,14 @@ apache_conf() {
         SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
     </FilesMatch>
 
-    ErrorLog ${apache_log_dir}/$domain-error.log
-    CustomLog ${apache_log_dir}/$domain-access.log combined
+    ErrorLog ${apache_log_dir}/error.log
+    CustomLog ${apache_log_dir}/access.log combined
 </VirtualHost>
 EOF
   install_php_mods
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -i '/Header always set X-Download-Options/a \    Header always set Strict-Transport-Security "max-age=15552000; includeSubDomains; preload"' "$apache_confi"
+  fi
 }
 apache_ssl_conf() {
   if [[ "$pkg_mgr" == "apt" ]]; then
@@ -1626,8 +1736,8 @@ apache_ssl_conf() {
         SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
     </FilesMatch>
 
-    ErrorLog ${apache_log_dir}/$domain-ssl-error.log
-    CustomLog ${apache_log_dir}/$domain-ssl-access.log combined
+    ErrorLog ${apache_log_dir}/error.log
+    CustomLog ${apache_log_dir}/access.log combined
 </VirtualHost>
 </IfModule>
 EOF
@@ -1639,10 +1749,10 @@ EOF
 webroot_nginx_template() {
   if [[ "$pkg_mgr" == "apt" ]]; then
     nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   else
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   fi
   sed -Ei '/listen (\[::\]:)?80;|^\}/d;' "$nginx_conf_file"
   cat << EOF >> "$nginx_conf_file"
@@ -1683,18 +1793,18 @@ start_screen() {
     default_site="ONE-CLICK NEXTCLOUD INSTALLER"
     site=nextcloud
     wp_title=$(cat <<'EOF'
-  ___                    ____ _ _      _    
+  ___                    ____ _ _      _
  / _ \ _ __   ___       / ___| (_) ___| | __
 | | | | '_ \ / _ \_____| |   | | |/ __| |/ /
-| |_| | | | |  __/_____| |___| | | (__|   < 
+| |_| | | | |  __/_____| |___| | | (__|   <
  \___/|_| |_|\___|      \____|_|_|\___|_|\_\
-                                            
- _   _           _    ____ _                 _ 
+
+ _   _           _    ____ _                 _
 | \ | | _____  _| |_ / ___| | ___  _   _  __| |
 |  \| |/ _ \ \/ / __| |   | |/ _ \| | | |/ _` |
 | |\  |  __/>  <| |_| |___| | (_) | |_| | (_| |
 |_| \_|\___/_/\_\\__|\____|_|\___/ \__,_|\__,_|
-                                               
+
 EOF
   )
   else
@@ -1762,7 +1872,7 @@ install_letsencrypt() {
       else
         site="/etc/one-click/sites/$domain/www"
       fi
-      wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
+      wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$site"
       webserver=$(awk -F'"' '/:80|:443/ {print $2}' <(ss -taulpn) | uniq)
       email=$($wp_cmd option get admin_email || true)
     fi
@@ -1774,7 +1884,7 @@ install_letsencrypt() {
     done
   fi
   while true; do
-    info "Starting Let's Encrypt SSL setup..."
+    info "Starting Let's Encrypt SSL setup."
     if ! dns_check; then
       warn "DNS does not point to this server."
       echo "  $domain -> $dns"
@@ -1834,12 +1944,14 @@ install_letsencrypt() {
           fi
           ;;
         2)
+          le=1
           while true; do
             read -rp "${cyan}[USER]${blue} Enter new email: " email
             [[ -n "$email" ]] && break
           done                                       ;;
         3) warn "Skipping SSL setup."; return        ;;
         4)
+          le=0
           info "Installing self signed certificate"
           if [[ -d "/etc/one-click/wordpress/${domain}" ]]; then
             dir="/etc/one-click/wordpress/$domain"
@@ -1888,23 +2000,34 @@ install_letsencrypt() {
             "  "$nginx_conf_file"
           else
             if [[ "$pkg_mgr" == "apt" ]]; then
-              ssl_apache_conf=/etc/apache2/sites-available/$domain-le-ssl.conf
+              ssl_apache_conf=/etc/apache2/sites-available/$domain.conf
               apachehttpd=apache2
             elif [[ "$pkg_mgr" == "dnf" ]]; then
-              ssl_apache_conf=/etc/httpd/conf.d/$domain-le-ssl.conf
+              ssl_apache_conf=/etc/httpd/conf.d/$domain.conf
               apachehttpd=httpd
             fi
-            sed -Ei.oneclick-bak "
-              /DocumentRoot/ {
-                h;
-                n;
-                G;
-                s,D.*,SSLEngine on\n    SSLCertificateFile ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key\n,
-              }
-            " "$ssl_apache_conf"
+            sed -i.oneclick-bak "
+                1,\$H;
+                \$ G;
+                1! s/:80/:443/
+              " "$ssl_apache_conf" | \
+                sed -E "/443/,$ {
+                  /Document/ {
+                    p;
+                    s,D.*,SSLEngine on\n    SSLCertificateFile ${cert_dir}/${domain}-oneclick_selfsigned-fullchain.pem\n    SSLCertificateKeyFile ${cert_dir}/${domain}-oneclick_selfsigned-privkey.key\n,
+                  };
+                  /:443/ {
+                    s/$/\t# Managed by One-Click/;
+                  }
+               }
+            " > /tmp/$domain}.conf
+            mv -f "/tmp/$domain}.conf" "$ssl_apache_conf"
           fi
           if systemctl reload "$apachehttpd" 2> /dev/null; then
             success "Self signed certificate installed"
+          else
+            error "One-Click has encountered an error while applying the self-signed certificate"
+            return 1
           fi
           read -p "Click Enter to exit: "
           return
@@ -1914,7 +2037,9 @@ install_letsencrypt() {
       esac
     fi
   done
-  letsencrypt_autorenew
+  if [[ "$le" -eq 1 ]]; then
+    letsencrypt_autorenew
+  fi
 }
 letsencrypt_autorenew() {
   info "Configuring Let's Encrypt auto-renewal"
@@ -1929,6 +2054,7 @@ run_script() {
   start_screen wordpress
   echo
   php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+  local provision_success=0
   while true; do
     local br=0
     read -rp "${cyan}[USER]${reset} Please provide the domain name you would like to use for this installation: " domain
@@ -2020,7 +2146,7 @@ run_script() {
   site="/etc/one-click/wordpress/$domain/www"
   mkdir -p "$site"
   touch "${site}/meta.conf"
-  wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
+  wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$site"
   warn "Creating web owner"
   id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
   echo
@@ -2072,14 +2198,20 @@ run_script() {
       echo "Invalid selection"
       ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1 ;;
   esac
+  read -rp "${cyan}[USER]${blue} Enable HSTS: ${reset}" enable_hsts
+  if [[ "${enable_hsts,,}" =~ ^(y|yes)$ ]]; then
+    enable_hsts="yes"
+  fi
   echo "SITE_USER=$web_user" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_DIR=$site" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "SITE_GROUP=$webserver_user" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "WEBSERVER=$webserver" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "DB_PASS=$dbpass" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "DB_USER=$dbuser" >> /etc/one-click/wordpress/$domain/meta.conf
+  echo "DB_ENABLED=true" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "TYPE=wordpress" >> /etc/one-click/wordpress/$domain/meta.conf
   echo "WEBSERVER_SERVICE=$webserver" >> /etc/one-click/wordpress/$domain/meta.conf
+
   # ==== Selection Summary Confirmation ====
   [[ "$enable_redis" == "n" ]] && redis=No || redis=Yes
   [[ "$enable_staging" == "n" ]] && staging_status=No || staging_status=Yes
@@ -2109,6 +2241,7 @@ run_script() {
     warn "Deployment cancelled"
     exit 1
   fi
+  trap "cleanup_failed_provision  $provision_success wordpress" EXIT INT TERM ERR
   # ==== Install Dependancies ====
   if [[ "$proceed" == "y" || "$proceed" == "yes" ]]; then
     info "Updating System"
@@ -2130,6 +2263,7 @@ run_script() {
   info "Configuring PHP-FPM"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "wordpress"
   info "Enabling PHP"
+  check_permissions "$domain"
   systemctl enable php-fpm@${domain}.service --now
   info "Confguring MariaDB"
   configure_db
@@ -2160,8 +2294,7 @@ run_script() {
   chown "$web_user":"$webserver_user" /etc/one-click/wordpress/backups
   chown "$web_user":"$webserver_user" /etc/one-click/wordpress/$domain/meta.conf
   # ==== Inject direct perms ====
-  file="/etc/one-click/wordpress/${domain}/wp-config.php"
-  grep -q "ONECLICK_PLATFORM_BOOTSTRAP" "$file" || cat >> "$file" <<'EOF'
+  grep -q "ONECLICK_PLATFORM_BOOTSTRAP" "$dest_config" || cat >> "$dest_config" <<'EOF'
 if ( ! defined('ONECLICK_PLATFORM_BOOTSTRAP') ) {
     define('ONECLICK_PLATFORM_BOOTSTRAP', true);
     define('FS_METHOD', 'direct');
@@ -2170,7 +2303,7 @@ if ( ! defined('ONECLICK_PLATFORM_BOOTSTRAP') ) {
     define('WP_TEMP_DIR', '/var/lib/one-click/ONECLICK-DOMAIN_REPLACE/tmp');
 }
 EOF
-  sed -i "s|ONECLICK-DOMAIN_REPLACE|$domain|g" "$file"
+  sed -i "s|ONECLICK-DOMAIN_REPLACE|$domain|g" "$dest_config"
   # ==== Open Firewall ====
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver" -y
@@ -2190,6 +2323,8 @@ EOF
   info "Fixing permissions"
   sleep 1
   check_permissions "$domain"
+  provision_success=1
+  trap - EXIT INT TERM ERR
   success "One-Click Wordpress has now been installed!"
   if [[ "$enable_staging" =~ ^[y|Y|yes|Yes]$ ]]; then
     wp_staging_enable "$domain"
@@ -2204,7 +2339,7 @@ wp_plugin_manager() {
   site_dir="$base_dir/www"
   config_file="$base_dir/wp-config.php"
   web_user=$(get_site_user $domain)
-  wp_cmd="sudo -u "$web_user" /usr/local/bin/wp --path=$site"
+  wp_cmd="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M /usr/local/bin/wp --path=$site"
   [[ ! -f "$config_file" ]] && { error "wp-config.php not found at $config_file"; return 1; }
   cd "$site_dir" || return 1
   while true; do
@@ -2242,10 +2377,10 @@ wp_plugin_manager() {
           slug=$(echo "$selected" | cut -d',' -f1)
           status=$(echo "$selected" | cut -d',' -f2)
           if [[ "$status" == "active" ]]; then
-            info "Deactivating $slug..."
+            info "Deactivating $slug."
             $wp_cmd plugin deactivate "$slug"
           else
-            info "Activating $slug..."
+            info "Activating $slug."
             $wp_cmd plugin activate "$slug"
           fi
         elif [[ "$choice" == "0" ]]; then
@@ -2256,7 +2391,7 @@ wp_plugin_manager() {
         ;;
       2)
         read -rp "${cyan}[USER]${blue} Search for plugin: " search_term
-        info "Searching WordPress.org..."
+        info "Searching WordPress.org."
         mapfile -t slugs < <($wp_cmd plugin search "$search_term" --field=slug --per-page=20)
         if [[ ${#slugs[@]} -eq 0 ]]; then
           error "No plugins found for '$search_term'"
@@ -2276,7 +2411,7 @@ wp_plugin_manager() {
         read -rp "${cyan}[USER]${blue} Select ID to install (0 to cancel): " s_choice
         if [[ "$s_choice" =~ ^[0-9]+$ ]] && (( s_choice >= 1 && s_choice <= ${#slugs[@]} )); then
           local selected_slug="${slugs[$((s_choice-1))]}"
-          info "Installing $selected_slug..."
+          info "Installing $selected_slug."
           $wp_cmd plugin install "$selected_slug" --activate
         elif [[ "$s_choice" == "0" ]]; then
           info "Installation cancelled."
@@ -2288,7 +2423,7 @@ wp_plugin_manager() {
         $wp_cmd plugin update --all
         ;;
       4)
-        info "Fetching installed plugins..."
+        info "Fetching installed plugins."
         mapfile -t installed < <($wp_cmd plugin list --field=name)
         echo -e "\n\e[34m╔════╦══════════════════════════════════════════════════╗\e[0m"
         echo -e "\e[34m║ ${magenta}ID${blue} ║ ${yellow}Installed Plugin Name (Slug) ${blue}                    ║\e[0m"
@@ -2352,7 +2487,7 @@ wp_magic_login() {
     echo "$url"
     return
   fi
-  warn "No valid link found, generating new one..."
+  warn "No valid link found, generating new one."
   wp_generate_magic_link "$domain"
 }
 get_site_user() {
@@ -2364,7 +2499,16 @@ get_site_user() {
 }
 check_permissions() {
   local domain="$1"
-  . "/etc/one-click/${mode_ver:-${type:-}}/${domain}/meta.conf" &> /dev/null || . "/etc/one-click/apps/nodejs/${domain}/meta.conf" &> /dev/null
+  if [[ -d "/etc/one-click/${mode_ver:-${type:-}}" ]]; then
+    if [[ -f "/etc/one-click/${mode_ver:-${type:-}}/${domain}/meta.conf" ]]; then
+      . "/etc/one-click/${mode_ver:-${type:-}}/${domain}/meta.conf" &> /dev/null
+    fi
+  fi
+  if [[ -d /etc/one-click/apps/nodejs/ ]]; then
+    if [[ -f /etc/one-click/apps/nodejs/${domain}/meta.conf ]]; then
+      . "/etc/one-click/apps/nodejs/${domain}/meta.conf" &> /dev/null
+    fi
+  fi
   local site_dir="$SITE_DIR"
   local secrets_dir="/etc/one-click/db-manager/secrets/db/${domain}.pass"
   local registry_dir="/etc/one-click/db-manager/sites/${domain}.json"
@@ -2375,7 +2519,7 @@ check_permissions() {
     return 1
   }
   printf "${orange}[Scanning:]${reset} %s\n" "$site_dir"
-  echo
+  echo "${lime} THIS MAY TAKE A WHILE! PLEASE WAIT...${reset}"
   local bad=0
   local fixed=0
   local checked=0
@@ -2497,7 +2641,7 @@ app_generate_systemd() {
   root="$(app_runtime_path "$runtime" "$domain")"
   local port; port="$(jq -r '.port' "${root}/runtime.json")"
   local user; user="$(jq -r '.user' "${root}/runtime.json")"
-  local node_path; node_path="$(jq -r '.node_path' "${root}/runtime.json")"  
+  local node_path; node_path="$(jq -r '.node_path' "${root}/runtime.json")"
   local entry_point
   if [[ -f "${root}/app/package.json" ]]; then
     entry_point="$(jq -r '.main // "index.js"' "${root}/app/package.json")"
@@ -2505,7 +2649,7 @@ app_generate_systemd() {
   else
     entry_point="index.js"
   fi
-  local service="one-click-${runtime}-${domain}.service"  
+  local service="one-click-${runtime}-${domain}.service"
   echo "SYSTEMD_ENABLED=true" >> /etc/one-click/apps/nodejs/$domain/meta.conf
   echo "SYSTEMD_VHOST=/etc/systemd/system/${service}" >> /etc/one-click/apps/nodejs/$domain/meta.conf
   echo "SYSTEMD_SERVICE_NAME=${service//.*}" >> /etc/one-click/apps/nodejs/$domain/meta.conf
@@ -2528,8 +2672,8 @@ ExecStart=${node_path} ${entry_point}
 
 Restart=always
 RestartSec=5
-StandardOutput=append:${root}/logs/app.log
-StandardError=append:${root}/logs/error.log
+StandardOutput=append:/var/log/one-click/${domain}/apps/${runtime}/app.log
+StandardError=append:/var/log/one-click/${domain}/apps/${runtime}/error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -2632,7 +2776,7 @@ app_status() {
 app_logs() {
   local runtime="$1"
   local domain="$2"
-  local app_log_dir="/var/log/one-click/apps/${runtime}/${domain}"
+  local app_log_dir="/var/log/one-click/${domain}/apps/${runtime}"
   local root
   root="$(app_runtime_path "$runtime" "$domain")"
   tail -F \
@@ -2641,7 +2785,7 @@ app_logs() {
 }
 ensure_isolated_nodejs() {
   local root="$1"
-  local node_version="v20.11.1"
+  node_version=$(curl -s https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version')
   echo "NODE_VERSION=$node_version" >> /etc/one-click/apps/nodejs/$domain/meta.conf
   local arch
   arch=$(uname -m)
@@ -2654,7 +2798,7 @@ ensure_isolated_nodejs() {
   if [[ -x "${node_dir}/bin/node" && -x "${node_dir}/bin/npm" ]]; then
     return 0
   fi
-  info "Installing Node.js (${node_version})..."
+  info "Installing Node.js (${node_version})."
   mkdir -p "$node_dir"
   local tarball="node-${node_version}-linux-${arch}.tar.xz"
   local url="https://nodejs.org/dist/${node_version}/${tarball}"
@@ -2666,6 +2810,7 @@ ensure_isolated_nodejs() {
 app_create_nodejs() {
   local git_repo="${1:-}"
   local runtime="nodejs"
+  local provision_success=0
   local php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
   while true; do
     br=0
@@ -2713,6 +2858,10 @@ app_create_nodejs() {
       ;;
     *) error "Invalid selection"; return 1 ;;
   esac
+  read -rp "${cyan}[USER]${blue} Enable HSTS: ${reset}" enable_hsts
+  if [[ "${enable_hsts,,}" =~ ^(y|yes)$ ]]; then
+    enable_hsts="yes"
+  fi
   if app_exists "$runtime" "$domain"; then
     warn "Application already exists."
     return 1
@@ -2722,10 +2871,11 @@ app_create_nodejs() {
   root="$(app_runtime_path "$runtime" "$domain")"
   local user
   user="$(app_create_user "$domain")"
-  if [[ ! $(sed -En '/# One-Click Routing/p' /etc/hosts) == "# One-Click Routing" ]]; then
+  if [[  $(sed -En '/# One-Click Routing/p' /etc/hosts) != "# One-Click Routing" ]]; then
     echo "# One-Click Routing" >> /etc/hosts
-  elif [[ ! $(cat /etc/hosts) =~ 127.0.0.1.*"$domain" ]]; then
-    sed -Ei.one-click_bak -e "/# One-Click/{a\127.0.0.1\t${domain}" -e '}' /etc/hosts
+    echo -e "${ip}\t${host}" >> /etc/hosts
+  elif ! grep -q "$host" /etc/hosts; then
+    sed -Ei.one-click_bak -e "/# One-Click/{a\ ${ip}\t${host}" -e '}' /etc/hosts
   fi
   echo -e "HOSTS_ENTRY=\"127.0.0.1\t${domain}\"" >> "${app_dir}/${runtime}/${domain}/meta.conf"
   warn "Creating app owner $user"
@@ -2739,13 +2889,14 @@ app_create_nodejs() {
   echo "APP_DIR=$app_dir" >> "${app_dir}/${runtime}/${domain}/meta.conf"
   echo "SITE_DIR=$root" >> "${app_dir}/${runtime}/${domain}/meta.conf"
   echo "TYPE=$runtime" >> /etc/one-click/apps/nodejs/$domain/meta.conf
-  info "Creating Node.js application..."
+  info "Creating Node.js application."
   local port
   port="$(app_allocate_port)"
   if [[ -z "$port" ]]; then
     error "Failed to allocate port."
     return 1
   fi
+  trap "cleanup_failed_provision  $provision_success app/nodejs" EXIT INT TERM ERR
   echo "PORT=$port" >> "${app_dir}/${runtime}/${domain}/meta.conf"
   echo "SYSTEMD_VHOST=one-click-${runtime}-${domain}.service" >> "${app_dir}/${runtime}/${domain}/meta.conf"
   app_create_directories "$runtime" "$domain"
@@ -2757,7 +2908,7 @@ app_create_nodejs() {
     mkdir -p "${root}/app"
   fi
   if [[ ! -f "${root}/app/package.json" ]]; then
-    info "No package.json found. Creating a generic default configuration..."
+    info "No package.json found. Creating a generic default configuration."
     mkdir -p "${root}/app/public"
     info "Generating default page"
   cat <<'EOF' > "${root}/app/public/index.html"
@@ -2812,7 +2963,7 @@ const server = http.createServer((req, res) => {
         const ext = path.extname(filePath);
         res.writeHead(200, {
             'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-            'X-Content-Type-Options': 'nosniff' 
+            'X-Content-Type-Options': 'nosniff'
         });
 
         res.end(content);
@@ -2837,8 +2988,9 @@ EOF
     app_generate_apache_proxy "$domain" "$port"
   fi
   chown -R "${user}:${webserver_user}" "$root"
+  install_letsencrypt nodejs
   one-click engine "allow $port" -y
-  info "Running npm install via isolated binary engine..."
+  info "Running npm install via isolated binary engine."
   sudo -u "$user" \
     env PATH="${root}/node_bin/bin:/usr/bin:/bin" \
     HOME="${root}" \
@@ -2858,8 +3010,10 @@ EOF
     "Domain:  $domain" \
     "Runtime: nodejs" \
     "Port:    $port" \
-    "Path:    $root" " " 
+    "Path:    $root" " "
   app_generate_systemd "$runtime" "$domain"
+  provision_success=1
+  trap - EXIT INT TERM ERR
   success "Node.js hosting successfully configured and proxied"
 }
 nodejs_board() {
@@ -2904,8 +3058,9 @@ nodejs_board() {
       "║ ${magenta}8${blue}  ║ ${green}View Service File${blue}                                     ║" \
       "║ ${magenta}9${blue}  ║ ${green}Edit Environment File${blue}                                 ║" \
       "║ ${magenta}10${blue} ║ ${green}Open App Directory${blue}                                    ║" \
-      "║ ${magenta}11${blue} ║ ${green}Backup App  ${blue}                                          ║" \
-      "║ ${magenta}12${blue} ║ ${green}Restore App ${blue}                                          ║" \
+      "║ ${magenta}11${blue} ║ ${green}Delete App  ${blue}                                          ║" \
+      "║ ${magenta}12${blue} ║ ${green}Backup App  ${blue}                                          ║" \
+      "║ ${magenta}13${blue} ║ ${green}Restore App ${blue}                                          ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit  ${blue}                                                ║" \
       "╚════╩═══════════════════════════════════════════════════════╝")
   read -rp "${cyan}[USER]${blue} Select an option [0-12]: " choice
@@ -2928,7 +3083,7 @@ nodejs_board() {
       4)
         clear
         systemctl status "$service"
-        read -rp "${cyan}[USER]${blue} Press enter to continue..."
+        read -rp "${cyan}[USER]${blue} Press enter to continue."
         ;;
       5)
         clear
@@ -2958,16 +3113,14 @@ nodejs_board() {
         cd "${root}" || return 1
         bash
         ;;
-      11)
-        resolve_profile "$domain"
-        static_backup "$domain"
-        ;;
+      11) delete_site "$domain"        ;;
       12)
-        static_restore_int "$domain"
-        ;;
+        resolve_profile "$domain"
+        static_backup "$domain"        ;;
+      13) static_restore_int "$domain" ;;
       0)
         error "Exiting..."
-        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
+        exit 0
         ;;
       *) error "Invalid option" ;;
     esac
@@ -2989,6 +3142,7 @@ apps_menu() {
 create_static_site() {
   local domain site_dir webserver_choice
   start_screen static
+  local provision_success=0
   php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
   while true; do
     local br=0
@@ -3040,6 +3194,7 @@ create_static_site() {
   warn "Creating web owner $web_user"
   id "$web_user" &>/dev/null || useradd -r -s /usr/sbin/nologin "$web_user"
   site_dir="/etc/one-click/sites/$domain/www"
+  trap "cleanup_failed_provision  $provision_success sites" EXIT INT TERM ERR
   mkdir -p "$site_dir"
   touch /etc/one-click/sites/$domain/meta.conf
   echo "SITE_USER=$web_user" >> /etc/one-click/sites/$domain/meta.conf
@@ -3066,6 +3221,10 @@ EOF
     info "Automated crawler can be set up from web-admin at a later time if preferred"
     sleep 1
   fi
+  read -rp "${cyan}[USER]${blue} Enable HSTS: ${reset}" enable_hsts
+  if [[ "${enable_hsts,,}" =~ ^(y|yes)$ ]]; then
+    enable_hsts="yes"
+  fi
   info "Generating default page"
   cat <<'EOF' > "$site_dir/index.html"
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>SiteHUB Default WebPage</title><link rel="icon" type="image/png" href="https://sitehub.agency/wp-content/uploads/2025/06/cropped-Untitled-design-9-e1750161170804.png"><link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box}body,html{height:100%;font-family:'Roboto',sans-serif}body{background:linear-gradient(135deg,#28a745,#003366);display:flex;flex-direction:column;justify-content:space-between;color:#fff}header{text-align:center;padding:50px 20px}header img.logo{height:80px;margin-bottom:20px}header h1{font-size:2.5em;margin-bottom:10px}header p{font-size:1.2em}.visuals{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;z-index:0}.visuals span{position:absolute;display:block;border-radius:50%;background:rgba(255,255,255,.05);animation:float 25s linear infinite}@keyframes float{0%{transform:translateY(0) rotate(0deg)}100%{transform:translateY(-1000px) rotate(720deg)}}main{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:20px;text-align:center}section{margin:50px 0}.main-hero h2{font-size:2em;margin-bottom:15px}.main-hero p{font-size:1.1em;line-height:1.6;margin-bottom:25px}.cta-btn{display:inline-block;background:#fff;color:#003366;font-weight:700;text-decoration:none;padding:12px 25px;border-radius:50px;margin:10px;transition:all .3s ease}.cta-btn:hover{background:#e0e0e0}footer{text-align:center;padding:20px;font-size:.9em;color:rgba(255,255,255,.7)}@media(max-width:768px){header h1{font-size:2em}.main-hero h2{font-size:1.6em}}</style></head><body><div class="visuals" id="visuals"></div><header><img class="logo" src="https://us1.plesk.sitehub.agency/images/logos/6EwrLBBn5Xg.png" alt="SiteHUB"><h1>Default Web Page for <span id="domain-name">dynamic-domain.ng</span></h1><p>This page is generated by <a href="https://sitehub.agency" style="color:darkgreen;text-decoration:none;">Site <span style="color:blue;text-decoration:none;">HUB</span></a>, the leading hosting provider in Nigeria.<br>You see this page because there is no website at this address.</p></header><main id="placeholder-content"></main><footer>Copyright &copy; SiteHUB Agency <span id="year"></span>. All rights reserved - RC6935293</footer><script>document.getElementById("year").textContent=new Date().getFullYear();document.addEventListener("DOMContentLoaded",()=>{const e=location.hostname,t=location.protocol+"//"+e+":8443",n="support@sitehub.agency";document.getElementById("domain-name").textContent=e;const o=document.getElementById("placeholder-content");let a="";a+=`<section class="main-hero"><h2>Your domain <strong>${e}</strong> is now live!</h2><p><strong>${e}</strong> default page has been generated by the One-Click Toolbox Automation tool . No website content has been uploaded yet.<br>For more information about One-Click Toolbox:</p><a class="cta-btn" href="https://github.com/SiteHUB-NG/One-Click/" target="_blank">View On GitHub</a><br><br><br><hr><br><h2>Need Hosting?</h2><p>Start your own website in minutes with our web hosting & VPS plans!</p><a class="cta-btn" href="https://sitehub.agency/shared/" target="_blank">View Web Hosting Plans</a><a class="cta-btn" href="https://features.sitehub.agency/vps/" target="_blank">View VPS Plans</a></section>`,a+=`<section class="main-hero"><h2>Need Help?</h2><p>Contact our support team: <a style="color:#fff;text-decoration:underline;" href="mailto:${n}">${n}</a></p></section>`,o.innerHTML=a;const r=document.getElementById("visuals");for(let t=0;t<30;t++){let n=document.createElement("span"),o=60*Math.random()+20;n.style.width=o+"px",n.style.height=o+"px",n.style.left=100*Math.random()+"%",n.style.top=100*Math.random()+"%",n.style.animationDuration=20+20*Math.random()+"s",r.appendChild(n)}});</script></body></html>
@@ -3080,6 +3239,8 @@ EOF
   wp_backup_scheduler
   check_permissions "$domain"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site "$domain" > /dev/null 2>&1" > /etc/cron.d/one-click_static-web-monitor_$domain
+  provision_success=1
+  trap - EXIT INT TERM ERR
   success "One-Click static site has now been installed for $domain"
   info "Access the site from ${magenta}https://${domain}${reset}"
 }
@@ -3101,14 +3262,14 @@ clone_static_site() {
     return 1
   fi
   # ==== Begin cloning ====
-  info "Creating cloned website directory..."
+  info "Creating cloned website directory."
   mkdir -p "$new_site_dir"
-  info "Copying website files..."
+  info "Copying website files."
   rsync -aHAX --info=progress2 \
     "$old_site_dir/" \
     "$new_site_dir/"
   success "Website files copied successfully."
-  info "Replacing domain references..."
+  info "Replacing domain references."
   find "$new_site_dir" \
     -type f \
     \( \
@@ -3124,7 +3285,7 @@ clone_static_site() {
     -exec sed -i \
       "s/${old_domain//\//\\/}/${new_domain//\//\\/}/g" {} \;
   success "Domain references updated."
-  info "Creating vhost..."
+  info "Creating vhost."
 
   web_user="ocb_$(echo -n "$domain" | sha1sum | cut -c1-8)"
   warn "Creating web owner $web_user"
@@ -3156,12 +3317,14 @@ clone_static_site() {
 nginx_static_conf() {
   local domain="$1"
   local site_dir="$2"
+  local enable_hsts="${3:-}"
+  mkdir -p /var/log/one-click/${domain}/nginx
   if [[ "$pkg_mgr" == "apt" ]]; then
     nginx_conf_file="/etc/nginx/sites-available/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   else
     nginx_conf_file="/etc/nginx/conf.d/$domain.conf"
-    nginx_log_dir="/var/log/nginx"
+    nginx_log_dir="/var/log/one-click/${domain}/nginx"
   fi
   echo "VHOST=$nginx_conf_file" >> /etc/one-click/${mode_ver}/$domain/meta.conf
   cat << EOF > "$nginx_conf_file"
@@ -3199,17 +3362,26 @@ EOF
     fi
     find "$i" -type l -name '*default*' '!' -name 00-default.conf -delete
   done
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -Ei '
+     N;/add_header.*\n$/ {
+    p;s/add_header.*\n/add_header Strict-Transport-Security "max-age=15552000; includeSubDomains; preload" always;/;
+    }' "$nginx_conf_file"
+  fi
   nginx -t && systemctl enable --now nginx
 }
 apache_static_conf() {
   local domain="$1"
   local site_dir="$2"
+  local enable_hsts="${3:-}"
   if [[ "$pkg_mgr" == "apt" ]]; then
     apache_conf_file="/etc/apache2/sites-available/$domain.conf"
-    apache_log_dir="/var/log/apache2"
+    apache_log_dir="/var/log/one-click/${domain}/apache2"
+    mkdir -p /var/log/one-click/${domain}/apache2
   else
     apache_conf_file="/etc/httpd/conf.d/$domain.conf"
-    apache_log_dir="/var/log/httpd"
+    apache_log_dir="/var/log/one-click/${domain}/httpd"
+    mkdir -p /var/log/one-click/${domain}/httpd
   fi
   echo "VHOST=$apache_conf_file" >> /etc/one-click/${mode_ver}/$domain/meta.conf
   cat <<EOF >"$apache_conf_file"
@@ -3228,8 +3400,8 @@ apache_static_conf() {
         SetHandler "proxy:unix:/run/one-click/${domain}/php.sock|fcgi://localhost/"
     </FilesMatch>
 
-    ErrorLog ${apache_log_dir}/$domain-error.log
-    CustomLog ${apache_log_dir}/$domain-access.log combined
+    ErrorLog ${apache_log_dir}/error.log
+    CustomLog ${apache_log_dir}/access.log combined
 </VirtualHost>
 EOF
   install_php_mods
@@ -3246,6 +3418,9 @@ EOF
     else
       systemctl reload httpd
     fi
+  fi
+  if [[ "$enable_hsts" == "yes" ]]; then
+    sed -i '/Header always set X-Download-Options/a \    Header always set Strict-Transport-Security "max-age=15552000; includeSubDomains; preload"' "$apache_confi"
   fi
 }
 static_backup() {
@@ -3284,10 +3459,10 @@ static_backup() {
     backup_role=Backup
   fi
   webserver="$WEBSERVER"
-  info "Archiving files..."
+  info "Archiving files."
   tar -czf "$backup/$timestamp/files.tar.gz" -C "$site" .
   # ==== Save vhost config ====
-  info "Saving webserver configuration..."
+  info "Saving webserver configuration."
   case "$webserver" in
     nginx)
       cp /etc/nginx/sites-available/$domain.conf "$backup/$timestamp/nginx.conf" 2>/dev/null || \
@@ -3363,16 +3538,16 @@ static_restore() {
   [[ -d "$site_dir" ]] || {
     die "Invalid site directory: $site_dir"
   }
-  info "Loading metadata..."
+  info "Loading metadata."
   . "$base/$domain/meta.conf"
   . "$backup_dir/meta.conf"
   . "$backup_dir/manifest.txt"
   # ==== Restore files ====
-  info "Restoring files..."
+  info "Restoring files."
   find "$site_dir" -mindepth 1 -delete
   tar -xzf "$backup_dir/files.tar.gz" -C "$site_dir"
   # ==== Restore webserver ====
-  info "Restoring webserver configuration..."
+  info "Restoring webserver configuration."
   case "$WEBSERVER" in
     nginx)
       webserver_user="$SITE_GROUP"
@@ -3512,6 +3687,7 @@ static_restore_int() {
 }
 ######################################## PHP MANAGER ##########################################
 detect_env() {
+  passed_arg="${1:-}"
   if [[ -f /etc/debian_version ]]; then
     os_family="debian"; pkg_manager="apt-get"
   elif [[ -f /etc/redhat-release ]]; then
@@ -3534,7 +3710,7 @@ detect_env() {
       conf_path="/etc/httpd/conf.d"
       webserver="httpd"
     fi
-  else
+  elif [[ "${passed_arg:-}" != "--monitor" ]]; then
     printf "$red[ERROR]:$reset  %s\n" "No supported webserver detected!"
     ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 1
   fi
@@ -3543,7 +3719,7 @@ view_service_status() {
   systemctl status "$1" --no-pager -l || true
 }
 restart_service() {
-  info "${yellow}Restarting $1...${reset}"
+  info "${yellow}Restarting $1.${reset}"
   systemctl restart "$1"
 }
 toggle_service() {
@@ -3569,7 +3745,7 @@ get_service_state() {
   systemctl is-active "$1" 2>/dev/null || true
 }
 switch_cli_php() {
-  info "Detecting installed PHP CLI versions..."
+  info "Detecting installed PHP CLI versions."
   local php_bins=($(ls /usr/bin/php[0-9].* 2>/dev/null | sort -V))
   if [[ ${#php_bins[@]} -eq 0 ]]; then
     error "No versioned PHP binaries found in /usr/bin/"
@@ -3587,7 +3763,7 @@ switch_cli_php() {
   elif command -v alternatives >/dev/null 2>&1; then
     alternatives --set php "$selected_bin"
   else
-    info "No alternatives manager found. Using manual symlink..."
+    info "No alternatives manager found. Using manual symlink."
     ln -sf "$selected_bin" /usr/bin/php
   fi
   success "CLI is now $(php -v | head -n1)"
@@ -3635,20 +3811,20 @@ switch_site_php() {
 }
 setup_repos() {
   if [[ "${os_family:-}" == "debian" ]]; then
-    info "Ensuring Debian PHP repositories (sury.org)..."
+    info "Ensuring Debian PHP repositories."
     $pkg_mgr update -y && $pkg_mgr install -y lsb-release ca-certificates curl gnupg2
     [[ ! -f /etc/apt/trusted.gpg.d/php.gpg ]] && curl -sSLo /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
     echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
     $pkg_mgr update -y
   else
-    info "Ensuring RHEL PHP repositories (Remi)..."
+    info "Ensuring RHEL PHP repositories."
     $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-$(rpm -E %rhel).rpm
     $pkg_mgr install -y dnf-utils
   fi
 }
 install_php() {
   local ver="${1:-}"
-  info "Installing PHP $ver and common extensions..."
+  info "Installing PHP $ver and common extensions."
   setup_repos
   v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
   "$pkg_mgr" install -y php${v}-fpm
@@ -3755,15 +3931,15 @@ php_menu() {
             dnf module list php
           fi
           read -rp "${cyan}[USER]${reset} Version (e.g. 8.2): " v
-          install_php "$v"        ;;
-        2) switch_site_php "$domain"  ;;
-        3) switch_cli_php         ;;
-        4) tune_php_settings      ;;
-        5) site_tune_php          ;;
-        6) php_process_control    ;;
-        7) select_domain          ;;
-        0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
-        *) error "Invalid option" ;;
+          install_php "$v"           ;;
+        2) switch_site_php "$domain" ;;
+        3) switch_cli_php            ;;
+        4) tune_php_settings         ;;
+        5) site_tune_php             ;;
+        6) php_process_control       ;;
+        7) select_domain             ;;
+        0) exit 0                    ;;
+        *) error "Invalid option"    ;;
       esac
       echo
       read -rp "${cyan}[USER]${reset} Press Enter to continue..."
@@ -3912,20 +4088,21 @@ create_isolated_php_runtime() {
   local type="$5"
   {
     v=$(sed -En '/PHP/s/^[^0-9]*([0-9]+\.[0-9]+).*/\1/p' <(php -v))
-  #"$pkg_mgr" install -y php${v}-fpm
     $pkg_mgr install -y php-fpm || $pkg_mgr install -y "php$v-fpm"
-    $pkg_mgr install -y  php-cli || $pkg_mgr install -y "php$v-cli" 
+    $pkg_mgr install -y  php-cli || $pkg_mgr install -y "php$v-cli"
     $pkg_mgr install -y  php-xml || $pkg_mgr install -y "php$v-xml"
-    $pkg_mgr -y install php-mysqlnd || $pkg_mgr -y install "php$v-mysql" 
-    $pkg_mgr install -y  php-mbstring || $pkg_mgr install -y "php$v-mbstring" 
-    $pkg_mgr install -y  php-gd || $pkg_mgr install -y "php$v-gd" 
-    $pkg_mgr install -y  php-curl || $pkg_mgr install -y "php$v-curl" 
-    $pkg_mgr install -y  php-zip || $pkg_mgr install -y "php$v-zip" 
+    $pkg_mgr -y install php-mysqlnd || $pkg_mgr -y install "php$v-mysql"
+    $pkg_mgr install -y  php-mbstring || $pkg_mgr install -y "php$v-mbstring"
+    $pkg_mgr install -y  php-gd || $pkg_mgr install -y "php$v-gd"
+    $pkg_mgr install -y  php-curl || $pkg_mgr install -y "php$v-curl"
+    $pkg_mgr install -y  php-zip || $pkg_mgr install -y "php$v-zip"
   } 2> /dev/null
-  if command -v php-fpm${v} &> /dev/null; then
-    php_bin="/usr/sbin/php-fpm${v}"
+  if [[ -f /usr/sbin/php-fpm ]]; then
+    php_bin="/usr/sbin/php-fpm"
+  elif [[ -f /usr/bin/php-fpm ]]; then
+    php_bin="/usr/bin/php-fpm"
   else
-    php_bin="/usr/bin/php-fpm" || php_bin="usr/sbin/php-fpm"
+    php_bin="/usr/sbin/php-fpm${v}"
   fi
   local base_conf="/etc/one-click/php/$domain"
   local run_dir="/run/one-click/$domain"
@@ -3944,7 +4121,7 @@ create_isolated_php_runtime() {
   echo "PHP_SYSTEMD_ENABLED=true" >> /etc/one-click/${mode_ver}/$domain/meta.conf
   echo "PHP_SYSTEMD_SERVICE_NAME=php-fpm@$domain.service" >> /etc/one-click/${mode_ver}/$domain/meta.conf
   echo "PHP_SYSTEMD_VHOST=$systemd_unit" >> /etc/one-click/${mode_ver}/$domain/meta.conf
-  mkdir -p "$base_conf" "$run_dir" "$log_dir" "$lib_dir"/{tmp,sessions}
+  mkdir -p "$base_conf" "$run_dir" "$log_dir/php" "$lib_dir"/{tmp,sessions}
   chown -R "$site_user:$site_user" "$lib_dir"
   chmod 700 "$lib_dir"
   cat > "$ini_file" <<EOF
@@ -3979,17 +4156,19 @@ pm.min_spare_servers = 2
 pm.max_spare_servers = 6
 pm.process_idle_timeout = 10s
 pm.max_requests = 500
+php_admin_value[memory_limit] = 1024M
+php_admin_value[user_ini.filename] = ""
 php_admin_value[open_basedir] = /etc/one-click/${type}/${domain}/:/etc/one-click/${type}/${domain}/www/:/tmp:/var/lib/one-click/${domain}/:/etc/one-click/db-manager/runtime/tokens:/etc/one-click/db-manager/sites/${domain}.json:/etc/one-click/db-manager/secrets/db/${domain}.pass:/etc/one-click/db-manager/runtime/tokens/
 php_admin_value[upload_tmp_dir] = $lib_dir/tmp
 php_admin_value[session.save_path] = $lib_dir/sessions
 php_admin_value[disable_functions] =
 php_admin_value[display_errors] = Off
-php_admin_value[error_log] = /var/log/one-click/php/${domain}-error.log
+php_admin_value[error_log] = /var/log/one-click/${domain}/php/error.log
 EOF
     cat > "$fpm_conf" <<EOF
 [global]
 pid = $run_dir/php-fpm.pid
-error_log = $log_dir/php-fpm.log
+error_log = $log_dir/php/php-fpm.log
 include = $pool_conf
 EOF
     cat > "$systemd_unit" <<EOF
@@ -4021,7 +4200,7 @@ EOF
   fi
   if systemctl is-active --quiet "php-fpm@$domain"; then
     success "PHP $php_ver runtime for $domain is active."
-    info "Socket: $run_dir/php.sock" "Logs:  $log_dir/php-fpm.log"
+    info "Socket: $run_dir/php.sock" "Logs:  $log_dir/php/php-fpm.log"
   else
     error "PHP $php_ver runtime for $domain failed to start!"
     journalctl -u "php-fpm@$domain" --no-pager | tail -20
@@ -4124,9 +4303,9 @@ web_log_view() {
   local status_filter="${4:-}"
   local log=""
   local base
-  for base in /var/log/nginx /var/log/apache /var/log/httpd; do
-    if [[ -f "$base/$domain/${type}.log" ]]; then
-      log="$base/$domain/${type}.log"
+  for base in /var/log/one-click/${domain}/nginx /var/log/one-click/${domain}/apache /var/log/one-click/${domain}/apache2 /var/log/one-click/${domain}/php /var/log/one-click/${domain}/httpd; do
+    if [[ -f "$base/${type}.log" ]]; then
+      log="$base/${type}.log"
       break
     fi
   done
@@ -4254,9 +4433,9 @@ monitor_web_logs() {
   stats_file="/etc/one-click/rule-engine/guard/monitor_stats.db"
   mkdir -p /etc/one-click/rule-engine/guard
   paths=(
-    "/var/log/nginx/$domain/access.log" "/var/log/nginx/$domain/error.log"
-    "/var/log/apache2/$domain/access.log" "/var/log/apache2/$domain/error.log"
-    "/var/log/httpd/$domain/access.log" "/var/log/httpd/$domain/error.log"
+    "/var/log/one-click/${domain}/nginx/access.log" "/var/log/one-click/${domain}/nginx/error.log"
+    "/var/log/one-click/${domain}/apache2/access.log" "/var/log/one-click/${domain}/apache2/error.log"
+    "/var/log/one-click/${domain}/httpd/access.log" "/var/log/one-click/${domain}/httpd/error.log"
   )
   for f in "${paths[@]}"; do
     [[ -f "$f" ]] && log_files+=("$f")
@@ -4334,7 +4513,7 @@ sitemap_robots() {
   tmpfile="$(mktemp)"
   trap 'echo "</urlset>" >> "$sitemap"' EXIT
   trap 'rm -f "$tmpfile"' EXIT
-  info "Generating sitemap for $domain..."
+  info "Generating sitemap for $domain."
   cat > "$sitemap" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -4474,12 +4653,11 @@ EOF
 </html>
 EOF
 # ==== Robots ====
-  info "Generating robots page..."
+  info "Generating robots page."
   cat > "$robots" <<EOF
 User-agent: *
 Allow: /
 
-# Block sensitive/system areas
 Disallow: /.git/
 Disallow: /tmp/
 Disallow: /cache/
@@ -4519,12 +4697,15 @@ WantedBy=multi-user.target
 EOF
 fi
 if [[ "$1" == "--monitor" ]]; then
-  detect_env
+  detect_env "$1"
   monitor_web_logs "$2"
+  exit 0
 fi
-if ! systemctl is-active one-click-guard.service &> /dev/null; then
-  systemctl daemon-reload
-  systemctl enable one-click-guard.service --now
+if command -v httpd &> /dev/null || command -v apache2 &> /dev/null || command -v nginx &> /dev/null; then
+  if ! systemctl is-active one-click-guard.service &> /dev/null; then
+    systemctl daemon-reload
+    systemctl enable one-click-guard.service --now
+  fi
 fi
 view_security() {
   local filter_domain="$1"
@@ -5041,7 +5222,7 @@ mirror_backup() {
   local backup_path="$2"
   local timestamp="$3"
   [[ "$remote_enabled" != "true" ]] && return 0
-  info "Replicating backup to remote profile..."
+  info "Replicating backup to remote profile."
   run_ssh "mkdir -p '$profile_base/$domain/$timestamp'"
   run_rsync \
     "$backup_path/" \
@@ -5224,8 +5405,8 @@ dns_provider_api_base() {
   esac
 }
 dns_provider_verify_live() {
-  local provider="$1"  
-  dns_provider_load "$provider" || return 1  
+  local provider="$1"
+  dns_provider_load "$provider" || return 1
   local api auth endpoint
   api="$(dns_provider_api_base "$provider")"
   auth="$(dns_provider_auth_header "$provider")"
@@ -5236,11 +5417,11 @@ dns_provider_verify_live() {
     vultr)        endpoint="/account"                  ;;
     linode)       endpoint="/profile"                  ;;
     hetzner)      endpoint="/zones?page=1&per_page=1"  ;;
-    *) 
+    *)
       warn "Dynamic or custom API endpoint provider format. Skipping active ping verification pass."
-      return 0 
+      return 0
       ;;
-  esac  
+  esac
   local http_status
   http_status=$(curl -s -o /dev/null --connect-timeout 5 -w "%{http_code}" -X GET "${api}${endpoint}" -H "$auth")
   if [[ "$http_status" == "200" || "$http_status" == "201" ]]; then
@@ -5248,10 +5429,10 @@ dns_provider_verify_live() {
   else
     error "Authentication validation failed (HTTP Status: $http_status)."
     return 1
-  fi  
+  fi
 }
 dns_provider_add() {
-  local provider="${1:-}"  
+  local provider="${1:-}"
   if [[ -z "$provider" ]]; then
     info "Supported Providers:"
     dns_provider_supported | sed 's/^/  - /'
@@ -5269,10 +5450,10 @@ PROVIDER=${provider}
 TYPE=local
 EOF
           break
-          ;;            
+          ;;
       route53)
           read -rp "${cyan}[USER]${blue} AWS Access Key: ${reset}" access
-          read -rsp "${cyan}[USER]${reset} AWS Secret Key: " secret; echo   
+          read -rsp "${cyan}[USER]${reset} AWS Secret Key: " secret; echo
           local enc_access enc_secret
           enc_access="$(dns_encrypt "$access")"
           enc_secret="$(dns_encrypt "$secret")"
@@ -5281,10 +5462,10 @@ PROVIDER=route53
 ACCESS_KEY=${enc_access}
 SECRET_KEY=${enc_secret}
 EOF
-          ;;      
+          ;;
       namecheap)
           read -rp "${cyan}[USER]${blue} API User: ${reset}" api_user
-          read -rsp "${cyan}[USER]${reset} API Key: " api_key; echo   
+          read -rsp "${cyan}[USER]${reset} API Key: " api_key; echo
           local enc_user enc_key
           enc_user="$(dns_encrypt "$api_user")"
           enc_key="$(dns_encrypt "$api_key")"
@@ -5293,13 +5474,13 @@ PROVIDER=namecheap
 API_USER=${enc_user}
 API_KEY=${enc_key}
 EOF
-          ;;      
+          ;;
       *)
           read -rsp "Enter Access/API Token for custom provider [${provider}]: " token; echo
           if [[ -z "${token}" ]]; then
-            error "Token cannot be empty. Re-evaluating routing inputs..."
+            error "Token cannot be empty. Re-evaluating routing inputs."
             continue
-          fi                  
+          fi
           local encrypted
           encrypted="$(dns_encrypt "$token")"
           cat > "$(dns_provider_config "$provider")" <<EOF
@@ -5308,9 +5489,8 @@ TOKEN=${encrypted}
 EOF
           ;;
     esac
-    
-    chmod 600 "$(dns_provider_config "$provider")"    
-    info "Validating configuration lane metadata permissions..."
+    chmod 600 "$(dns_provider_config "$provider")"
+    info "Validating configuration lane metadata permissions."
     if dns_provider_verify_live "$provider"; then
       success "Provider '$provider' successfully stored and locked down."
       break
@@ -5345,8 +5525,8 @@ dns_provider_auth_header() {
   esac
 }
 dns_api_request() {
-  local provider="$1" method="$2" endpoint="$3" data="${4:-}"  
-  dns_provider_load "$provider" || return 1  
+  local provider="$1" method="$2" endpoint="$3" data="${4:-}"
+  dns_provider_load "$provider" || return 1
   local api auth
   api="$(dns_provider_api_base "$provider")"
   auth="$(dns_provider_auth_header "$provider")"
@@ -5387,6 +5567,8 @@ dns_init() {
       fi
       error "Invalid IPv4 address. Please try again (e.g., 192.168.1.100)."
     done
+    printf "${cyan}${ul}Providers${ul_reset}${lime}\n"
+    printf '%s\n' $((dns_provider_supported | tr '\n' ' ') || true)
     while true; do
       read -rp "${cyan}[USER]${reset} Enter Provider: " provider
       if dns_provider_supported | grep -qFx "$provider"; then
@@ -5418,8 +5600,37 @@ CREATED=$(date +%s)
 EOF
   dns_create_zone "$provider" "$domain" || return 1
   dns_add_record_backend "$domain" "A" "@" "$ip"
-  dns_add_record_backend "$domain" "CNAME" "www" "$domain"  
+  dns_add_record_backend "$domain" "CNAME" "www" "$domain"
   success "Initialization complete for $domain via $provider"
+}
+dns_bind_create_zone() {
+  local domain="$1"
+  local zone_file
+  zone_file="$(dns_bind_zone_file "$domain")"
+  mkdir -p "$(dirname "$zone_file")"
+  cat > "$zone_file" <<EOF
+\$TTL 86400
+@   IN  SOA ns1.${domain}. admin.${domain}. (
+        $(date +%Y%m%d01) ; Serial
+        3600       ; Refresh
+        1800       ; Retry
+        604800     ; Expire
+        86400 )    ; Minimum TTL
+
+@   IN  NS  ns1.${domain}.
+@   IN  NS  ns2.${domain}.
+EOF
+  local conf_file="/etc/bind/named.conf.local"
+  if [[ -f "$conf_file" ]] && ! grep -q "zone \"$domain\"" "$conf_file"; then
+    cat >> "$conf_file" <<EOF
+
+zone "$domain" {
+    type master;
+    file "$zone_file";
+};
+EOF
+  fi
+  command -v systemctl &>/dev/null && (sudo systemctl reload bind9 || sudo systemctl reload named) &>/dev/null
 }
 dns_create_zone() {
   local provider="$1"
@@ -5432,52 +5643,8 @@ dns_create_zone() {
     *)            error "Zone generation not yet fully integrated for automated $provider setups."         ;;
   esac
 }
-dns_add_record_backend() {
-  local domain="$1" type="$2" host="$3" value="$4"
-  local prio="${5:-0}" weight="${6:-0}" port="${7:-0}"
-  local ttl=3600
-  source "$(dns_domain_meta "$domain")"
-  case "$PROVIDER" in
-    bind|powerdns|pdns|local)
-        local zone_file
-        zone_file="$(dns_bind_zone_file "$domain")"
-        [[ ! -f "$zone_file" ]] && { error "Zone storage file missing on local disk."; return 1; }
-        case "$type" in
-          A|AAAA|CNAME) printf "%-20s IN %-6s %s\n" "$host" "$type" "$value" >> "$zone_file" ;;
-          TXT)          printf "%-20s IN %-6s \"%s\"\n" "$host" "$type" "$value" >> "$zone_file" ;;
-          MX)           printf "%-20s IN %-6s %d %s.\n" "$host" "$type" "$prio" "$value" >> "$zone_file" ;;
-          SRV)          printf "%-20s IN %-6s %d %d %d %s.\n" "$host" "$type" "$prio" "$weight" "$port" "$value" >> "$zone_file" ;;
-        esac
-        command -v systemctl &>/dev/null && (sudo systemctl reload bind9 || sudo systemctl reload named || sudo systemctl reload pdns) &>/dev/null
-        ;;
-    cloudflare)
-        local zone_id payload
-        zone_id="$(dns_cloudflare_get_zone_id "$domain")"
-        case "$type" in
-          A|AAAA|CNAME|TXT) payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"content\":\"${value}\",\"ttl\":${ttl}}" ;;
-          MX)               payload="{\"type\":\"MX\",\"name\":\"${host}\",\"content\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}" ;;
-          SRV)              payload="{\"type\":\"SRV\",\"name\":\"${host}\",\"ttl\":${ttl},\"data\":{\"priority\":${prio},\"weight\":${weight},\"port\":${port},\"target\":\"${value}\"}}" ;;
-        esac
-        dns_api_request "cloudflare" POST "/zones/${zone_id}/dns_records" "$payload"
-        ;;
-    digitalocean)
-        local payload
-        case "$type" in
-          A|AAAA|CNAME|TXT) payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"data\":\"${value}\",\"ttl\":${ttl}}" ;;
-          MX)               payload="{\"type\":\"MX\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}" ;;
-          SRV)              payload="{\"type\":\"SRV\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"weight\":${weight},\"port\":${port},\"ttl\":${ttl}}" ;;
-        esac
-        dns_api_request "digitalocean" POST "/domains/${domain}/records" "$payload"
-        ;;
-    *)
-        info "Routing generic structured payload envelope to provider custom endpoint: [$PROVIDER]..."
-        local generic_payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"value\":\"${value}\",\"ttl\":${ttl}}"
-        dns_api_request "$PROVIDER" POST "/domains/${domain}/records" "$generic_payload"
-        ;;
-  esac
-}
 dns_add_record() {
-  local domain="$1"  
+  local domain="$1"
   printf "${orange}[DNS]${magenta} %s\n${reset}" "Choose Record Type:" \
     "1) A      2) AAAA   3) CNAME" \
     "4) TXT    5) MX     6) SRV"
@@ -5531,7 +5698,7 @@ dns_ensure_bind_installed() {
     return 1
   fi
   if command -v systemctl &>/dev/null; then
-    info "Starting and enabling BIND service..."
+    info "Starting and enabling BIND service."
     sudo systemctl enable --now bind9 &>/dev/null || sudo systemctl enable --now named &>/dev/null
   fi
   success "BIND installed and initialized successfully."
@@ -5542,67 +5709,67 @@ dns_add_record_backend() {
   local ttl=3600
   source "$(dns_domain_meta "$domain")"
   case "$PROVIDER" in
-    bind|local)
-        local zone_file
-        zone_file="$(dns_bind_zone_file "$domain")"
-        [[ ! -f "$zone_file" ]] && { error "Zone file missing"; return 1; }
-        case "$type" in
-          A|AAAA|CNAME)
-              printf "%-20s IN %-6s %s\n" "$host" "$type" "$value" >> "$zone_file"
-              ;;
-          TXT)
-              printf "%-20s IN %-6s \"%s\"\n" "$host" "$type" "$value" >> "$zone_file"
-              ;;
-          MX)
-              printf "%-20s IN %-6s %d %s.\n" "$host" "$type" "$prio" "$value" >> "$zone_file"
-              ;;
-          SRV)
-              printf "%-20s IN %-6s %d %d %d %s.\n" "$host" "$type" "$prio" "$weight" "$port" "$value" >> "$zone_file"
-              ;;
-        esac
-        command -v systemctl &>/dev/null && sudo systemctl reload bind9 &>/dev/null
-        ;;
+    bind|powerdns|pdns|local)
+      local zone_file
+      zone_file="$(dns_bind_zone_file "$domain")"
+      [[ ! -f "$zone_file" ]] && { error "Zone file missing"; return 1; }
+      case "$type" in
+        A|AAAA|CNAME)
+          printf "%-20s IN %-6s %s\n" "$host" "$type" "$value" >> "$zone_file"
+          ;;
+        TXT)
+          printf "%-20s IN %-6s \"%s\"\n" "$host" "$type" "$value" >> "$zone_file"
+          ;;
+        MX)
+          printf "%-20s IN %-6s %d %s.\n" "$host" "$type" "$prio" "$value" >> "$zone_file"
+          ;;
+        SRV)
+          printf "%-20s IN %-6s %d %d %d %s.\n" "$host" "$type" "$prio" "$weight" "$port" "$value" >> "$zone_file"
+          ;;
+      esac
+      command -v systemctl &>/dev/null && sudo systemctl reload bind9 &>/dev/null
+      ;;
     cloudflare)
-        local zone_id payload
-        zone_id="$(dns_cloudflare_get_zone_id "$domain")"
-        case "$type" in
-          A|AAAA|CNAME|TXT)
-              payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"content\":\"${value}\",\"ttl\":${ttl}}"
-              ;;
-          MX)
-              payload="{\"type\":\"MX\",\"name\":\"${host}\",\"content\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}"
-              ;;
-          SRV)
-              payload="{
-                \"type\": \"SRV\",
-                \"name\": \"${host}\",
-                \"ttl\": ${ttl},
-                \"data\": {
-                  \"priority\": ${prio},
-                  \"weight\": ${weight},
-                  \"port\": ${port},
-                  \"target\": \"${value}\"
-                }
-              }"
-              ;;
-        esac
-        dns_api_request "cloudflare" POST "/zones/${zone_id}/dns_records" "$payload"
-        ;;
+      local zone_id payload
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      case "$type" in
+        A|AAAA|CNAME|TXT)
+          payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"content\":\"${value}\",\"ttl\":${ttl}}"
+          ;;
+        MX)
+          payload="{\"type\":\"MX\",\"name\":\"${host}\",\"content\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}"
+          ;;
+        SRV)
+          payload="{
+            \"type\": \"SRV\",
+            \"name\": \"${host}\",
+            \"ttl\": ${ttl},
+            \"data\": {
+              \"priority\": ${prio},
+              \"weight\": ${weight},
+              \"port\": ${port},
+              \"target\": \"${value}\"
+            }
+          }"
+          ;;
+      esac
+      dns_api_request "cloudflare" POST "/zones/${zone_id}/dns_records" "$payload"
+      ;;
     digitalocean)
-        local payload
-        case "$type" in
-          A|AAAA|CNAME|TXT)
-              payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"data\":\"${value}\",\"ttl\":${ttl}}"
-              ;;
-          MX)
-              payload="{\"type\":\"MX\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}"
-              ;;
-          SRV)
-              payload="{\"type\":\"SRV\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"weight\":${weight},\"port\":${port},\"ttl\":${ttl}}"
-              ;;
-        esac
-        dns_api_request "digitalocean" POST "/domains/${domain}/records" "$payload"
-        ;;
+      local payload
+      case "$type" in
+        A|AAAA|CNAME|TXT)
+          payload="{\"type\":\"${type}\",\"name\":\"${host}\",\"data\":\"${value}\",\"ttl\":${ttl}}"
+          ;;
+        MX)
+          payload="{\"type\":\"MX\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"ttl\":${ttl}}"
+          ;;
+        SRV)
+          payload="{\"type\":\"SRV\",\"name\":\"${host}\",\"data\":\"${value}\",\"priority\":${prio},\"weight\":${weight},\"port\":${port},\"ttl\":${ttl}}"
+          ;;
+      esac
+      dns_api_request "digitalocean" POST "/domains/${domain}/records" "$payload"
+      ;;
   esac
 }
 dns_bind_add_record() {
@@ -5612,7 +5779,7 @@ dns_bind_add_record() {
   if [[ ! -f "$zone_file" ]]; then
     error "Local BIND zone file doesn't exist for $domain"
     return 1
-  fi  
+  fi
   printf "%-12s IN %-6s %s\n" "$host" "$type" "$value" >> "$zone_file"
 }
 dns_cloudflare_get_zone_id() {
@@ -5638,9 +5805,10 @@ dns_list_records() {
 dns_check_authority() {
   local domain="$1"
   source "$(dns_domain_meta "$domain")"
-  printf "${orange}[DNS]${blue} =================================================\n"
-  echo -e "                 ${yellow}DNS AUTHORITY STATUS${reset}"
-  printf "${orange}=================================================${reset}\n"
+  printf "${orange}[DNS]${orange} %s\n" \
+    "================================================="
+    "      ${yellow}DNS AUTHORITY STATUS${orange}"
+    "=================================================${reset}"
   echo -e "${orange}[DNS]${magenta} Detected Public Nameservers:${reset}"
   dig +short NS "$domain"
   echo
@@ -5699,6 +5867,101 @@ select_fqdn() {
     fi
   done
 }
+dns_delete_zone() {
+  local domain="$1"
+  local meta_file
+  meta_file="$(dns_domain_meta "$domain")"
+  if [[ ! -f "$meta_file" ]]; then
+    error "No metadata found for domain: $domain"
+    return 1
+  fi
+  source "$meta_file"
+  info "Deleting zone '$domain' from provider '$PROVIDER'."
+  case "$PROVIDER" in
+    cloudflare)
+      local zone_id
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      if [[ -n "$zone_id" && "$zone_id" != "null" ]]; then
+        dns_api_request "$PROVIDER" DELETE "/zones/${zone_id}"
+      fi
+      ;;
+    digitalocean)
+      dns_api_request "$PROVIDER" DELETE "/domains/${domain}"
+      ;;
+    vultr)
+      dns_api_request "$PROVIDER" DELETE "/domains/${domain}"
+      ;;
+    bind)
+      local zone_file
+      zone_file="$(dns_bind_zone_file "$domain")"
+      if [[ -f "$zone_file" ]]; then
+        rm -f "$zone_file"
+        command -v systemctl &>/dev/null && (sudo systemctl reload bind9 || sudo systemctl reload named) &>/dev/null
+      fi
+      ;;
+    *)
+      warn "Provider-side automated zone deletion not implemented for '$PROVIDER'."
+      ;;
+  esac
+  rm -rf "$(dns_domain_path "$domain")"
+  success "Zone '$domain' and local tracking data removed successfully."
+}
+dns_delete_record() {
+  local domain="$1"
+  source "$(dns_domain_meta "$domain")"
+  if [[ "$PROVIDER" == "cloudflare" || "$PROVIDER" == "digitalocean" ]]; then
+    info "Current DNS Records for $domain:"
+    dns_list_records "$domain"
+    echo
+    read -rp "${cyan}[USER]${blue} Enter Record ID to delete: ${reset}" rec_id
+    [[ -z "$rec_id" ]] && { error "Record ID cannot be empty."; return 1; }
+    dns_delete_record_backend "$domain" "$rec_id"
+  else
+    read -rp "${cyan}[USER]${blue} Enter Host/Subdomain to delete (e.g., www or @): ${reset}" host
+    read -rp "${cyan}[USER]${blue} Enter Record Type (optional, e.g. A, CNAME, TXT or leave blank): ${reset}" type
+    [[ -z "$host" ]] && { error "Host cannot be empty."; return 1; }
+    dns_delete_record_backend "$domain" "$host" "$type"
+  fi
+}
+dns_delete_record_backend() {
+  local domain="$1" record_id_or_host="$2" type="${3:-}"
+  local meta_file
+  meta_file="$(dns_domain_meta "$domain")"
+  if [[ ! -f "$meta_file" ]]; then
+    error "Domain metadata missing for $domain."
+    return 1
+  fi
+  source "$meta_file"
+  case "$PROVIDER" in
+    cloudflare)
+      local zone_id
+      zone_id="$(dns_cloudflare_get_zone_id "$domain")"
+      dns_api_request "cloudflare" DELETE "/zones/${zone_id}/dns_records/${record_id_or_host}"
+      ;;
+    digitalocean)
+      dns_api_request "digitalocean" DELETE "/domains/${domain}/records/${record_id_or_host}"
+      ;;
+    bind|powerdns|pdns|local)
+      local zone_file
+      zone_file="$(dns_bind_zone_file "$domain")"
+      [[ ! -f "$zone_file" ]] && { error "Zone storage file missing."; return 1; }
+      if [[ -n "$type" ]]; then
+        sed -i "/^${record_id_or_host}[[:space:]]\+IN[[:space:]]\+${type}/d" "$zone_file"
+      else
+        sed -i "/^${record_id_or_host}[[:space:]]/d" "$zone_file"
+      fi
+      command -v systemctl &>/dev/null && (sudo systemctl reload bind9 || sudo systemctl reload named || sudo systemctl reload pdns) &>/dev/null
+      ;;
+    *)
+      error "Record deletion not supported for provider '$PROVIDER'."
+      return 1
+      ;;
+  esac
+  success "Record '${record_id_or_host}' removed from $domain."
+}
+dns_bind_zone_file() {
+  echo "/etc/bind/zones/db.$1"  # Adjust path to match your BIND directory layout
+}
 dns_menu() {
   if ! command -v select_fqdn &>/dev/null; then
     dns_init
@@ -5709,22 +5972,26 @@ dns_menu() {
     clear
     printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
-      "║                 ${yellow}Registry Management${blue}                        ║" \
+      "║                      ${yellow}DNS Management${blue}                        ║" \
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ ${magenta}1${blue}  ║ ${green}Add/Configure DNS Provider${blue}                            ║" \
       "║ ${magenta}2${blue}  ║ ${green}Initialize New Domain Zone${blue}                            ║" \
       "║ ${magenta}3${blue}  ║ ${green}Add Record${blue}                                            ║" \
-      "║ ${magenta}4${blue}  ║ ${green}List Records${blue}                                          ║" \
-      "║ ${magenta}5${blue}  ║ ${green}Authority Status${blue}                                      ║" \
+      "║ ${magenta}4${blue}  ║ ${green}Delete Record${blue}                                         ║" \
+      "║ ${magenta}5${blue}  ║ ${green}List Records${blue}                                          ║" \
+      "║ ${magenta}6${blue}  ║ ${green}Authority Status${blue}                                      ║" \
+      "║ ${magenta}7${blue}  ║ ${green}Delete Zone${blue}                                           ║" \
       "║ ${magenta}0${blue}  ║ ${green}Back${blue}                                                  ║" \
       "╚════╩═══════════════════════════════════════════════════════╝${reset}"
-    read -rp "${cyan}[USER]${reset} Select option [0-5]: " choice
+    read -rp "${cyan}[USER]${reset} Select option [0-7]: " choice
     case "$choice" in
       1) dns_provider_add; read -rp "Press enter..."                                                 ;;
       2) dns_init "${fqdn:-${1:-}}" "${ip:-${2:-}}" "${provider:-${3:-}}"; read -rp "Press enter..." ;;
       3) dns_add_record "$fqdn"; read -rp "Press enter..."                                           ;;
-      4) dns_list_records "$fqdn"; read -rp "Press enter..."                                         ;;
-      5) select_fqdn; dns_check_authority "$fqdn"; read -rp "Press enter..."                         ;;
+      4) dns_delete_record "$fqdn"; read -rp "Press enter..."                                        ;;
+      5) dns_list_records "$fqdn"; read -rp "Press enter..."                                         ;;
+      6) select_fqdn; dns_check_authority "$fqdn"; read -rp "Press enter..."                         ;;
+      7) dns_delete_zone "$fqdn"; read -rp "Press enter..."                                          ;;
       0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0                                  ;;
     esac
   done
@@ -5733,6 +6000,7 @@ dns_menu() {
 install_nextcloud() {
   start_screen nextcloud
   local version="latest"
+  local provision_success=0
   local php_ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
   # ==== Meta Data ====
   while true; do
@@ -5812,7 +6080,7 @@ install_nextcloud() {
     break
   done
   read -rp "${cyan}[USER]${blue} Enable HSTS: ${reset}" enable_hsts
-  if [[ "$enable_hsts" =~ ^(y|yes|Y|YES|Yes)$ ]]; then
+  if [[ "${enable_hsts,,}" =~ ^(y|yes)$ ]]; then
     enable_hsts="yes"
   fi
   while true; do
@@ -5822,17 +6090,20 @@ install_nextcloud() {
   nc_root="/etc/one-click/nextcloud/$domain"
   nc_webroot="$nc_root/www"
   nc_data="$nc_root/data"
-  nc_logs="$nc_data/nextcloud.log"
+  nc_logs="/var/log/one-click/${domain}/nextcloud/nextcloud.log"
+  nc_logs_dir=$(dirname "$nc_logs")
   mkdir -p \
     "$nc_webroot" \
     "$nc_data" \
     "$nc_root/backups" \
-    "$nc_root/config"
+    "$nc_root/config" \
+    "$nc_logs_dir"
   chmod 750 "$nc_root"
   touch "$nc_logs"
   warn "Creating web owner"
   web_user="${nc_user:4}_$(echo -n "$domain" | sha1sum | cut -c1-8)"
   id "$web_user" &>/dev/null || useradd -r -m -s /usr/sbin/nologin "$web_user"
+  PHP_EXEC="sudo -u $web_user php -c /etc/one-click/php/${domain}/php.ini -d memory_limit=1024M"
   echo
   # ==== REDIS? ====
   if [[ "$centos_ver" -lt 10 ]]; then
@@ -5909,6 +6180,9 @@ install_nextcloud() {
     warn "Deployment cancelled"
     exit 1
   fi
+  trap "cleanup_failed_provision  $provision_success nextcloud" EXIT INT TERM ERR
+  info "Installing $webserver"
+  install_webserver nextcloud "$domain" "$nc_webroot" "$enable_hsts"
   info "Installing Nextcloud"
   curl -LO https://download.nextcloud.com/server/releases/latest.tar.bz2
   curl -LO https://download.nextcloud.com/server/releases/latest.tar.bz2.sha256
@@ -5930,16 +6204,16 @@ install_nextcloud() {
   chown -R "$web_user:$webserver_user" "$nc_root"
   rm -f latest*
   rm -rf nextcloud/
-  info "Installing $webserver"
-  install_webserver nextcloud "$domain" "$nc_webroot" "$enable_hsts"
-  info "Creating resource slice for $domain"
   info "Configuring PHP-FPM"
   create_isolated_php_runtime "$domain" "$php_ver" "$web_user" "$webserver" "nextcloud"
   info "Installing missing Nextcloud PHP extensions"
+  if ! php -m | grep -i sodium &> /dev/null; then
+    $pkg_mgr install -y php-sodium
+  fi
   if [[ "$pkg_mgr" == "apt" ]]; then
-    $pkg_mgr install -y php-imagick php-apcu php-gmp php-intl php-sodium
+    $pkg_mgr install -y php-imagick php-apcu php-gmp php-intl
   else
-    $pkg_mgr install --skip-broken -y php-pecl-imagick php-apcu php-gmp php-intl php-sodium
+    $pkg_mgr install --skip-broken -y php-pecl-imagick php-apcu php-gmp php-intl
   fi
   info "Tuning isolated OPcache parameters for $domain"
   local site_php_ini="/etc/one-click/php/${domain}/php.ini"
@@ -5955,16 +6229,13 @@ install_nextcloud() {
       echo "allow_url_fopen = On" >> "$site_php_ini"
     fi
   fi
-  info "Enabling PHP"
-  systemctl enable php-fpm@${domain}.service --now
   info "Configuring MariaDB"
   configure_nc_db
   dns_check
   info "Configuring Nextcloud"
   . "$nc_root/meta.conf"
   nc_db="$DB_NAME"
-  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-    "$nc_webroot/occ" maintenance:install \
+  $PHP_EXEC "$nc_webroot/occ" maintenance:install \
     --database "mysql" \
     --database-name "$nc_db" \
     --database-user "$nc_db_user" \
@@ -5973,12 +6244,8 @@ install_nextcloud() {
     --admin-pass "$nc_pass" \
     --database-host "127.0.0.1" \
     --data-dir "$nc_data"
-  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-    config:system:set trusted_domains 1 \
-    --value="$domain"
-  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-    config:system:set overwriteprotocol \
-    --value="https"
+  $PHP_EXEC "$nc_webroot/occ" config:system:set trusted_domains 1 --value="$domain"
+  $PHP_EXEC "$nc_webroot/occ" config:system:set overwriteprotocol --value="https"
   if [[ "$enable_redis" == "y" ]]; then
     info "Installing and configuring Redis"
     if [[ "$pkg_mgr" == "apt" ]]; then
@@ -6001,6 +6268,7 @@ install_nextcloud() {
         redis_ver=$(sort -rV <(awk '$1=="valkey"{print $2}' <(dnf module list valkey 2>/dev/null)) | head -1)
         $pkg_mgr install -y php-pecl-redis
         local service="redis-${domain}"
+        mkdir -p /run/valkey
         $pkg_mgr install -y valkey > /dev/null
         systemctl enable --now valkey > /dev/null
         conf="/etc/valkey/one-click/${domain}.conf"
@@ -6059,54 +6327,32 @@ install_nextcloud() {
 [Service]
 ReadWritePaths="$readpath"
 EOF
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-      config:system:set redis host --value="$sock"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-      config:system:set memcache.local --value="\OC\Memcache\APCu"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-      config:system:set memcache.locking --value="\OC\Memcache\Redis"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-      config:system:set redis port --value="0" --type=integer
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" \
-      config:system:set default_phone_region --value="US"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" config:app:delete core appstore.appdata.expiration
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" db:add-missing-indices
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" db:convert-filecache-bigint
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" maintenance:repair
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:disable appapi --force
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:disable circles
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:disable password_policy
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:enable password_policy
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" config:app:delete appapi enabled
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:disable contacts 2>/dev/null || true
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" app:enable contacts 2>/dev/null || true
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" config:app:set dav hide_absence_settings --value="yes"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" maintenance:update:htaccess
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" maintenance:mimetype:update-js
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      "$nc_webroot/occ" config:app:set dav hide_absence_settings --value="yes"
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      /etc/one-click/nextcloud/${domain}/www/cron.php
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini \
-      -d memory_limit=1024M "$nc_webroot/occ" config:system:set maintenance_window_start --value="1" --type=integer
-    sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini "$nc_webroot/occ" app:update --all
+    $PHP_EXEC "$nc_webroot/occ" config:system:set redis host --value="$sock"
+    $PHP_EXEC "$nc_webroot/occ" config:system:set memcache.local --value="\OC\Memcache\APCu"
+    $PHP_EXEC "$nc_webroot/occ" config:system:set memcache.locking --value="\OC\Memcache\Redis"
+    $PHP_EXEC "$nc_webroot/occ" config:system:set redis port --value="0" --type=integer
+    $PHP_EXEC "$nc_webroot/occ" config:system:set default_phone_region --value="US"
+    $PHP_EXEC "$nc_webroot/occ" config:app:delete core appstore.appdata.expiration
+    $PHP_EXEC "$nc_webroot/occ" db:add-missing-indices
+    $PHP_EXEC "$nc_webroot/occ" db:convert-filecache-bigint
+    $PHP_EXEC "$nc_webroot/occ" maintenance:repair
+    $PHP_EXEC "$nc_webroot/occ" app:disable circles
+    $PHP_EXEC "$nc_webroot/occ" app:disable password_policy
+    $PHP_EXEC "$nc_webroot/occ" app:enable password_policy
+    $PHP_EXEC "$nc_webroot/occ" config:app:delete appapi enabled
+    $PHP_EXEC "$nc_webroot/occ" app:disable contacts 2>/dev/null || true
+    $PHP_EXEC "$nc_webroot/occ" app:enable contacts 2>/dev/null || true
+    $PHP_EXEC "$nc_webroot/occ" config:app:set dav hide_absence_settings --value="yes"
+    $PHP_EXEC "$nc_webroot/occ" maintenance:update:htaccess
+    $PHP_EXEC "$nc_webroot/occ" maintenance:mimetype:update-js
+    $PHP_EXEC /etc/one-click/nextcloud/${domain}/www/cron.php
+    $PHP_EXEC "$nc_webroot/occ" config:system:set maintenance_window_start --value="1" --type=integer
+    $PHP_EXEC "$nc_webroot/occ" app:update --all
     mv /etc/one-click/nextcloud/${domain}/www/apps/appapi /tmp/appapi_backup 2>/dev/null || true
     success "Redis installed and configured."
   fi
+  info "Enabling PHP"
+  systemctl enable php-fpm@${domain}.service --now
   info "Opening firewall ports 80 and 443"
   one-click engine "allow $webserver" -y
   info "Configuring SSL"
@@ -6115,34 +6361,38 @@ EOF
   if [[ "${manual_install:-}" -eq 1 ]]; then
     webroot_nginx_template
   fi
-  systemctl restart "$webserver"
   echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site $domain > /dev/null 2>&1" > "/etc/cron.d/one-click_wp-web-monitor_nc_$domain"
   info "Fixing permissions"
   sleep 1
-  sed -Ee -i '
-    /^\[Service/ {
-      n;
-      i\Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    '
-    -e '
-      }
-    ' /etc/systemd/system/php-fpm@${domain}.service
+  sed -Ee '/^\[Service/ {n;i\Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' -e '}' /etc/systemd/system/php-fpm@${domain}.service -i
   echo "clear_env = no" >> /etc/one-click/php/${domain}/pool.conf
   echo "apc.enable_cli = 1" >> /etc/one-click/php/${domain}/php.ini
-  sed -Ee -i "
+  sed -Ee "
     /CONFIG = array/ {
       n;
       i\  'memcache.local' => '\\\OC\\\Memcache\\\APCu',\n'overwrite.cli.url' => 'http://localhost',\n'overwriteprotocol' => 'https',\n'maintenance_window_start' => 1,\n'user_status.enabled' => true,
-    " 
-    -e 
-    '
-      }
-    ' $nc_webroot/config/config.php
-  sudo -u "$web_user" php -c /etc/one-click/php/${domain}/php.ini $nc_webroot/occ files:scan --all
+    " -e '}' $nc_webroot/config/config.php -i
+  if [[ -f $nc_webroot/config/config.php ]]; then
+    if [[ "$enable_redis" == "y" ]]; then
+      sed -Ei.oc_bak "/^    'port' => 0,/ {p;s,port.*,password' => '$redis_pw'\,,};" "$nc_webroot/config/config.php"
+    fi
+  fi
+  $PHP_EXEC $nc_webroot/occ files:scan --all
+  if [[ -f "$nc_webroot/.user.ini" ]]; then
+    sed -i 's/^memory_limit=.*/memory_limit=1024M/' "$nc_webroot/.user.ini"
+    if ! grep -q "^memory_limit" "$nc_webroot/.user.ini"; then
+     echo "memory_limit=1024M" >> "$nc_webroot/.user.ini"
+   fi
+ fi
+  if [[ -f "$nc_webroot/.htaccess" ]]; then
+    sed -i 's/php_value memory_limit .*/php_value memory_limit 1024M/' "$nc_webroot/.htaccess"
+  fi
   systemctl daemon-reload
   systemctl restart php-fpm@${domain}.service
   check_permissions "$domain"
   systemctl reload "$webserver"
+  provision_success=1
+  trap - EXIT INT TERM ERR
   success " Suit has now been installed!"
   info "Access the site from ${magenta}https://${domain}${reset}"
 }
@@ -6151,20 +6401,28 @@ toggle_maintenance() {
   output=$(sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode 2>&1)
   state=$(grep -qi "enabled" <<< "$output" && echo "enabled" || echo "disabled")
   if [[ "$state" == "enabled" ]]; then
-    warn "Maintenance mode is currently ENABLED → disabling..."
-    sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --off >/dev/null 2>&1 || {
-      error "Failed to disable maintenance mode"
-      return 1
-    }
-    success "Maintenance mode disabled"
+    ui_tog=Disable
+    tog_status=disabling
+    tog="--off"
+    new_state=disabled
   else
-    warn "Maintenance mode is currently DISABLED → enabling..."
-    sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode --on >/dev/null 2>&1 || {
-      error "Failed to enable maintenance mode"
-      return 1
-    }
-    success "Maintenance mode enabled"
+    ui_tog=Enable
+    tog_status=enabling
+    tog="--on"
+    new_state=enabled
   fi
+  info "Mainenance mode is currently $state."
+  read -rp "${cyan}[USER]${reset} ${ui_tog}? " tog_ui
+  if [[ ! "${tog_ui,,}" =~ ^(y|yes)$ ]]; then
+    warn "Maintenance mode will remain $state"
+    return
+  fi
+  warn "Maintenance mode is currently ${state^^} ${lime}→${reset} ${tog_status^^}."
+  sudo -u "$web_user" php "$nc_webroot/occ" maintenance:mode "$tog" >/dev/null 2>&1 || {
+    error "Failed to ${ui_tog,,} maintenance mode."
+    return 1
+  }
+  success "Maintenance mode $new_state."
 }
 occ_console() {
   . /etc/one-click/nextcloud/${domain}/meta.conf
@@ -6177,6 +6435,7 @@ occ_console() {
 reset_nextcloud_password() {
   . /etc/one-click/nextcloud/${domain}/meta.conf
   web_user="$SITE_USER"
+  nc_user="$NC_USER"
   sudo -u "$web_user" php "$nc_webroot/occ" \
     user:resetpassword "$nc_user"
 }
@@ -6234,7 +6493,7 @@ tail_nextcloud_logs() {
     echo "Failed to load metadata"
     return 1
   }
-  local log_file="/etc/one-click/nextcloud/${domain}/logs/"
+  local log_file="/var/log/one-click/${domain}/nextcloud/nextcloud.log"
   [[ ! -f "$log_file" ]] && {
     echo "Nextcloud log not found: $log_file"
     return 1
@@ -6351,8 +6610,9 @@ harden_nextcloud() {
   chown -R "${nc_user}:${nc_group}" "$nc_root"
   find "$nc_root" -type d -exec chmod 750 {} \;
   find "$nc_root" -type f -exec chmod 640 {} \;
-  [[ -f "$nc_root/config/config.php" ]] &&
+  if [[ -f "$nc_root/config/config.php" ]]; then
     chmod 600 "$nc_root/config/config.php"
+  fi
   [[ -f "$nc_root/.htaccess" ]] &&
     chmod 644 "$nc_root/.htaccess"
   if [[ -d "$nc_root/data" ]]; then
@@ -6487,9 +6747,10 @@ nextcloud_menu() {
       "║ ${magenta}8${blue}  ║ ${green}Update Nextcloud${blue}                                      ║" \
       "║ ${magenta}9${blue}  ║ ${green}Backup Instance${blue}                                       ║" \
       "║ ${magenta}10${blue} ║ ${green}Check/Fix Permissions${blue}                                 ║" \
+      "║ ${magenta}11${blue} ║ ${green}Delete Site${blue}                                           ║" \
       "║ ${magenta}0${blue}  ║ ${green}Exit${blue}                                                  ║" \
       "╚════╩═══════════════════════════════════════════════════════╝${reset}"
-    read -rp "${cyan}[USER]${reset} Select option [0-9]: " choice
+    read -rp "${cyan}[USER]${reset} Select option [0-10]: " choice
     case "$choice" in
       1) toggle_maintenance                          ;;
       2) occ_console                                 ;;
@@ -6501,6 +6762,7 @@ nextcloud_menu() {
       8) update_nextcloud_instance                   ;;
       9) backup_nextcloud_instance                   ;;
       10) check_permissions "$domain"                ;;
+      11) delete_site "$domain"                      ;;
       0) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
     esac
   done
@@ -6508,128 +6770,104 @@ nextcloud_menu() {
 ################################# SITE REMOVAL ###############################
 delete_site() {
   local domain="$1"
+  [[ -z "$domain" ]] && { error "No domain provided"; return 1; }
   detect_env
   resolve_type "$domain"
-  web_user=$(stat -c '%U' "/etc/one-click/${type}/$domain" 2>/dev/null)
-  local slice_name="one-click_${domain}.slice"
-  local service_name="php-fpm@${domain}.service"
-  local site_user
-  [[ -z "$domain" ]] && { error "No domain provided"; return; }
-  warn "This will delete ALL $domain domains. Be careful if you have the same domain under different hosting types!"
-  read -rp "${cyan}[USER]${red} WARNING: Delete $domain permanently? (y|n): ${reset}" confirm
-  [[ "$confirm" != "y" ]] && { info "Cancelled"; return; }
-  info "Tearing down $domain..."
-  site_user=$(get_site_user "$domain")
-  # ==== Extract DB ====
-  if [[ "$type" == "wordpress" ]]; then
-    wp_config="/etc/one-click/wordpress/$domain/wp-config.php"
-    if [[ -f "$wp_config" ]]; then
-      db_name=$(sed -En "/DB_NAME/s/.*'([^']+)'.*/\1/p" "$wp_config")
-      db_user=$(sed -En "/DB_USER/s/.*'([^']+)'.*/\1/p" "$wp_config")
-    fi
+  if [[ -z "${type:-}" ]]; then
+    error "Could not resolve site type for domain '$domain'."
+    return 1
   fi
-  # ==== Stop services ====
-  systemctl disable --now "$service_name" 2>/dev/null
-  systemctl stop "$slice_name" 2>/dev/null
-  # ==== Remove systemd ====
-  (rm -f "/etc/systemd/system/$service_name"
-  rm -f "/etc/systemd/system/$slice_name"
-  # ==== PHP-FPM ====
-  rm -f "/etc/php-fpm.d/${domain}.conf"
-  rm -f "/etc/php/${domain}.conf"
-  rm -f "/run/php${php_ver:-}-fpm-${domain}.sock") 2> /dev/null
-  systemctl reload php-fpm 2>/dev/null || systemctl reload php*-fpm
-  # ==== DB cleanup ====
-  if [[ "$type" == "wordpress" && -n "$db_name" ]]; then
-    read -rp "${cyan}[USER]${blue} Delete DB $db_name? (y|n): ${reset}" db_confirm
+  local meta_file="/etc/one-click/${type}/${domain}/meta.conf"
+  # ==== Load Site Metadata ====
+  if [[ -f "$meta_file" ]]; then
+    info "Loading site metadata from $meta_file"
+    . "$meta_file"
+  else
+    warn "meta.conf not found at $meta_file. Falling back to dynamic detection."
+  fi
+  local site_user="${SITE_USER:-$(get_site_user "$domain" 2>/dev/null || stat -c '%U' "/etc/one-click/${type}/$domain" 2>/dev/null || true)}"
+  local service_name="${PHP_SYSTEMD_SERVICE_NAME:-php-fpm@${domain}.service}"
+  local slice_name="one-click_${domain}.slice"
+  local db_name="${DB_NAME:-}"
+  local db_user="${DB_USER:-}"
+  warn "This will delete ALL $domain configuration and data files."
+  read -rp "${cyan}[USER]${red} WARNING: Delete $domain permanently? (y|n): ${reset}" confirm
+  [[ "$confirm" != "y" ]] && { info "Teardown cancelled."; return 0; }
+  info "Tearing down $domain (Type: $type)."
+  systemctl disable --now "$service_name" 2>/dev/null || true
+  systemctl disable --now "redis-${domain}" 2>/dev/null || true
+  systemctl stop "$slice_name" 2>/dev/null || true
+  find /etc/systemd/system /usr/lib/systemd/system -type f -name "*${domain}*.service" 2>/dev/null | while read -r unit; do
+    systemctl disable --now "$(basename "$unit")" 2>/dev/null || true
+    rm -f "$unit"
+  done
+  if [[ "$DB_ENABLED" == "true" || -n "$db_name" ]]; then
+    read -rp "${cyan}[USER]${blue} Delete DB '$db_name'? (y|n): ${reset}" db_confirm
     if [[ "$db_confirm" == "y" ]]; then
-      info "Removing database: $db_name"
-      mysql -e "DROP DATABASE IF EXISTS \`$db_name\`;"
-      info "Checking if other sites share DB user: $db_user"
-      user_occurrence=$((grep -r "DB_USER.*'$db_user'" /etc/one-click/wordpress/*/wp-config.php 2>/dev/null | wc -l) || true)
-      if [[ "$user_occurrence" -le 1 ]]; then
-        info "dry_run$db_user. Dropping user..."
-        mysql -e "DROP USER IF EXISTS '$db_user'@'localhost';" || true
-      else
-        warn "DB User $db_user is still in use by $((user_occurrence - 1)) other site(s). Skipping user deletion."
+      if [[ -n "$db_name" ]]; then
+        info "Removing database: $db_name"
+        mysql -e "DROP DATABASE IF EXISTS \`$db_name\`;" 2>/dev/null || true
+      fi
+      if [[ -n "$db_user" ]]; then
+        info "Checking if other sites share DB user: $db_user"
+        local user_occ
+        user_occ=$(grep -r -l "DB_USER=$db_user" /etc/one-click/*/meta.conf 2>/dev/null | wc -l || echo 1)
+        if [[ "$user_occ" -le 1 ]]; then
+          info "Dropping unused DB user: $db_user"
+          mysql -e "DROP USER IF EXISTS '$db_user'@'localhost';" 2>/dev/null || true
+        else
+          warn "DB User $db_user is still in use by other site(s). Skipping user deletion."
+        fi
       fi
     fi
   fi
-  # ==== Webserver ====
-  if [[ "$webserver" == "nginx" ]]; then
-    (rm -f "/etc/nginx/sites-available/$domain.conf"
-    rm -f "/etc/nginx/sites-enabled/$domain.conf"
-    rm -f "/etc/nginx/conf.d/$domain.conf") 2> /dev/null
-    systemctl reload nginx
+  if [[ "${WEBSERVER:-$webserver}" == "nginx" ]]; then
+    rm -f "${VHOST:-/etc/nginx/sites-available/$domain.conf}" \
+          "/etc/nginx/sites-enabled/$domain.conf" \
+          "/etc/nginx/conf.d/$domain.conf" 2>/dev/null
+    systemctl reload nginx 2>/dev/null || true
   else
-    (rm -f "/etc/apache2/sites-available/$domain.conf"
-    rm -f "/etc/httpd/conf.d/$domain.conf") 2> /dev/null
-    systemctl reload apache2 2>/dev/null || systemctl reload httpd
+    rm -f "${VHOST:-/etc/apache2/sites-available/$domain.conf}" \
+          "/etc/apache2/sites-enabled/$domain.conf" \
+          "/etc/httpd/conf.d/$domain*.conf" 2>/dev/null
+    systemctl reload apache2 2>/dev/null || systemctl reload httpd 2>/dev/null || true
   fi
-  # ==== Files ====
-  (rm -rf "/etc/one-click/${type}/$domain"
-  # ==== Backups ====
-  rm -rf "/etc/one-click/${type}/backups/$domain"
-  rm -rf "/etc/one-click/${type}/rollback/$domain"
-  # ==== Logs ====
-  rm -f /var/log/php-fpm-$domain.log
-  rm -f /var/log/nginx/$domain*.log 2>/dev/null
-  rm -f /var/log/httpd/$domain*.log 2>/dev/null
-  # ==== Redis ====
-  systemctl disable --now "redis-${domain}" 2>/dev/null
-  rm -f "/etc/systemd/system/redis-${domain}.service"
-  # ==== SSL ====
-  rm -rf "/etc/letsencrypt/live/$domain"
-  rm -rf "/etc/letsencrypt/archive/$domain"
-  rm -f "/etc/letsencrypt/renewal/$domain.conf") 2> /dev/null
-  # ==== MISC LOST+FOUND ====
-  warn "Stopping services owned by $domain"
-  find /etc/systemd /usr/lib/systemd /lib/systemd \
-    -type f -name "*${domain}*.service" 2>/dev/null |
-    while read -r line; do
-     systemctl disable --now "$(basename "$line")"
-    done
-  warn "Deleting all other associated files and directories for $domain"
-  find / \
-  \( \
-    -path "/sys" -o \
-    -path "/proc" -o \
-    -path "/dev" -o \
-    -path "/run" -o \
-    -path "/boot" -o \
-    -path "/usr" -o \
-    -path "/lib" -o \
-    -path "/lib64" -o \
-    -path "/var/log" -o \
-    -path "/etc/one-click/wordpress/backups" -o \
-    -path "/etc/one-click/sites/backups" -o \
-    -path "/etc/one-click/apps/nodejs/backups" -o \
-    -path "/etc/one-click/wordpress/rollback" -o \
-    -path "/etc/one-click/sites/rollback" -o \
-    -path "/etc/one-click/apps/nodejs/rollback" -o \
-    -path "/etc/one-click/db-manager/secrets/db/" -o \
-    -path "/etc/one-click/db-manager/sites/" \
-  \) -prune \
-  -o -path "*$domain*" -exec rm -rf {} + 2>/dev/null
-  # ==== Remove system user ====
-  set +o pipefail
-  info "Removing system user $site_user"
-  if id "$site_user" &>/dev/null; then
-    gpasswd -d "$webserver" "$site_user" 2>/dev/null
-    userdel -r "$site_user"
+  if [[ -n "${HOSTS_ENTRY:-}" ]]; then
+    sed -i "/${domain}/d" /etc/hosts 2>/dev/null || true
   fi
-  set -o pipefail
-  # ==== Systemd cleanup ====
-  systemctl daemon-reexec
+  info "Deleting site directories and PHP runtime for $domain..."
+  rm -rf "${PHP_DIR:-/etc/one-click/php/$domain}" 2>/dev/null || true
+  rm -rf "${PHP_RUNTIME:-/run/one-click/$domain}" 2>/dev/null || true
+  rm -rf "${PHP_LIB_DIR:-/var/lib/one-click/$domain}" 2>/dev/null || true
+  rm -f "/run/php-fpm-${domain}.sock" 2>/dev/null || true
+  rm -rf "/etc/one-click/${type}/$domain" 2>/dev/null || true
+  rm -rf "/etc/one-click/${type}/backups/$domain" 2>/dev/null || true
+  rm -rf "/etc/one-click/${type}/rollback/$domain" 2>/dev/null || true
+  rm -f "/etc/one-click/db-manager/sites/${domain}.json" 2>/dev/null || true
+  rm -f "/etc/one-click/db-manager/secrets/db/${domain}.pass" 2>/dev/null || true
+  rm -f "/var/log/one-click/${domain}/php/error.log" 2>/dev/null || true
+  rm -f "/var/log/one-click/${domain}"*.log 2>/dev/null || true
+  rm -f "${PHP_SYSTEMD_VHOST:-/etc/systemd/system/$service_name}" \
+        "/etc/systemd/system/$slice_name" \
+        "/etc/systemd/system/redis-${domain}.service" 2>/dev/null || true
+  rm -rf "/etc/letsencrypt/live/$domain" \
+         "/etc/letsencrypt/archive/$domain" \
+         "/etc/letsencrypt/renewal/$domain.conf" 2>/dev/null || true
+  if [[ -n "$site_user" ]] && id "$site_user" &>/dev/null; then
+    info "Removing isolated system user: $site_user"
+    printf "${orange}[DEL]:${reset} "
+    gpasswd -d "${SITE_GROUP:-www-data}" "$site_user" 2>/dev/null || true
+    userdel -r -f "$site_user" 2>/dev/null || true
+  fi
   systemctl daemon-reload
-  systemctl reset-failed
-  success "Fully removed $domain"
+  systemctl reset-failed 2>/dev/null || true
+  success "The ($type) installation for $domain has now been deleted"
 }
 get_monitor_stats() {
   local domain="${1:-}"
-  find /etc/one-click/{sites,wordpress,apps/nodejs}/ -maxdepth 1 \
+  find /etc/one-click/{sites,wordpress,apps/nodejs,nextcloud}/ -maxdepth 1 \
     | while read -r site_mon; do
-      if [[ "$site_mon" =~ \. ]]; then 
+      if [[ "$site_mon" =~ \. ]]; then
         mon=$(basename $site_mon)
         #monitor "$mon"
         echo $mon
@@ -6637,7 +6875,7 @@ get_monitor_stats() {
     done
   local profile_file="/etc/one-click/monitor/${domain}/${domain}.profile"
   local status_file="/etc/one-click/monitor/${domain}/monitor_status"
-  local log_file="/var/log/${webserver}/${domain}/monitor.log"
+  local log_file="/var/log/one-click/${domain}/${webserver}/monitor.log"
   mkdir -p "/etc/one-click/monitor/${domain}"
   if [[ ! -f /etc/cron.d/one-click-uptime-monitor_$domain ]]; then
     echo "* * * * * /var/cache/one-click/wordpress.sh --monitor-site $domain > /dev/null 2>&1" > /etc/cron.d/one-click-uptime-monitor_$domain
@@ -6668,8 +6906,8 @@ monitor() {
   domain="${1:-}"
   check_url="https://$domain"
   status_file="/etc/one-click/monitor/${domain}/monitor_status"
-  log_file="/var/log/${webserver}/${domain}/monitor.log"
-  mkdir -p "/etc/one-click/monitor/${domain}" "/var/log/${webserver}/${domain}"
+  log_file="/var/log/one-click/${domain}/${webserver}/monitor.log"
+  mkdir -p "/etc/one-click/monitor/${domain}" "/var/log/one-click/${domain}/${webserver}"
   now=$(date +%s)
   http_status=$(curl -o /dev/null -s -w "%{http_code}" \
     --max-time 5 --connect-timeout 3 "$check_url" || echo "000")
@@ -7747,8 +7985,8 @@ EOF
     }]
     end
   )
-  ' "$registry" > "$tmpfile" 
-  mv "$tmpfile" "$registry" 
+  ' "$registry" > "$tmpfile"
+  mv "$tmpfile" "$registry"
   rm -f "$tmpfile"
   db_write_password "$domain" "$password"
   local role="secondary"
@@ -7792,7 +8030,7 @@ EOF
   read -rp "${cyan}[USER]${reset} Would you like to promote $db_user to primary DB user for $domain (y|n)? " promote
   promote="${promote,,}"
   if [[ "$promote" != "y" && "$promote" != "yes" ]]; then
-    info "Now exiting..."
+    info "Now exiting."
     return
   fi
   info "Promoting $db_user"
@@ -8112,7 +8350,7 @@ db_manager_menu() {
 db_ui_menu() {
   if [[ ! -f /etc/one-click/db-manager/sites/${domain}.json ]]; then
     warn "Registry not generated"
-    info "Generating registry now..."
+    info "Generating registry now."
     registry_create "$domain"
   fi
   db_status=$(jq -r '.database.enabled' /etc/one-click/db-manager/sites/${domain}.json)
@@ -8386,7 +8624,56 @@ db_entry() {
     type="sites"
   fi
   db_manager_menu "$domain" "$type"
- }
+}
+############################ CLEANUP ###############################
+cleanup_failed_provision() {
+  local exit_code=$?
+  provision_success=$1
+  type=$2
+  [[ "$exit_code" -eq 0 && "$provision_success" -eq 1 ]] && return 0
+  warn "Provisioning failed or interrupted for '$domain' (Exit code: $exit_code). Purging partial footprint."
+  if [[ -n "${PHP_SYSTEMD_SERVICE_NAME:-}" ]]; then
+    systemctl disable --now "$PHP_SYSTEMD_SERVICE_NAME" 2>/dev/null || true
+    rm -f "${PHP_SYSTEMD_VHOST:-/etc/systemd/system/${PHP_SYSTEMD_SERVICE_NAME}}" 2>/dev/null || true
+  fi
+  systemctl disable --now "redis-${domain}" 2>/dev/null || true
+  systemctl stop "one-click_${domain}.slice" 2>/dev/null || true
+  rm -f "/etc/systemd/system/one-click_${domain}.slice" \
+    "/etc/systemd/system/redis-${domain}.service" 2>/dev/null || true
+  if [[ "${DB_ENABLED:-false}" == "true" || -n "${DB_NAME:-}" ]]; then
+    if [[ -n "${DB_NAME:-}" ]]; then
+      info "Dropping partial database: $DB_NAME"
+      mysql -e "DROP DATABASE IF EXISTS \`$DB_NAME\`;" 2>/dev/null || true
+    fi
+    if [[ -n "${DB_USER:-}" ]]; then
+      info "Dropping partial DB user: $DB_USER"
+      mysql -e "DROP USER IF EXISTS '$DB_USER'@'localhost';" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "${VHOST:-}" && -f "$VHOST" ]]; then
+    rm -f "$VHOST" "/etc/nginx/sites-enabled/$domain.conf" \
+      "/etc/apache2/sites-enabled/$domain.conf" 2>/dev/null || true
+    systemctl reload "${WEBSERVER:-nginx}" 2>/dev/null || true
+  fi
+  if [[ -n "${HOSTS_ENTRY:-}" ]]; then
+    sed -i "/${domain}/d" /etc/hosts 2>/dev/null || true
+  fi
+  rm -rf "${PHP_DIR:-/etc/one-click/php/$domain}" 2>/dev/null || true
+  rm -rf "${PHP_RUNTIME:-/run/one-click/$domain}" 2>/dev/null || true
+  rm -rf "${PHP_LIB_DIR:-/var/lib/one-click/$domain}" 2>/dev/null || true
+  rm -rf "/etc/one-click/${type}/$domain" 2>/dev/null || true
+  rm -f "/var/log/one-click/${domain}/php/error.log" 2>/dev/null || true
+  if [[ -n "${SITE_USER:-}" ]] && id "$SITE_USER" &>/dev/null; then
+    info "Removing provisioned system user: $SITE_USER"
+    gpasswd -d "${SITE_GROUP:-www-data}" "$SITE_USER" 2>/dev/null || true
+    printf "$(tput setaf 192)[DEL]:${reset} "
+    userdel -r -f "$SITE_USER" 2>/dev/null || true
+  fi
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed 2>/dev/null || true
+  error "${type^} cleanup complete for '$domain'."
+  return "$exit_code"
+}
 ################################# CRON NAVIGATION ##############################
 if [[ "${1:-}" == "-wpback" ]]; then
   info() {
