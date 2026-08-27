@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # === Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Cron logic ====
 if command -v apt &> /dev/null; then
@@ -29,7 +29,7 @@ draw_table_row() {
   n_run="$4"
   local display_cmd="${command:0:67}"
   [[ ${#command} -gt 66 ]] && display_cmd+="..."
-  printf "${blue}│ ${reset}%-3s ${blue}│ ${reset}%-18s ${blue}│ ${reset}%-70s ${blue}│${reset}%-20s ${blue}│${reset}\n" "$index" "$schedule" "$display_cmd" "$n_run" 
+  printf "${blue}│ ${reset}%-3s ${blue}│ ${reset}%-18s ${blue}│ ${reset}%-70s ${blue}│${reset}%-20s ${blue}│${reset}\n" "$index" "$schedule" "$display_cmd" "$n_run"
 }
 get_next_run() {
   local sched="$1"
@@ -182,7 +182,7 @@ decrypt_cron() {
   else
     month_str="every month"
   fi
-  success "Cron job successfully installed${green} [SUCCESS]${reset}"   
+  success "Cron job successfully installed${green} [SUCCESS]${reset}"
   return
 }
 select_timezone() {
@@ -243,29 +243,29 @@ detect_cron_clashes() {
       "${bold}The Predicted Result:${reset}" \
       "Next run: $(get_next_run "$schedule")" \
       "${grey}----------------------------------------------------------------------${reset}" \
-      "${yellow}How would you like to proceed?${reset}" 
+      "${yellow}How would you like to proceed?${reset}"
     printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
       "[1]. ${green}Leave as 'OR' logic${reset} (Runs on the ${dom} AND every $(convert_cron_to_dow "$dow"))" \
       "[2]. ${green}Run ONLY on the ${dom}${reset} (System will ignore the weekday)" \
       "[3]. ${green}Run ONLY on $(convert_cron_to_dow "${dow//[0-9]*}")s${reset} (System will ignore the date)" \
-      "[4]. ${red}Cancel and re-enter schedule${reset}" 
+      "[4]. ${red}Cancel and re-enter schedule${reset}"
     read -rp "${cyan}[USER]${reset} Select (1-4): " clash_choice
     case "$clash_choice" in
-      1) 
-        final_cron_schedule="$schedule" 
+      1)
+        final_cron_schedule="$schedule"
         ;;
-      2) 
-        final_cron_schedule="$m $h $replace_dom $mon *" 
+      2)
+        final_cron_schedule="$m $h $replace_dom $mon *"
         success "Schedule adjusted to: $final_cron_schedule (Date Only)"
         ;;
-      3) 
-        final_cron_schedule="$m $h * $mon $dow" 
+      3)
+        final_cron_schedule="$m $h * $mon $dow"
         success "Schedule adjusted to: $final_cron_schedule (Weekday Only)"
         ;;
-      4) 
+      4)
         warn "Restarting schedule input..."
         input_cron_schedule
-        detect_cron_clashes 
+        detect_cron_clashes
         ;;
     esac
   fi
@@ -277,10 +277,10 @@ convert_cron_to_dow() {
 convert_human_to_cron() {
   local input=${1,,}
   case "$input" in
-    sun*) echo 0 ;; mon*) echo 1  ;; tue*) echo 2  ;; wed*) echo 3  ;; 
+    sun*) echo 0 ;; mon*) echo 1  ;; tue*) echo 2  ;; wed*) echo 3  ;;
     thu*) echo 4 ;; fri*) echo 5  ;; sat*) echo 6  ;;
-    jan*) echo 1 ;; feb*) echo 2  ;; mar*) echo 3  ;; apr*) echo 4  ;; 
-    may*) echo 5 ;; jun*) echo 6  ;; jul*) echo 7  ;; aug*) echo 8  ;; 
+    jan*) echo 1 ;; feb*) echo 2  ;; mar*) echo 3  ;; apr*) echo 4  ;;
+    may*) echo 5 ;; jun*) echo 6  ;; jul*) echo 7  ;; aug*) echo 8  ;;
     sep*) echo 9 ;; oct*) echo 10 ;; nov*) echo 11 ;; dec*) echo 12 ;;
     *) echo "$1" ;;
   esac
@@ -331,7 +331,6 @@ add_cron_job() {
     warn "${yellow}CRON JOB EXISTS FOR: ${comment}${reset}"
     echo
     delete_cron_job "$comment"
-    #exec < /dev/tty
   fi
   cron_cmd="${schedule} TZ=\"${tz}\" ${cmd}"
   [[ -n "$logfile" ]] && cron_cmd+=" >> \"$logfile\" 2>&1"
@@ -403,7 +402,7 @@ install_my_cron() {
   add_cron_job "$final_cron_schedule" "$user_tz" "$user_cmd" "$comment" "$logfile"
 }
 delete_cron_job() {
-  local filter="${1:-}" # Accept filter from caller
+  local filter="${1:-}"
   local cron new_cron choice
   cron=$(crontab -l 2>/dev/null)
   [[ -z "$cron" ]] && { warn "No cron jobs to delete."; return; }
@@ -423,16 +422,15 @@ delete_cron_job() {
   echo "$new_cron" | crontab -
 }
 cron_menu() {
-  header_notice "$cron_title" #"$cron_banner" "18" "4"
+  header_notice "$cron_title"
   while true; do
     clear
-    echo
+    echo "${red}[${yellow}CRON MANAGEMENT${red}]${reset}" \
     printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-      "${red}[${yellow}CRON MANAGEMENT${red}]${reset}" \
       "[1]. Add a cron job (custom command)" \
       "[2]. View cron jobs" \
       "[3]. Delete cron job(s)" \
-      "[4]. Exit"
+      "[0]. Exit"
     read -rp "${cyan}[USER]${reset} Select an option: " choice
     case "$choice" in
       1)
@@ -447,8 +445,8 @@ cron_menu() {
         delete_cron_job
         read -rp "Press Enter to return to menu..."
         ;;
-      4) ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
-      "") continue                         ;;
+      0)  exit 0    ;;
+      "") continue  ;;
       *)
         warn "Invalid option"
         sleep 1
