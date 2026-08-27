@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
-# === Build: Jan 2026 === # === Updated: Feb 2026 == # === Version#: 1.2.5 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Network Repair ====
 network_select_option() {
@@ -36,7 +36,11 @@ primary_iface() {
   ip -o link show up | awk -F': ' '$2 != "lo" {print $2; exit}'
 }
 have_net() {
-  ping -c1 -W2 1.1.1.1 &>/dev/null
+  if [[ -n "$sys_ip" ]]; then
+    ping -c1 -W2 1.1.1.1 &>/dev/null
+  else
+    ping -6 -c1 -W2 2606:4700:4700::1111 &> /dev/null
+  fi
 }
 have_dns() {
   getent hosts google.com &>/dev/null
@@ -50,7 +54,7 @@ backup_file() {
     rsync -aH --delete "$file/" "${backup_dir}/${file}/"
   else
     rsync -aH "$file" "${backup_dir}/${file}.bak.$(timestamp)"
-  fi    
+  fi
 }
 backup_all_configs() {
   local error
@@ -71,9 +75,9 @@ backup_all_configs() {
   if [[ ! -d "$backup_dir" ]]; then
     mkdir -p "$backup_dir"
   fi
-  ip a s > "$config_dir/ip_add_show.txt"
-  ip r s > "$config_dir/ip_route_show.txt"
-  ip rule show > "$config_dir/ip_rule_show.txt"
+  ip a s > "$config_dir/ip_add_show.txt" || ip -6 a s > "$config_dir/ip6_add_show.txt"
+  ip r s > "$config_dir/ip_route_show.txt" || ip -6 r s > "$config_dir/ip6_route_show.txt"
+  ip rule show > "$config_dir/ip_rule_show.txt" || ip -6 rule s > "$config_dir/ip6_rule_show.txt"
   if command -v resolvconf >/dev/null 2>&1; then
     if resolvconf -l > "$config_dir/resolvconf_status.txt" &> /dev/null ; then
       success "resolvconf status state successfully saved"
@@ -111,16 +115,16 @@ backup_all_configs() {
     /etc/NetworkManager/system-connections/
     /etc/network/interfaces
     /etc/netplan/*.yaml
-    /etc/sysconfig/network-scripts/ifcfg-\* 
+    /etc/sysconfig/network-scripts/ifcfg-\*
     /etc/NetworkManager/NetworkManager.conf
-    /etc/iptables/rules.v4 
-    /etc/systemd/resolved.conf 
+    /etc/iptables/rules.v4
+    /etc/systemd/resolved.conf
   )
   for dir in "${dirs[@]}"; do
     backup_file "$dir" 2>/dev/null || true
     if [[ -s "$dir" ]]; then
       success "$dir has been backed up"
-    else 
+    else
       error+=("$dir")
     fi
   done
@@ -300,7 +304,7 @@ restore_backup() {
     error "Restore Cancelled"
     return
   fi
-  info "Restoring backup configs and snapshots..."
+  info "Restoring backup configs and snapshots."
   local found_backups=0
   while IFS= read -r f; do
     [[ -e "$f" ]] || continue
@@ -312,7 +316,7 @@ restore_backup() {
     success "Restored $orig from backup"
   done < <(find "$backup_dir" -type f -name "*.bak.*" 2>/dev/null)
   if [[ -f "$service_restore" ]]; then
-    info "Service mapping file found. Restoring service snapshots..."
+    info "Service mapping file found. Restoring service snapshots."
     while read -r map service_tar; do
       [[ -z "$map" || -z "$service_tar" ]] && continue
       if [[ ! -f "$service_tar" ]]; then
@@ -335,7 +339,7 @@ restore_backup() {
         firewalld)
           tar -xzf "$service_tar" -C / && systemctl restart firewalld
           ;;
-        nm) 
+        nm)
           tar -xzf "$service_tar" -C / && systemctl restart NetworkManager
           ;;
         netplan)
@@ -364,13 +368,72 @@ restore_backup() {
   fi
 }
 health_check() {
+  skip_check=0
+  out=$(ip -s link show "$nic" 2> /dev/null)
+  if [[ -n "$sys_ip" ]]; then
+    isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
+  else
+    isp=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
+    isp2=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
+    isp3="AS$(jq -r '.network.autonomous_system.asn' <<< $api_response)"
+    isp4=$(jq -r '.network.cidr' <<< $api_response)
+  fi
+  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
+  if command -v netstat &> /dev/null; then
+    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
+  elif command -v nstat &> /dev/null; then
+    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+  fi
+  gw=$(awk '/default/{print $3}' <(ip r))
+  dev=$(awk '/default/{print $5}' <(ip r))
+  gw6=$(awk '/default/{print $3}' <(ip -6 r))
+  dev6=$(awk '/default/{print $5}' <(ip -6 r))
+  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
+  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
+  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
+  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
+  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
+  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
+  if [[ -n "$sys_ip" ]]; then
+    int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  else
+    int=$(ip -6 route get 2001:4860:4860::8888 | awk '{print $5; exit}')
+  fi
+  # ==== Detect WireGuard Interfaces ====
+  wg_ifaces=()
+  if command -v wg &>/dev/null; then
+    mapfile -t wg_ifaces < <(ip -br link show type wireguard 2>/dev/null | awk '{print $1}')
+  fi
+  # ==== Check & repair network ====
+  if ! have_dns; then
+    warn "Could not detect DNS"
+    info "DNS Failed. Trying alternate"
+    if getent hosts cloudflare.com &> /dev/null; then
+      success "DNS Detected"
+      skip_check=0
+    else
+      skip_check=1
+      skip_reason=( "DNS" )
+    fi
+  fi
+  if ! have_net; then
+    warn "Could not detect asymmetric connectivity"
+    info "Connectivity Failed. Trying alternate"
+    if have_dns; then
+      success "Connectivity Detected"
+      skip_check=0
+    else
+      skip_check=1
+      skip_reason+=( "NETWORK" )
+    fi
+  fi
   warn \
     "${yellow}╔════════════════════════════════════════════════════════════╗" \
     "${yellow}║                    NETWORK HEALTH CHECK                    ║" \
     "${yellow}╚════════════════════════════════════════════════════════════╝${reset}"
-  
+
   if [[ "${skip_check:-}" -eq 0 ]]; then
-    echo -e "\n● ${cyan}[INTERFACE: $int]${reset}"
+    echo -e "\n● ${cyan}[INTERFACE: ${int}]${reset}"
     echo -e "  ├─ Error Check: "
     if [ "$rx_error" -gt 0 ]; then
       echo -e "\e[31mFAIL\e[0m (RX: $rx_error errors)"
@@ -392,25 +455,25 @@ health_check() {
     else
       echo -e "\e[32mPASS\e[0m (TX: No drops)"
     fi
-      echo -ne "  ├─ Path MTU (1500b): "
+    echo -ne "  ├─ Path MTU (1500b): "
     if ping -c 1 -M do -s 1472 8.8.8.8 &>/dev/null; then
       echo -e "\e[32mOK\e[0m"
     else
       echo -e "\e[33mFRAGMENTED\e[0m (Standard MTU failing; check for 1450 or lower)"
     fi
     echo -ne "  ├─ DNS Response: "
-    if [ -z "$dns_time" ]; then 
-      echo -e "\e[31mTIMEOUT\e[0m"; 
-    elif [ "$dns_time" -gt 100 ]; then 
-      echo -e "\e[33mSLOW\e[0m (${dns_time}ms)"; 
-    else 
-      echo -e "\e[32mFAST\e[0m (${dns_time}ms)"; 
+    if [ -z "$dns_time" ]; then
+      echo -e "\e[31mTIMEOUT\e[0m";
+    elif [ "$dns_time" -gt 100 ]; then
+      echo -e "\e[33mSLOW\e[0m (${dns_time}ms)";
+    else
+      echo -e "\e[32mFAST\e[0m (${dns_time}ms)";
     fi
     echo -ne "  └─ TCP Retransmit Rate: "
-    if [ "$retrans" -gt 5000 ]; then 
+    if [ "$retrans" -gt 5000 ]; then
       echo -e "\e[33mHIGH\e[0m"
-    else 
-      echo -e "\e[32mSTABLE\e[0m" 
+    else
+      echo -e "\e[32mSTABLE\e[0m"
     fi
     echo -e "\n● ${cyan}[ACTIVE PORTS]${reset}"
     awk '/LISTEN/{printf "  ├─ %-15s %s\n", $5, $7}' <(ss -tulpn) | sed '$s/├/└/'
@@ -423,24 +486,30 @@ health_check() {
     fi
     if [ -n "$gw6" ]; then
       echo "  ├─ IPv6 Gateway: $gw6 (via $dev6)"
-    
-      echo "  ├─ IPv6 NextHop: ${next_6_hop}:-Local Gateway Reachable}"
+      echo "  ├─ IPv6 NextHop: ${next_6_hop:-Local Gateway Reachable}"
     else
       echo "  ├─ IPv6 Gateway: Not Configured"
     fi
-    echo "  └─ Routing Table: ${green}Active"
+    if [[ ${#wg_ifaces[@]} -gt 0 ]]; then
+      echo "  ├─ WireGuard:    ${green}Active (${#wg_ifaces[@]} Interface(s))${reset}"
+      for wg_dev in "${wg_ifaces[@]}"; do
+        wg_ips=$(ip -br addr show dev "$wg_dev" 2>/dev/null | awk '{print $3}')
+        echo "  │  ├─ Interface: ${wg_dev} [IP: ${wg_ips:-N/A}]"
+      done
+    fi
+    echo "  └─ Routing Table: ${green}Active${reset}"
     echo -e "\n● ${cyan}[ISP & PUBLIC IDENTITY]${reset}"
     if [ $? -eq 0 ]; then
       awk '
-        NR==1 {printf "  ├─ ISP:      %s\n", $0}
-        NR==2 {printf "  ├─ Org:      %s\n", $0}
-        NR==3 {printf "  ├─ AS Path:  %s\n", $0}
-        NR==4 {printf "  └─ PublicIP: %s\n", $0}
-      ' <<< "$isp"
+        NR==1 {printf "  ├─ ISP:       %s\n", $0}
+        NR==2 {printf "  ├─ Org:       %s\n", $0}
+        NR==3 {printf "  ├─ AS Path:   %s\n", $0}
+        NR==4 {printf "  └─ PublicIP:  %s\n", $0}
+      ' <<< $(printf '%s\n' "$isp" "${isp2:-}" "${isp3:-}" "${isp4:-}")
     else
       echo "  └─ Error: Could not reach IP-API"
     fi
-      echo -e "\n● ${cyan}[IPv6 CONNECTIVITY]${reset}"
+    echo -e "\n● ${cyan}[IPv6 CONNECTIVITY]${reset}"
     if ping6 -c 1 google.com &>/dev/null; then
       echo -e "  └─ Status: \e[32mONLINE\e[0m"
     else
@@ -455,63 +524,19 @@ health_check() {
       read -rp "${cyan}[USER]${reset} Press Enter to continue: "
       return
     fi
-    read -p "Would you like to backup the current network configurations? [y|n]: " config_net
-    if [[ "$config_net" == "y" || "$config_net" == "yes"  ]]; then
-      info "Preparing snapshots of the current configuration"
-      backup_all_configs
-      success "Backup of healthy network complete"
-    else
-      error "Network Config Backup Rejected" 
-    fi
     return 0
   fi
 }
 repair() {
-  local int out dns_time retrans rx_error rx_dropped tx_error tx_dropped next_hop gw dev config_net
-  skip_check=0
-  out=$(ip -s link show "$nic")
-  isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
-  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
-  if command -v netstat &> /dev/null; then
-    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
-  elif command -v nstat &> /dev/null; then
-    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
-  fi
-  gw=$(awk '/default/{print $3}' <(ip r))
-  dev=$(awk '/default/{print $5}' <(ip r))
-  gw6=$(awk '/default/{print $3}' <(ip -6 r))
-  dev6=$(awk '/default/{print $5}' <(ip -6 r))
-  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
-  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
-  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
-  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
-  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
-  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
-  int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
-  # ==== Check & repair network ====
-  if ! have_dns; then
-    warn "Could not detect DNS"
-    info "DNS Failed.Trying alternate"
-    if getent hosts cloudflare.com &> /dev/null; then
-      success "DNS Detected"
-      skip_check=0
-    else
-      skip_check=1
-      skip_reason=( "DNS" )
-    fi
-  fi
-  if ! have_net; then
-    warn "Could not detect asymmetric connectivity"
-    info "Connectivity Failed. Trying alternate"
-    if ping -c1 -W2 8.8.8.8 &>/dev/null; then
-      success "Connectivity Detected"
-      skip_check=0
-    else
-      skip_check=1
-      skip_reason+=( "NETWORK" )
-    fi
-  fi
   health_check
+  read -p "Would you like to backup the current network configurations? [y|n]: " config_net
+  if [[ "$config_net" == "y" || "$config_net" == "yes"  ]]; then
+    info "Preparing snapshots of the current configuration"
+    backup_all_configs
+    success "Backup of healthy network complete"
+  else
+    error "Network Config Backup Rejected"
+  fi
   if [[ "$skip_check" -eq 0 ]]; then
     return 0
   fi
@@ -625,13 +650,12 @@ EOF
     warn "Unable to bring the network up."
   fi
   echo "=== Network Repair finished ==="
-  return 0  
+  return 0
 }
 fix_network() {
   header_notice "$net_repair_title" "$net_repair_banner" "18" "4"
   # ==== User Selection: DD or Rsync? ====
   mkdir -p "$base_dir" "$backup_dir" "$snaps_dir" "$config_dir"
-  #exec >>"$log_file" 2>&1
   info "=== Network Repair started: $(date +'%F') ==="
   # =========== BEGIN NETWORK REPAIR ===============
   while true; do
@@ -651,10 +675,8 @@ fix_network() {
       5)
         if [[ -z "$(ls -A "$snaps_dir" 2>/dev/null)" ]]; then
           warn "No snapshots found"
-          #return
         else
           ls_table "$snaps_dir"
-          #return
         fi
         ;;
       6)restore_backup                                             ;;
