@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: June 2026 == # == Version#: 1.2.0 === #
+# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.0.0 ==== #
 # ====== One-Click ====== #
 # ==== System information widget ====
 build_vars
@@ -19,10 +19,10 @@ hide_mode=true
 cpu_model=$(sed -E 's/^([^@]*).*/\1/' <<< $cpu_model)
 ip_asn=$(sed -E 's/^([^ \t]*).*/\1/' <<< "$ip_asn")
 ip_upstream=$(sed -E 's/^[^ ]* (.*)/\1/' <<< "$ip_upstream")
-if [[ $sys_ip =~ ^10\..* ]] || 
-   [[ $sys_ip =~ ^192\.168\..* ]] || 
-   [[ $sys_ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\..* ]] || 
-   [[ $sys_ip =~ ^169\.254\..* ]] || 
+if [[ $sys_ip =~ ^10\..* ]] ||
+   [[ $sys_ip =~ ^192\.168\..* ]] ||
+   [[ $sys_ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\..* ]] ||
+   [[ $sys_ip =~ ^169\.254\..* ]] ||
    [[ $sys_ip =~ ^127\..* ]]; then
     is_nat=true
     upstream_gw=$(sed -En '/^[ \t]+2[ \t]+/s/[^.]*[ \t]([0-9.]+).*/\1/p' <(traceroute -n 8.8.8.8))
@@ -58,7 +58,7 @@ fleet_gwd="${fleet_gw:-}"
 upstream_gwd="${upstream_gw:-}"
 st=$(date +%s)
 virt=$(systemd-detect-virt || true)
-if ! vnstat -i "$nic" 2>&1 /dev/null; then 
+if ! vnstat -i "$nic" &> /dev/null; then
   install_dep "vnstat" "command -v vnstat" "vnstat" "$pkg_mgr" true
 fi
 sys_info() {
@@ -97,7 +97,7 @@ sys_info() {
     if [[ "$hide_mode" == true ]]; then
       sys_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_ip")
       whois_ipv6=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$whois_ipv6")
-      ipv6_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$ipv6_gw")
+      ipv6_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^nextcloud_menu([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$ipv6_gw")
       sys_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "$sys_gw")
       x_site_ip=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${x_site_ip:-}")
       x_site_gw=$(sed -E ':a;s/^([^.]*\.([.*]+)?)[0-9]/\1*/;s/^([^:]*:([:*]+)?)[0-9a-f]/\1*/I;ta' <<< "${x_site_gw:-}")
@@ -132,15 +132,20 @@ sys_info() {
     key_col=$(tput setaf 217)
     desc_col=$(tput setaf 195)
     local timer=$(printf '%02d:%02d:%02d' $((elapsed/3600)) $((elapsed%3600/60)) $((elapsed%60)))
+    if [[ -f /etc/one-click/ocb/ocb_results.txt ]]; then
+      single=$(awk -F"|" '{print $2}' /etc/one-click/ocb/ocb_results.txt | tail -1)
+      multi=$(awk -F"|" '{print $3}' /etc/one-click/ocb/ocb_results.txt | tail -1)
+    fi
     printf '%s\n' \
-      " " " " \
-      "${blue}┌───┬────────┐" \
-      "│ ${key_col}p ${blue}│${desc_col} Pause${blue}  │" \
-      "│ ${key_col}r ${blue}│${desc_col} Resume${blue} │" \
-      "│ ${key_col}h ${blue}│${desc_col} Hide${blue}   │" \
-      "│ ${key_col}u ${blue}│${desc_col} Unhide${blue} │" 
+      "                         ${blue}┌──────────────────────────┐" \
+      "                 │${blue} ======= ${orange}GEEKBENCH${blue} ====== ${blue}│" \
+      "${blue}┌───┬────────┐           ${blue}├───────────────────┬──────┤" \
+      "│ ${key_col}p ${blue}│${desc_col} Pause${blue}  │           │${key_col}Single Core Score: ${blue}│${desc_col}${single:-N/A}${blue}   │" \
+      "│ ${key_col}r ${blue}│${desc_col} Resume${blue} │           │${key_col}Multi Core Score: ${blue} │${desc_col}${multi:-N/A}${blue}  │" \
+      "│ ${key_col}h ${blue}│${desc_col} Hide${blue}   │           └───────────────────┴──────┘" \
+      "│ ${key_col}u ${blue}│${desc_col} Unhide${blue} │"
     if ! which haveged &> /dev/null; then
-      printf '%s\n' "│ ${key_col}e ${blue}│${desc_col} Entropy${blue}│" 
+      printf '%s\n' "│ ${key_col}e ${blue}│${desc_col} Entropy${blue}│"
     fi
     printf '%s\n' \
       "│ ${key_col}q ${blue}│${desc_col} Quit${blue}   │" \
@@ -150,18 +155,7 @@ sys_info() {
       "├────────────┴──────────┼───────────────────────────────────────────────────────────────────┐${reset}" \
       "│${key_col}Bandwidth Used Today${blue}   │${desc_col}$(awk  '/today/{print "RX: " $2$3 " | TX: " $5$6 " | Total: " $8$9 " | Rate: " $11$12}' <(vnstat -i "$nic" 2> /dev/null)) ${blue}    " \
       "│${key_col}Bandwidth Used Monthly${blue} │${desc_col}$(awk  -v date="$(date +'%Y-%m')" '$1==date{print "RX: " $2$3 " | TX: " $5$6 " | Total: " $8$9 " | Rate: " $11$12}' <(vnstat -i "$nic" -m 2> /dev/null)) ${blue}    " \
-      "└───────────────────────┴───────────────────────────────────────────────────────────────────┘${reset}" " " " "
-      if [[ -f /etc/one-click/ocb/ocb_results.txt ]]; then
-        single=$(awk -F"|" '{print $2}' /etc/one-click/ocb/ocb_results.txt | tail -1)
-        multi=$(awk -F"|" '{print $3}' /etc/one-click/ocb/ocb_results.txt | tail -1)
-        printf '%s\n' " " " "\
-          "${blue}┌──────────────────────────┐" \
-          "│${blue} ======= ${orange}GEEKBENCH${blue} ====== ${blue}│" \
-          "${blue}├───────────────────┬──────┤" \
-          "│${key_col}Single Core Score: ${blue}│${desc_col}$single${blue}   │" \
-          "│${key_col}Multi Core Score: ${blue} │${desc_col}$multi${blue}  │" \
-          "└───────────────────┴──────┘"
-      fi
+      "└───────────────────────┴───────────────────────────────────────────────────────────────────┘${reset}"
       if [[ "$hide_mode" == true ]]; then
         printf "\nHidden: ON %s" "$spinner2"
         printf '\n%s' "Press $(tput setaf 217)u$(tput sgr 0) to unhide: "
@@ -236,7 +230,7 @@ sys_info() {
     ent_val="$entropy"
     if [[ "$refresh" = true ]]; then
       clear
-      paste <(print_table) <(legend) 
+      paste <(print_table) <(legend)
       [[ "$hide_mode" == true ]] && status_text="ON (HIDDEN)"
       i=$(( (i + 1) % 4 ))
       spinner="${spinner_frames[i]}"
@@ -249,7 +243,7 @@ sys_info() {
           install_dep "havged" "grep haveged <(systemctl list-unit-files)" "haveged" "$pkg_mgr"
           systemctl enable haveged --now
           ;;
-        h) 
+        h)
           hide_mode=true
           hidden
           if [[ "$refresh" == false ]]; then
