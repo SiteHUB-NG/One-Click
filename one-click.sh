@@ -93,6 +93,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments." \
 	"  --console               Start a serial console session to any VPS from controller." \
 	"  --vnc                   Start an ephemeral NoVNC to a VPS." \
+	"  --permission-repair     Repair web hosting permissions across sites, php, databases and backups" \
     "  --version               Check version" \
     "$(tput bold)Firewall Rule Engine$(tput sgr0)" \
     "$(tput dim)(usage: one-click engine <subcommand>)$(tput sgr0)" \
@@ -200,7 +201,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  update                  Run 'one-click update' simultaneously across the active fleet." \
     "  audit                   Gather real-time hardware architecture profiles and save locally as JSON." \
     "  bench <version>         Execute async hardware benchmarks across hosts and fetch result payloads." \
-	"  bench --exclude <vm>    Add the -e or --exclude flag to exclude a peer from fleet bench." \
+	"  bench --exclude <servr> Add the -e or --exclude flag to exclude a peer from fleet bench." \
 	"  bench --summary <vm?>   View historic benchmarks taken on a single host or entire fleet." \
 	"  status                  View the status of the most recent benchmarks run across all peers." \
 	"  list                    List all fleet members and their IPs." \
@@ -533,7 +534,7 @@ check_for_updates() {
   local version_check current_version
   current_version="$version"
   version_check="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/one-click.sh"
-  remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check"))
+  remote_version=$(sed -En '/\<version="([0-9.]+)"/s//\1/p' <(curl -sL --connect-timeout 2 "$version_check") | head -1)
   if [[ -z "$remote_version" ]]; then
     error "Could not detect master version"
     return
@@ -1150,6 +1151,54 @@ except ValueError:
 if [[ $1 == "menu" ]]; then
   clear
   one_click_menu
+  exit 0
+fi
+# ==== Fix Permissions ====
+if [[ "$1" == "--permission-repair" ]]; then
+  fix_domain="$2"
+  [[ -z "$fix_domain" ]] && { error "Usage: repair_site_permissions <domain>"; exit 1; }
+  for type_fix in "wordpress" "sites" "nextcloud" "apps/nodejs"; do
+    if [[ -d "/etc/one-click/${type_fix}/${fix_domain}" ]]; then
+      fix_type="$type_fix"
+      break
+    fi
+  done
+  if [[ -z "$fix_type" ]]; then
+    match=$(find /etc/one-click -type d -path "*/${fix_domain}" -print -quit 2>/dev/null)
+    if [[ -n "$match" ]]; then
+      fix_type=$(echo "$match" | sed -E 's|^/etc/one-click/([^/]+(/[^/]+)?)/'"$fix_domain"'$|\1|')
+    fi
+  fi
+  [[ -z "$fix_type" ]] && { error "Could not determine installation type for $fix_domain"; exit 1; }
+  mode_ver="$fix_type"
+  meta_file="/etc/one-click/${fix_type}/${fix_domain}/meta.conf"
+  if [[ -f "$meta_file" ]]; then
+    source "$meta_file"
+  else
+    error "Meta file not found: $meta_file"
+    exit 1
+  fi
+  expected_user="${SITE_USER:-www-data}"
+  expected_group="${SITE_GROUP:-www-data}"
+  webserver_grp="www-data"
+  [[ -f /etc/redhat-release ]] && webserver_grp="apache"
+  if id "$expected_user" &>/dev/null; then
+    usermod -aG "$webserver_grp" "$expected_user" 2>/dev/null || true
+  fi
+  site_dir="${SITE_DIR:-/etc/one-click/${fix_type}/${fix_domain}/www}"
+  registry_file="/etc/one-click/db-manager/sites/${fix_domain}.json"
+  secret_file="/etc/one-click/db-manager/secrets/db/${fix_domain}.pass"
+  mkdir -p "/run/one-click/${fix_domain}" "/var/lib/one-click/${fix_domain}/"{sessions,tmp} "/var/log/one-click/${fix_domain}"
+  chown -R "${expected_user}:${webserver_grp}" "/run/one-click/${fix_domain}"
+  chown -R "${expected_user}:${expected_group}" "/var/lib/one-click/${fix_domain}"
+  chmod 700 "/var/lib/one-click/${fix_domain}"
+  chmod 770 "/run/one-click/${fix_domain}"
+  if [[ -d "$site_dir" ]]; then
+    find "$site_dir" -exec chown "${expected_user}:${expected_group}" {} + 2>/dev/null || true
+  fi
+  [[ -f "$registry_file" ]] && chown "${expected_user}:${webserver_grp}" "$registry_file" 2>/dev/null || true
+  [[ -f "$secret_file" ]]   && chown "${expected_user}:${webserver_grp}" "$secret_file" 2>/dev/null || true
+  success "Permissions repair completed for $fix_domain."
   exit 0
 fi
 # ==== Fleet SSH ====
@@ -2569,6 +2618,7 @@ _one_click() {
   cmds["fleet:'dir'"]=
   cmds["fleet:'update-keys'"]=
   cmds["fleet: 'migrate-master'"]=
+  cmds["fleet: '--sync'"]=
 
   cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
   cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -2733,6 +2783,7 @@ _one_click() {
   cmds["fleet:'update-keys'"]=
   cmds["fleet: 'engine'"]=
   cmds["fleet: 'migrate-master'"]=
+  cmds["fleet: '--sync'"]=
 
   cmds["engine:'open filter' 'open mangle' 'open raw'"]=
   cmds["engine:'show alias'"]=
@@ -3366,6 +3417,7 @@ if [[ $# -gt 0 ]]; then
         "  --vps                   Deploy, edit and delete NAT and public KVM VPS deployments." \
         "  --console               Start a serial console session to any VPS from controller." \
         "  --vnc                   Start an ephemeral NoVNC to a VPS." \
+        "  --permission-repair     Repair web hosting permissions across sites, php, databases and backups" \
         "  --version               Check version" \
         " " "$(tput smul)Examples:$(tput rmul)" \
         "  $(tput setaf 3)one-click $(tput setaf 4)net-repair$(tput sgr 0)    Run network repair" \
