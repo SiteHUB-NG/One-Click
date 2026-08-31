@@ -8301,16 +8301,16 @@ db_show_credentials() {
   host="localhost"
   echo
   printf "${blue}╔══════════════════════════════════════════════════════════════════════╗${reset}\n"
-  printf "${blue}║${reset}  ${magenta}DATABASE CREDENTIALS:${reset} %-43s ${blue}║${reset}\n" "$domain"
+  printf "${blue}║${reset}  ${magenta}DATABASE CREDENTIALS:${reset} %-45s ${blue}║${reset}\n" "$domain"
   printf "${blue}╠══════════════════════╦═══════════════════════════════════════════════╣${reset}\n"
-  printf "${blue}║${reset} ${cyan}DATABASE:${reset} %-12s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+  printf "${blue}║${reset} ${cyan}DATABASE:${reset} %-10s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
     "" "$db_name"
-  printf "${blue}║${reset} ${cyan}USER:${reset} %-16s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+  printf "${blue}║${reset} ${cyan}USER:${reset} %-14s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
     "" "$db_user"
-  printf "${blue}║${reset} ${cyan}HOST:${reset} %-16s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
+  printf "${blue}║${reset} ${cyan}HOST:${reset} %-14s ${blue}║${reset} %-45s ${blue}║${reset}\n" \
     "" "$host"
   printf "${blue}╠══════════════════════╩═══════════════════════════════════════════════╣${reset}\n"
-  printf "${blue}║${reset} ${yellow}PASSWORD:${reset} %-54s ${blue}║${reset}\n" \
+  printf "${blue}║${reset} ${yellow}PASSWORD:${reset} %-58s ${blue}║${reset}\n" \
     "$password"
   printf "${blue}╚══════════════════════════════════════════════════════════════════════╝${reset}\n"
 }
@@ -8396,7 +8396,7 @@ query_menu() {
   while true; do
     printf "${blue}%s${reset}\n" \
       "╔════════════════════════════════════════════════════════════╗" \
-      "║                ${yellow}Registry Queries${blue}                ║" \
+      "║                ${yellow}Registry Queries${blue}                           ║" \
       "╠════╦═══════════════════════════════════════════════════════╣" \
       "║ ${magenta}1${blue}  ║ ${green}List All Sites${blue}                                        ║" \
       "║ ${magenta}2${blue}  ║ ${green}List Wordpress Sites${blue}                                  ║" \
