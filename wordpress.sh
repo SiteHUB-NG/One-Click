@@ -19,18 +19,21 @@ if [[ "$pkg_mgr" == "apt" && "$1" != "--monitor" ]]; then
   php_pkg="php"
   "$pkg_mgr" -y install php-cli php-fpm php-curl php-gd php-mbstring php-xml php-zip php-mysql &> /dev/null
 elif [[ "$1" != "--monitor" ]]; then
+  if [[ -f /etc/one-click/.deps_wordpress ]]; then
+    php_pkg="$($pkg_mgr search php 2> /dev/null | awk '$0 !~ /=/ {print $1}' | head -1 || true)"
+    php_pkg="${php_pkg//.*}"
+    $pkg_mgr install -y epel-release &> /dev/null
+    $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-${VERSION_ID}.rpm &> /dev/null
+    $pkg_mgr module reset php -y &> /dev/null
+    install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php 2> /dev/null) | tail -1)
+    $pkg_mgr module enable php:remi-${install_php_ver} -y &> /dev/null
+    touch /etc/one-click/.deps_wordpress
+    install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
+    install_dep "php-cli" "command -v php" "php-cli" "$pkg_mgr" true
+    install_dep "php-fpm" "command -v "$pkg_mgr" -y install php-cli php-fpm php-curl php-gd php-mbstring php-xml php-zip php-mysql &> /dev/nullphp" "php-fpm" "$pkg_mgr" true
+    install_dep "php-mysqlnd" "command -v php" "php-mysqlnd" "$pkg_mgr" true
+  fi
   dig_pkg=bind-utils
-  php_pkg="$($pkg_mgr search php 2> /dev/null | awk '$0 !~ /=/ {print $1}' | head -1 || true)"
-  php_pkg="${php_pkg//.*}"
-  $pkg_mgr install -y epel-release &> /dev/null
-  $pkg_mgr install -y https://rpms.remirepo.net/enterprise/remi-release-${VERSION_ID}.rpm &> /dev/null
-  $pkg_mgr module reset php -y &> /dev/null
-  install_php_ver=$(awk '$2 ~ /\./{sub(".*-","",$2);print $2}' <($pkg_mgr module list php 2> /dev/null) | tail -1)
-  $pkg_mgr module enable php:remi-${install_php_ver} -y &> /dev/null
-  install_dep "php" "command -v php" "${php_pkg:-php-fpm}" "$pkg_mgr" true
-  install_dep "php-cli" "command -v php" "php-cli" "$pkg_mgr" true
-  install_dep "php-fpm" "command -v "$pkg_mgr" -y install php-cli php-fpm php-curl php-gd php-mbstring php-xml php-zip php-mysql &> /dev/nullphp" "php-fpm" "$pkg_mgr" true
-  install_dep "php-mysqlnd" "command -v php" "php-mysqlnd" "$pkg_mgr" true
 fi
 if [[ "$1" != "--monitor" ]]; then
   install_dep "git" "command -v git" "git" "$pkg_mgr" true || true
@@ -594,7 +597,8 @@ configure_nc_db() {
   local nc_db="one_click:${domain//./-}:$(openssl rand -hex 4):$nc_db_user"
   echo "DB_NAME=$nc_db" >> /etc/one-click/nextcloud/$domain/meta.conf
   install_db
-  systemctl enable mariadb --now
+  systemctl is-enabled --quiet "mariadb" || systemctl enable "mariadb"
+  systemctl is-active --quiet "mariadb" || systemctl start "mariadb"
   mysql -e "CREATE DATABASE IF NOT EXISTS \`$nc_db\`;"
   user_exists=$(mysql -sN -e "SELECT 1 FROM mysql.user WHERE user='$nc_db_user' AND host='localhost'")
   if [[ "$user_exists" == "1" ]]; then
@@ -611,7 +615,8 @@ configure_db() {
   provision_success=0
   local db="one_click:${domain}:$(openssl rand -hex 4):$dbuser"
   echo "DB_NAME=$db" >> /etc/one-click/wordpress/$domain/meta.conf
-  systemctl enable mariadb --now
+  systemctl is-enabled --quiet "mariadb" || systemctl enable "mariadb"
+  systemctl is-active --quiet "mariadb" || systemctl start "mariadb"
   mysql -e "CREATE DATABASE IF NOT EXISTS \`$db\`;"
   user_exists=$(mysql -sN -e "SELECT 1 FROM mysql.user WHERE user='$dbuser' AND host='localhost'")
   if [[ "$user_exists" == "1" ]]; then
@@ -780,7 +785,7 @@ EOF
     fi
     usermod -aG "$redis_user" "$webserver_user"
     usermod -aG "$redis_user" "$web_user"
-    systemctl daemon-reexec
+    systemctl daemon-reload
     systemctl enable "${service}" --now
     for i in {1..10}; do
       if [[ -S "$sock" ]]; then
@@ -3803,7 +3808,7 @@ switch_site_php() {
     return 1
   fi
   sed -Ei "s,(ExecStart=)[^ \t]*,\1$binary_path," /etc/systemd/system/php-fpm@${domain}.service
-  systemctl daemon-reexec
+  #systemctl daemon-reexec
   systemctl daemon-reload
   systemctl restart "php-fpm@$domain"
   systemctl  reload "$webserver"
@@ -4704,7 +4709,8 @@ fi
 if command -v httpd &> /dev/null || command -v apache2 &> /dev/null || command -v nginx &> /dev/null; then
   if ! systemctl is-active one-click-guard.service &> /dev/null; then
     systemctl daemon-reload
-    systemctl enable one-click-guard.service --now
+    systemctl is-enabled --quiet "one-click-guard.service" || systemctl enable "one-click-guard.service"
+    systemctl is-active --quiet "one-click-guard.service" || systemctl start "one-click-guard.service"
   fi
 fi
 view_security() {
@@ -6307,7 +6313,7 @@ install_nextcloud() {
     redis_service "$domain"
     usermod -aG $redis_user "$webserver_user"
     usermod -aG $redis_user "$web_user"
-    systemctl daemon-reexec
+    systemctl daemon-reload
     systemctl enable "${service}" --now
     for i in {1..10}; do
       if [[ -S "$sock" ]]; then
