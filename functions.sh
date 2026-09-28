@@ -1578,6 +1578,238 @@ NODE_PRIVKEY_B64="${private_b64}"
 EOF
   rm -rf "$tmp_key_dir"
 }
+fleet_migrate_controller() {
+  local target_destination="$1"
+  local inventory_json="/etc/one-click/virtualization/inventory.json"
+  local inventory_file="/etc/one-click/fleet/inventory.yml"
+  local backup_ledger="/etc/one-click/virtualization/backup_ledger.json"
+  local snapshot_ledger="/etc/one-click/virtualization/snapshot_ledger.json"
+  local state_dir="/etc/one-click/state"
+  if [[ -f "/etc/one-click/fleet/controller.env" ]]; then
+    . "/etc/one-click/fleet/controller.env"
+  else
+    error "Missing core controller configuration profiles. Migration halted."
+    return 1
+  fi
+  if [[ -z "$target_destination" ]]; then
+    error "No target destination node specified."
+    return 1
+  fi
+  if [[ "$target_destination" == "$CONTROLLER_NAME" ]]; then
+    error "Target destination matches the current active controller. Migration Aborted."
+    return 1
+  fi
+  info "Resolving target destination networking routes."
+  local private_key="/etc/one-click/fleet/keys/id_ed25519"
+  if [[ ! -f "$private_key" ]]; then
+    private_key="/home/oneclick/.ssh/id_ed25519"
+  fi
+  local target_ip
+  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$target_destination" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
+  if [[ -z "$target_ip" ]]; then
+    target_ip="$target_destination"
+  fi
+  if ! ping -c 1 -W 2 "$target_ip" &>/dev/null; then
+    error "Target node [$target_destination] ($target_ip) is unreachable. Aborting migration."
+    return 1
+  fi
+  warn "${orange}CRITICAL ACTION INITIATED:${reset} Promoting cluster control to [$target_destination] ($target_ip)."
+  read -p "${cyan}[USER]${reset} Are you absolutely sure you want to transfer controller authority? (y|n): " confirm
+  if [[ "$confirm" != "y" && "$confirm" != "yes" ]]; then
+    info "Migration canceled by operator."
+    return 0
+  fi
+  sync_custom_ssh_keys "$target_ip" "$private_key"
+  info "Staging WireGuard configurations for migration."
+  sudo mkdir -p /etc/one-click/sync/wireguard
+  cp -f /etc/wireguard/{one-click.conf,oc_*.key} /etc/one-click/sync/wireguard/ 2>/dev/null || true
+  info "Demoting current wireguard controller"
+  sed -Ei "s/${target_destination}/$(hostname -s)/g;" /etc/one-click/sync/wireguard/one-click.conf 2>/dev/null || true
+  info "Packaging controller database, state logs, WireGuard assets, and automation playbooks."
+  local migration_archive="/tmp/one-click-master-migration.tar.gz"
+  rm -f "$migration_archive"
+  local tar_targets=(
+    "/etc/one-click/virtualization/allocated_ports.db"
+    "/etc/one-click/fleet/inventory.yml"
+    "/etc/one-click/fleet/playbooks"
+    "/etc/one-click/fleet/keys"
+    "/etc/one-click/virtualization/inventory.json"
+    "/etc/one-click/virtualization/available_ips.txt"
+    "/etc/one-click/virtualization/used_ips.txt"
+    "/etc/one-click/virtualization/ports_pool.txt"
+    "/etc/one-click/sync/wireguard"
+  )
+  mkdir -p /etc/one-click/sync
+  [[ -f "$backup_ledger" ]] && raw_targets+=("${backup_ledger#/}")
+  [[ -f "$snapshot_ledger" ]] && raw_targets+=("${snapshot_ledger#/}")
+  [[ -d "$state_dir" ]] && raw_targets+=("etc/one-click/fleet/state")
+  local valid_targets=()
+  for path in "${raw_targets[@]}"; do
+    if [[ -e "/$path" ]]; then
+      tar_targets+=("$path")
+    fi
+  done
+  if [[ ${#tar_targets[@]} -eq 0 ]]; then
+    error "No valid controller configuration files found to archive."
+    return 1
+  fi
+  tar --ignore-failed-read -czf "$migration_archive" -C / "${tar_targets[@]}" 2>/dev/null
+  info "Pushing controller configuration to new master controller."
+  cat "$migration_archive" | ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "cat > /tmp/migration.tar.gz"
+  local transition_func
+  transition_func=$(declare -f apply_node_firewall_transition)
+  info "Unpacking states, modifying firewall, and elevating [$target_destination] to active cluster master."
+  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << EOF
+    $transition_func
+    if ! command -v ansible &>/dev/null && command -v ansible-inventory &>/dev/null; then
+      echo "${blue}[INFO]${reset} Ansible not found. Installing package on $target_destination."
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq ansible
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y -q ansible-core || sudo dnf install -y -q ansible
+      elif command -v yum &>/dev/null; then
+        sudo yum install -y -q ansible
+      else
+        echo "${red}[ERROR]${reset} Unable to detect package manager to install Ansible."
+        return
+      fi
+    fi
+    if ! command -v ansible &>/dev/null; then
+      echo "${red}[ERROR]${reset} Ansible installation failed or binary is missing from PATH."
+      return 1
+    fi
+    sudo mkdir -p /etc/one-click/sync
+    sudo tar -xzf /tmp/migration.tar.gz -C /
+    rm -f /tmp/migration.tar.gz
+    if [[ -f /etc/wireguard/one-click.conf ]]; then
+      sudo systemctl stop wg-quick@one-click 2>/dev/null || true
+      mkdir -p /tmp/wireguard
+      sudo mv -f /etc/wireguard/one-click.conf /tmp/wireguard/one-click.conf
+      sudo sed -Ei 's/^(Endpoint = )[^:]*/\1${target_ip}/' /tmp/wireguard/one-click.conf 2>/dev/null || true
+    fi
+    if [[ -d /etc/one-click/sync/wireguard ]]; then
+      sudo systemctl stop wg-quick@one-click 2>/dev/null || true
+      sudo mkdir -p /etc/wireguard
+      sudo cp -f /etc/one-click/sync/wireguard/* /etc/wireguard/ 2>/dev/null || true
+      sudo chmod 600 /etc/wireguard/* 2>/dev/null || true
+      sudo systemctl enable wg-quick@one-click 2>/dev/null || true
+      sudo systemctl restart wg-quick@one-click 2>/dev/null || true
+    fi
+    sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOT
+ROLE=peer
+FLEET_IDENTITY=\$(hostname)
+STATUS=active
+CONTROLLER_TARGET_IP=127.0.0.1
+LAST_SYNC=\$(date +%s)
+EOT
+    sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOT
+CONTROLLER_IP="${target_ip}"
+CONTROLLER_NAME="${target_destination}"
+ROLE_TYPE="controller"
+IS_MASTER="true"
+EOT
+    apply_node_firewall_transition "promote_to_master" "${target_ip}"
+EOF
+  info "Grabbing new controller $(hostname -s)'s wireguard conf"
+  scp -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}":/tmp/wireguard/one-click.conf /etc/wireguard/one-click.conf 2>/dev/null || true
+  info "Updating WireGuard endpoints and configurations across remaining fleet peers."
+  local fleet_hosts
+  fleet_hosts=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | grep -v "hosts (" | awk '{print $1}')
+  for node in $fleet_hosts; do
+    [[ "$node" == "$target_destination" || "$node" == "$CONTROLLER_NAME" ]] && continue
+    local node_ip
+    node_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$node" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
+    [[ -z "$node_ip" ]] && continue
+    [[ "$node_ip" == "${sys_ip:-${sys_ipv6}}" ]] && continue
+    if ! ping -c 1 -W 2 "$node_ip" &>/dev/null; then
+      warn "Peer node [$node] ($node_ip) is unreachable. Skipping peer update."
+      continue
+    fi
+    info "Updating Promoted WireGuard Controller endpoint and controller metadata on peer [$node] ($node_ip)."
+    ssh -i "$private_key" -o ConnectTimeout=5 -o StrictHostKeyChecking=no "oneclick@${node_ip}" "sudo bash -s" << EOF || { warn "Failed to update peer [$node] ($node_ip) over SSH. Moving to next node."; continue; }
+      if [ -f /etc/one-click/fleet/controller.env ]; then
+        sudo sed -i '/^CONTROLLER_IP=/d;/^CONTROLLER_NAME=/d;/^IS_MASTER=/d' /etc/one-click/fleet/controller.env
+        echo "CONTROLLER_IP=\"${target_ip}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
+        echo "CONTROLLER_NAME=\"${target_destination}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
+        echo "IS_MASTER=\"false\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
+      fi
+      if [ -f /etc/wireguard/one-click.conf ]; then
+        sudo sed -Ei 's/^(Endpoint = )[^:]/\1${target_ip}/' /etc/wireguard/one-click.conf
+        sudo systemctl restart wg-quick@one-click 2>/dev/null || true
+      fi
+      if ! sudo iptables -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
+        sudo nft add table ip filter 2>/dev/null || true
+        sudo nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
+        if ! sudo nft list chain ip filter ONE-CLICK-FLEET 2>/dev/null | grep -q "ip saddr ${target_ip} tcp dport 22 accept"; then
+          sudo nft insert rule ip filter ONE-CLICK-FLEET index 1 ip saddr "${target_ip}" tcp dport 22 accept 2>/dev/null || true
+        fi
+      else
+        sudo iptables -N ONE-CLICK-FLEET 2>/dev/null || true
+        sudo iptables -C ONE-CLICK-FLEET -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+        sudo iptables -I ONE-CLICK-FLEET 1 -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+      fi
+EOF
+  done
+  sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOF
+ROLE=peer
+FLEET_IDENTITY=$(hostname | tr -d '[:space:]')
+STATUS=managed
+CONTROLLER_TARGET_IP=$target_ip
+LAST_SYNC=$(date +%s)
+EOF
+  sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOF
+CONTROLLER_IP="${target_ip}"
+CONTROLLER_NAME="${target_destination}"
+ROLE_TYPE="hypervisor-peer"
+ORIGINAL_ROLE_TYPE="$ROLE_TYPE"
+IS_MASTER="false"
+EOF
+  apply_node_firewall_transition "demote_to_peer" "$target_ip"
+  info "Purging local assets."
+  rm -rf /etc/one-click/sync/wireguard
+  rm -f "$migration_archive"
+  success "Migration process completed successfully!"
+  success "Master dominance and WireGuard controller authority securely transferred to [$target_destination] ($target_ip)."
+  warn "This node has dropped its encryption keyways and is operating as a standard cluster member."
+}
+fleet_rule_engine() {
+  fleet_init
+  build_vars
+  . "$fleet_root/controller.env"
+  if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
+    error "Security Block: Rule broadcasting must be initiated from the central Fleet Controller."
+    return 1
+  fi
+  local target_host="$1"
+  local rule_command="$2"
+  for host_conf in "$fleet_root"/state/*.conf; do
+    [[ ! -f "$host_conf" ]] && continue
+    local current_slug
+    current_slug=$(basename "$host_conf")
+    local solved_ip
+    solved_ip=$(grep '^IP=' "$host_conf" | cut -d= -f2-)
+    if [[ -n "$solved_ip" ]]; then
+      if [[ " $rule_command " =~ [[:space:]]${current_slug//.*}[[:space:]] ]]; then
+        info "Resolving fleet name '${current_slug//.*}' to IP: ${solved_ip}"
+        rule_command=$(echo "$rule_command" | sed "s/${current_slug//.*}/${solved_ip}/g")
+      fi
+    fi
+  done
+  if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
+    load_rule_engine
+    rule_engine "$rule_command chain ONE-CLICK-FLEET" -y
+  else
+    info "Dispatching custom firewall instruction payload to target: $target_host."
+    ANSIBLE_HOST_KEY_CHECKING=False \
+      ANSIBLE_SSH_TIMEOUT=3 \
+      ANSIBLE_GATHERING=explicit \
+      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+	  ansible "$target_host" \
+      -i "$fleet_root/inventory.yml" \
+      -m shell -a "/usr/local/bin/one-click engine \"$rule_command chain ONE-CLICK-FLEET\" -y" 2>/dev/null
+    fi
+  success "Firewall rule dispatched and applied to execution path successfully."
+}
 fleet_write_playbooks() {
   # ==== Update Playbook ====
   cat > "$fleet_root/playbooks/update.yml" <<'EOF'
@@ -2771,6 +3003,7 @@ fleet_add() {
   local FLEET_AVAILABLE_IPS_FILE="${virt_dir}/available_ips.txt"
   local FLEET_USED_IPS_FILE="${virt_dir}/used_ips.txt"
   local hypervisor_wg_file="/etc/one-click/fleet/hypervisor_assigned_wg_ips.json"
+  local master_wg_config="/etc/wireguard/one-click.conf"
   trap 'fleet_remove "$host"' ERR
   if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
     warn "Only the controller can add and remove peers."
@@ -2810,12 +3043,6 @@ fleet_add() {
     sed -Ei.one-click_bak -e "/# One-Click/{a\ ${ip}\t${host}" -e '}' /etc/hosts
   fi
   fleet_init
-  cat > "$fleet_root/state/$host.conf" <<EOF
-HOSTNAME=$host
-IP=${private_ip:-${ip}}
-NAT_IP=${local_ip:-${remote_vps_ip:-$ip}}
-PORT=$port
-EOF
   bash /etc/one-click/write_inventory.sh "$role_type" "${private_ip:-}" "${ip:-}"
   echo "${orange}[${red}[${reset}$host IS BEING ADDED TO THE FLEET${red}]${orange}]"
   cat <<EOF
@@ -2887,16 +3114,16 @@ EOF
   trap '' ERR
   while true; do
     ssh \
-        -n \
-        -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-        -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-        -o ConnectTimeout=1 \
-        -o BatchMode=yes \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-		${porto:+"${porto[@]}"} \
-        "oneclick@$connect_ip" \
-        "echo ready" >/dev/null 2>&1;
+      -n \
+      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+      -o ConnectTimeout=1 \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      ${porto:+"${porto[@]}"} \
+      "oneclick@$connect_ip" \
+      "echo ready" >/dev/null 2>&1;
     if [[ $? -eq 0 ]]; then
       success "Key handshake established!"
       break
@@ -2960,95 +3187,101 @@ EOF
 	  /^skipping/s/] ->/$(tput setaf 45)&${magenta}/;
 	  /^changed/s/] ->/${orange}&${magenta}/;
 	  /^fatal/s/(\[)([^]]*)/${red}\1${blue}\2${red}/;
-    " || true
+  " || true
   if [[ "$server_type" == "hypervisor" && "$role_type" != "vps-peer" ]]; then
-	# ==== Configure WG on new peer ====
+  # ==== Configure WG on new peer ====
     local target_host_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --host $host | jq -r '.ansible_host')
     warn "Fleet Hypervisor Member. Preparing node."
-	# ==== Hypervisor Path ====
-    local hv_node_name="${host}"
-    if [[ -z "$hv_node_name" ]]; then
-      error "Hypervisor target identifier is undefined."
-      return 1
-    fi
-	if [[ "$server_type" == "hypervisor" ]]; then
-      info "Allocating Private Node IP from pool for hypervisor: $hv_node_name"
-      hv_private_ip=$(head -n 1 "$FLEET_AVAILABLE_IPS_FILE")
-      if [[ -z "$hv_private_ip" ]]; then
-        error "IP Pool Exhausted! Unable to register hypervisor network mesh tunnel."
+	  # ==== Hypervisor Path ====
+      local hv_node_name="${host}"
+      if [[ -z "$hv_node_name" ]]; then
+        error "Hypervisor target identifier is undefined."
         return 1
       fi
-      info "Generating Wireguard Cryptographic Keys locally on Controller for $hv_node_name."
-      local hv_private_key hv_public_key hv_preshared_key master_pub_key
-      hv_private_key=$(wg genkey)
-      hv_public_key=$(echo "$hv_private_key" | wg pubkey)
-      hv_preshared_key=$(wg genpsk)
-      if [[ -f /etc/wireguard/oc_public.key ]]; then
-        master_pub_key=$(cat /etc/wireguard/oc_public.key)
-      else
-        if ! command -v wg &> /dev/null; then
-          if command -v apt > /dev/null; then
-            apt -y install wireguard-tools &> /dev/null
-          else
-            dnf -y install wireguard-tools &> /dev/null
+	  if [[ "$server_type" == "hypervisor" ]]; then
+        info "Allocating Private Node IP from pool for hypervisor: $hv_node_name"
+        hv_private_ip=$(head -n 1 "$FLEET_AVAILABLE_IPS_FILE")
+        if [[ -z "$hv_private_ip" ]]; then
+          error "IP Pool Exhausted! Unable to register hypervisor network mesh tunnel."
+          return 1
+        fi
+        cat > "$fleet_root/state/$host.conf" <<EOF
+HOSTNAME=$host
+IP=${private_ip:-${ip}}
+NAT_IP=${local_ip:-${remote_vps_ip:-$ip}}
+MESH_IP=${hv_private_ip:-${vps_private_ip:-}}
+PORT=$port
+EOF
+        info "Generating Wireguard Cryptographic Keys locally on Controller for $hv_node_name."
+        local hv_private_key hv_public_key hv_preshared_key master_pub_key
+        hv_private_key=$(wg genkey)
+        hv_public_key=$(echo "$hv_private_key" | wg pubkey)
+        hv_preshared_key=$(wg genpsk)
+        if [[ -f /etc/wireguard/oc_public.key ]]; then
+          master_pub_key=$(cat /etc/wireguard/oc_public.key)
+        else
+          if ! command -v wg &> /dev/null; then
+            if command -v apt > /dev/null; then
+              apt -y install wireguard-tools &> /dev/null
+            else
+              dnf -y install wireguard-tools &> /dev/null
+            fi
           fi
         fi
-        if [[ ! -f /etc/wireguard/one-click.conf ]]; then
-          local master_wg_config="/etc/wireguard/one-click.conf"
-          if [[ ! -f "$master_wg_config" ]]; then
-            info "Constructing controller WireGuard interface configuration profile."
-            mkdir -p /etc/wireguard
-            chmod 700 /etc/wireguard
-            local master_priv master_pub
-            master_priv=$(wg genkey)
-            master_pub=$(echo "$master_priv" | wg pubkey)
-            echo "$master_pub" > /etc/wireguard/oc_public.key
-            echo "$master_priv" > /etc/wireguard/oc_private.key
-            master_pub_key="$master_pub"
-            local controller_outbound_nic
-            controller_outbound_nic=$(awk 'NR==1{print $5}' <(ip -4 -6 route show default | grep -v "virbr"))
-            # ==== Configure Controller Firewall ====
-            if command -v nft >/dev/null 2>&1; then
-              FW_POSTUP="
-                #PostUp = nft add rule inet filter forward iifname \"one-click\" oifname \"${controller_outbound_nic}\" accept
-                #PostUp = nft add rule inet filter forward iifname \"${controller_outbound_nic}\" oifname \"one-click\" ct state related,established accept
-                PostUp = nft add table ip wg-nat
-                PostUp = nft flush table ip wg-nat
-                PostUp = nft add chain ip wg-nat postrouting '{ type nat hook postrouting priority 100; }'
-                PostUp = nft add rule ip wg-nat postrouting oifname \"${controller_outbound_nic}\" masquerade
-                PostUp = nft add table ip6 wg-nat6
-                PostUp = nft flush table ip6 wg-nat6
-                PostUp = nft add chain ip6 wg-nat6 postrouting '{ type nat hook postrouting priority 100; }'
-                PostUp = nft add rule ip6 wg-nat6 postrouting oifname \"${controller_outbound_nic}\" masquerade
-                PostUp = nft add rule ip6 wg-nat6 postrouting ip6 saddr fd00:99aa::/64 oifname \"${controller_outbound_nic}\" masquerade
-              "
-              FW_PREDOWN="
-                #PreDown = nft delete rule inet filter forward iifname \"one-click\" oifname \"${controller_outbound_nic}\" accept
-                #PreDown = nft delete rule inet filter forward iifname \"${controller_outbound_nic}\" oifname \"one-click\" ct state related,established accept
-                PreDown = nft delete table ip wg-nat
-                PreDown = nft delete table ip6 wg-nat6
-              "
-            elif command -v iptables >/dev/null 2>&1; then
-              FW_POSTUP="
-                #PostUp = iptables -A FORWARD -i one-click -o ${controller_outbound_nic} -j ACCEPT
-                #PostUp = iptables -A FORWARD -i ${controller_outbound_nic} -o one-click -m state --state RELATED,ESTABLISHED -j ACCEPT
-                PostUp = iptables -t nat -I POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
-                PostUp = ip6tables -t nat -I POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
-                PostUp = ip6tables -t nat -I POSTROUTING -s fd00:99aa::/64 -o ${controller_outbound_nic} -j MASQUERADE
-              "
-              FW_PREDOWN="
-                #PreDown = iptables -D FORWARD -i one-click -o ${controller_outbound_nic} -j ACCEPT
-                #PreDown = iptables -D FORWARD -i ${controller_outbound_nic} -o one-click -m state --state RELATED,ESTABLISHED -j ACCEPT
-                PreDown = iptables -t nat -D POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
-                PreDown = ip6tables -t nat -D POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
-                PreDown = ip6tables -t nat -D POSTROUTING -s fd00:99aa::/64 -o ${controller_outbound_nic} -j MASQUERADE
-              "
-            else
-              error "Neither iptables nor nftables is installed. A firewall backend is required for NAT."
-              exit 1
-            fi
-            [[ -z "$controller_outbound_nic" ]] && controller_outbound_nic="eth0"
-            cat > "$master_wg_config" <<EOF
+        if [[ ! -f "$master_wg_config" ]]; then
+          info "Constructing controller WireGuard interface configuration profile."
+          mkdir -p /etc/wireguard
+          chmod 700 /etc/wireguard
+          local master_priv master_pub
+          master_priv=$(wg genkey)
+          master_pub=$(echo "$master_priv" | wg pubkey)
+          echo "$master_pub" > /etc/wireguard/oc_public.key
+          echo "$master_priv" > /etc/wireguard/oc_private.key
+          master_pub_key="$master_pub"
+          local controller_outbound_nic
+          controller_outbound_nic=$(awk 'NR==1{print $5}' <(ip -4 -6 route show default | grep -v "virbr"))
+          # ==== Configure Controller Firewall ====
+          if command -v nft >/dev/null 2>&1; then
+            FW_POSTUP="
+              #PostUp = nft add rule inet filter forward iifname \"one-click\" oifname \"${controller_outbound_nic}\" accept
+              #PostUp = nft add rule inet filter forward iifname \"${controller_outbound_nic}\" oifname \"one-click\" ct state related,established accept
+              PostUp = nft add table ip wg-nat
+              PostUp = nft flush table ip wg-nat
+              PostUp = nft add chain ip wg-nat postrouting '{ type nat hook postrouting priority 100; }'
+              PostUp = nft add rule ip wg-nat postrouting oifname \"${controller_outbound_nic}\" masquerade
+              PostUp = nft add table ip6 wg-nat6
+              PostUp = nft flush table ip6 wg-nat6
+              PostUp = nft add chain ip6 wg-nat6 postrouting '{ type nat hook postrouting priority 100; }'
+              PostUp = nft add rule ip6 wg-nat6 postrouting oifname \"${controller_outbound_nic}\" masquerade
+              PostUp = nft add rule ip6 wg-nat6 postrouting ip6 saddr fd00:99aa::/64 oifname \"${controller_outbound_nic}\" masquerade
+            "
+            FW_PREDOWN="
+              #PreDown = nft delete rule inet filter forward iifname \"one-click\" oifname \"${controller_outbound_nic}\" accept
+              #PreDown = nft delete rule inet filter forward iifname \"${controller_outbound_nic}\" oifname \"one-click\" ct state related,established accept
+              PreDown = nft delete table ip wg-nat
+              PreDown = nft delete table ip6 wg-nat6
+            "
+          elif command -v iptables >/dev/null 2>&1; then
+            FW_POSTUP="
+              #PostUp = iptables -A FORWARD -i one-click -o ${controller_outbound_nic} -j ACCEPT
+              #PostUp = iptables -A FORWARD -i ${controller_outbound_nic} -o one-click -m state --state RELATED,ESTABLISHED -j ACCEPT
+              PostUp = iptables -t nat -I POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
+              PostUp = ip6tables -t nat -I POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
+              PostUp = ip6tables -t nat -I POSTROUTING -s fd00:99aa::/64 -o ${controller_outbound_nic} -j MASQUERADE
+            "
+            FW_PREDOWN="
+              #PreDown = iptables -D FORWARD -i one-click -o ${controller_outbound_nic} -j ACCEPT
+              #PreDown = iptables -D FORWARD -i ${controller_outbound_nic} -o one-click -m state --state RELATED,ESTABLISHED -j ACCEPT
+              PreDown = iptables -t nat -D POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
+              PreDown = ip6tables -t nat -D POSTROUTING -o ${controller_outbound_nic} -j MASQUERADE
+              PreDown = ip6tables -t nat -D POSTROUTING -s fd00:99aa::/64 -o ${controller_outbound_nic} -j MASQUERADE
+            "
+          else
+            error "Neither iptables nor nftables is installed. A firewall backend is required for NAT."
+            exit 1
+          fi
+          [[ -z "$controller_outbound_nic" ]] && controller_outbound_nic="eth0"
+          cat > "$master_wg_config" <<EOF
 [Interface]
 Address = 10.10.0.1/16
 MTU = 1412
@@ -3067,20 +3300,18 @@ ${FW_POSTUP}
 
 ${FW_PREDOWN}
 
-# ==== One-Click Fleet Peers ====
 EOF
-            chmod 600 "$master_wg_config"
-            systemctl stop wg-quick@one-click &>/dev/null || true
-            ip link delete dev one-click &>/dev/null || true
-            systemctl daemon-reload &>/dev/null
-            systemctl enable --now wg-quick@one-click &>/dev/null
-          fi
+          chmod 600 "$master_wg_config"
+          systemctl stop wg-quick@one-click &>/dev/null || true
+          ip link delete dev one-click &>/dev/null || true
+          systemctl daemon-reload &>/dev/null
+          systemctl enable --now wg-quick@one-click &>/dev/null
         else
           master_pub_key=$(cat /etc/wireguard/oc_public.key)
         fi
       fi
       info "Registering Tunnel Endpoint locally in Controller configuration files."
-      cat >> /etc/wireguard/one-click.conf <<EOF
+      cat >> "$master_wg_config" <<EOF
 
 # ==== Hypervisor Cluster Node: $hv_node_name ====
 [Peer]
@@ -3233,10 +3464,9 @@ EOF
         " &>/dev/null
 	  set -e
       success "Hypervisor mesh pipe successfully initialized. Interface link live at:$(tput setaf 97) $hv_private_ip ${reset}"
-	else
-	  info "Initialization path. Progressing with setup."
-	  success "Fleet Member initialized successfully."
-	fi
+  else
+    info "Initialization path. Progressing with setup."
+    success "Fleet Member initialized successfully."
   fi
   if bash /etc/one-click/write_inventory.sh ; then
 	if [[ -d "/etc/bind/zones" ]]; then
@@ -6092,6 +6322,11 @@ fleet_vps_power_control() {
 }
 # ==== Fleet HAProxy Edge ====
 fleet_proxy_provision() {
+  target_vm="$1"
+  website="${2:-}"
+  proto="${3:-}"
+  src_port="${4:-}"
+  dest_port="${5:-}"
   local inventory_json="/etc/one-click/virtualization/inventory.json"
   local inventory_file="/etc/one-click/fleet/inventory.yml"
   local identity_key_dir="/etc/one-click/fleet/keys"
@@ -6113,10 +6348,19 @@ fleet_proxy_provision() {
   target_host=$(jq -r ".[] | select(.name == \"$target_vm\") | .host" "$inventory_json" 2>/dev/null | head -1)
   host_ip=$(jq -r ".[] | select(.name == \"$target_vm\") | .host_ip" "$inventory_json" 2>/dev/null | head -1)
   vps_internal_ip=$(jq -r ".[] | select(.name == \"$target_vm\") | .nat_ip" "$inventory_json" 2>/dev/null | tail -1)
+  if [[ "$vps_internal_ip" == "null" || -z "$vps_internal_ip" ]]; then
+    mac=$(awk 'NR==3{print $5}' <(virsh domiflist "$target_vm"))
+    vps_internal_ip=$(virsh net-dhcp-leases oneclick-nat | awk -v mac=$mac '$3 == mac && $4 == "ipv4" {sub("/.*","",$5);print $5}')
+    if [[ "$target_host" == "null" || -z "$target_host" ]]; then
+      target_host="$CONTROLLER_NAME"
+    fi
+  fi
   cluster_ip=$(jq -r ".[] | select(.name == \"$target_vm\") | .cluster_private_ip" "$inventory_json" 2>/dev/null | tail -1)
   if [[ -z "$target_host" || "$target_host" == "null" || -z "$vps_internal_ip" || "$vps_internal_ip" == "null" ]]; then
-    error "Target VM '$target_vm' does not exist in active registry mapping."
-    return 1
+    if [[ -z "$vps_internal_ip" ]]; then
+      error "Target VM '$target_vm' does not exist in active registry mapping."
+      return 1
+    fi
   fi
   local haproxy_payload=""
   if [[ -n "$website" ]]; then
@@ -6145,7 +6389,7 @@ EOF
       fi
     "
   elif [[ -n "$src_port" && -n "$dest_port" ]]; then
-    info "Compiling TCP proxy map for custom port: Host:$dest_port -> $target_vm:$src_port."
+    info "Compiling TCP proxy map for custom port: $target_host:$dest_port -> $target_vm:$src_port."
     local stream_name="tcp_stream_${target_vm}_${dest_port}"
     haproxy_payload="
 listen $stream_name
@@ -6164,7 +6408,7 @@ listen $stream_name
     private_key="/home/oneclick/.ssh/id_ed25519"
   fi
   local target_ip
-  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$target_host" 2>/dev/null | jq -r '.ansible_host // empty')
+  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "${target_host:-$CONTROLLER_NAME}" 2>/dev/null | jq -r '.ansible_host // empty')
   if [[ -z "$target_ip" ]]; then
     error "Network Routing Fault: Could not map host '$target_host' to an active IP matrix."
     return 1
@@ -6238,34 +6482,36 @@ listen $stream_name
     error "Failed to successfully orchestrate proxy services on [$target_host]."
     return 1
   fi
-  printf "$(tput setaf 173)[KEY] $(tput setaf 208)%s\n" \
-    "┌─── SECURITY GATEWAY: TARGET TARGET ACCESS VERIFICATION ──────────┐" \
-	"│$(tput sgr0) To bridge access, please create a key-pair on your endpoint using$(tput setaf 208)│" \
-	"│$(tput setaf 119) ssh-keygen -t ed25519 -C "${target_vm}-endpoint"                     $(tput setaf 208)│" \
-	"│$(tput sgr0) Extract and paste the public key below with:                     $(tput setaf 208)│" \
-	"│$(tput setaf 119) cat ~/.ssh/id_ed25519.pub                                        $(tput setaf 208)│" \
-    "└───[$(tput setaf 111) PUBLIC KEY BLOCK $(tput setaf 208)]───────────────────────────────────────────┘"
-  read -rp "$(tput setaf 152)[WAIT]${reset} Paste your public key here: " public_key
-  if [[ -z "$public_key" ]]; then
-    error "Provisioning Aborted: Cryptographic authority entry appears to be empty."
-    return 1
-  else
-    info "Injecting public key into $target_vm"
-	if [[ -n "$cluster_ip" ]]; then
-      ssh_target="oneclick@$cluster_ip"
-    fi
-    for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
-      [[ -e "$key" ]] || continue
-      ssh -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" \
-	    "echo $public_key >> ~/.ssh/authorized_keys" 2> /dev/null || true
-      if [[ $? -eq 0 ]]; then
-        break
+  if [[ "$src_port" -ne 3389 ]]; then
+    printf "$(tput setaf 173)[KEY] $(tput setaf 208)%s\n" \
+      "┌─── SECURITY GATEWAY: TARGET TARGET ACCESS VERIFICATION ──────────┐" \
+      "│$(tput sgr0) To bridge access, please create a key-pair on your endpoint using$(tput setaf 208)│" \
+      "│$(tput setaf 119) ssh-keygen -t ed25519 -C "${target_vm}-endpoint"                     $(tput setaf 208)│" \
+      "│$(tput sgr0) Extract and paste the public key below with:                     $(tput setaf 208)│" \
+      "│$(tput setaf 119) cat ~/.ssh/id_ed25519.pub                                        $(tput setaf 208)│" \
+      "└───[$(tput setaf 111) PUBLIC KEY BLOCK $(tput setaf 208)]───────────────────────────────────────────┘"
+    read -rp "$(tput setaf 152)[WAIT]${reset} Paste your public key here: " public_key
+    if [[ -z "$public_key" ]]; then
+      error "Provisioning Aborted: Cryptographic authority entry appears to be empty."
+      return 1
+    else
+      info "Injecting public key into $target_vm"
+      if [[ -n "$cluster_ip" ]]; then
+        ssh_target="oneclick@$cluster_ip"
       fi
-    done
+      for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
+        [[ -e "$key" ]] || continue
+        ssh -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" \
+          "echo $public_key >> ~/.ssh/authorized_keys" 2> /dev/null || true
+        if [[ $? -eq 0 ]]; then
+          break
+        fi
+      done
+    fi
+    success "Public Key Added to $target_vm."
+    read -rp "Press Enter after you have added the key: "
+    success "Proxy initialization completed on [$target_host]."
   fi
-  success "Public Key Added to $target_vm."
-  read -rp "Press Enter after you have added the key: "
-  success "Proxy initialization completed on [$target_host]."
   if [[ $? -eq 0 ]]; then
     printf "$(tput setaf 103)[PROXY]${reset}%s\n" \
 	  "${green}┌──────────────────────────────────────────────────────────┐${reset}" \
@@ -7396,8 +7642,8 @@ runcmd:
   - systemctl enable --now wg-quick@one-click 2>/dev/null || true
 EOF
     ;;
-  win)
-  cat > "$user_data_file" <<EOF
+    win)
+    cat > "$user_data_file" <<EOF
 Content-Type: multipart/mixed; boundary="==BOUNDARY=="
 MIME-Version: 1.0
 
@@ -7415,18 +7661,71 @@ if (-not (Get-LocalUser -Name "oneclick" -ErrorAction SilentlyContinue)) {
 } else {
     Set-LocalUser -Name "oneclick" -Password (ConvertTo-SecureString "${raw_password}" -AsPlainText -Force) -PasswordNeverExpires \$true
 }
+
 Set-LocalUser -Name "Administrator" -Password (ConvertTo-SecureString "${raw_password}" -AsPlainText -Force) -PasswordNeverExpires \$true
 
 Get-NetAdapter | Enable-NetAdapter -Confirm:\$false -ErrorAction SilentlyContinue
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
+EOF
+
+    if [[ "$network_mode" == "public" ]]; then
+      cat >> "$user_data_file" <<EOF
+\$adapter = Get-NetAdapter |
+    Where-Object { \$_.Status -eq "Up" } |
+    Select-Object -First 1
+
+if (\$adapter) {
+    \$ifIndex = \$adapter.ifIndex
+
+    Set-NetIPInterface \`
+        -InterfaceIndex \$ifIndex \`
+        -AddressFamily IPv4 \`
+        -Dhcp Disabled \`
+        -ErrorAction SilentlyContinue
+
+    Get-NetIPAddress \`
+        -InterfaceIndex \$ifIndex \`
+        -AddressFamily IPv4 \`
+        -ErrorAction SilentlyContinue |
+        Where-Object { \$_.PrefixOrigin -ne "WellKnown" } |
+        Remove-NetIPAddress -Confirm:\$false -ErrorAction SilentlyContinue
+
+    Get-NetRoute \`
+        -InterfaceIndex \$ifIndex \`
+        -AddressFamily IPv4 \`
+        -ErrorAction SilentlyContinue |
+        Where-Object { \$_.DestinationPrefix -eq "0.0.0.0/0" } |
+        Remove-NetRoute -Confirm:\$false -ErrorAction SilentlyContinue
+
+    New-NetIPAddress \`
+        -InterfaceIndex \$ifIndex \`
+        -IPAddress "${public_ip%%/*}" \`
+        -PrefixLength "${public_ip##*/}" \`
+        -DefaultGateway "${host_gateway}" \`
+        -ErrorAction Stop
+
+    Set-DnsClientServerAddress \`
+        -InterfaceIndex \$ifIndex \`
+        -ServerAddresses @("1.1.1.1","8.8.8.8") \`
+        -ErrorAction SilentlyContinue
+}
+
+EOF
+
+    else
+      cat >> "$user_data_file" <<'EOF'
 Get-NetAdapter | ForEach-Object {
-    Set-NetIPInterface -InterfaceIndex \$_.InterfaceIndex -AddressFamily IPv4 -Dhcp Enabled -ErrorAction SilentlyContinue
-    Set-NetIPInterface -InterfaceIndex \$_.InterfaceIndex -AddressFamily IPv6 -RouterDiscovery Enabled -Dhcp Enabled -ErrorAction SilentlyContinue
+    Set-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -Dhcp Enabled -ErrorAction SilentlyContinue
+    Set-NetIPInterface -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv6 -RouterDiscovery Enabled -Dhcp Enabled -ErrorAction SilentlyContinue
 }
 
 ipconfig /renew | Out-Null
 
+EOF
+    fi
+
+    cat >> "$user_data_file" <<EOF
 Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
 Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 Enable-NetFirewallRule -DisplayGroup "Core Networking Diagnostic - ICMPv4-In" -ErrorAction SilentlyContinue
@@ -7439,15 +7738,20 @@ if (Test-Path "C:\Drivers\guest-agent\qemu-ga-x86_64.msi") {
     Set-Service -Name "qemu-ga" -StartupType Automatic -ErrorAction SilentlyContinue
 }
 
-if (Test-Path "C:\WireGuard\wireguard-amd64.msi") {
-    Start-Process msiexec.exe -ArgumentList "/i \`"C:\WireGuard\wireguard-amd64.msi\`" /qn /norestart" -Wait
+\$wgExe = "C:\Program Files\WireGuard\wireguard.exe"
 
+if (!(Test-Path \$wgExe) -and (Test-Path "C:\WireGuard\wireguard-amd64.msi")) {
+    Start-Process msiexec.exe \`
+        -ArgumentList "/i \`"C:\WireGuard\wireguard-amd64.msi\`" /qn /norestart DO_NOT_LAUNCH=1" \`
+        -Wait
+}
+
+if (Test-Path \$wgExe) {
     \$configDir = "C:\Program Files\WireGuard\Data\Configurations"
-    if (-not (Test-Path \$configDir)) {
-        New-Item -Path \$configDir -ItemType Directory -Force | Out-Null
-    }
+    New-Item -Path \$configDir -ItemType Directory -Force | Out-Null
 
     \$wgConfPath = "\$configDir\one-click.conf"
+
     @'
 [Interface]
 Address = ${vps_private_ip}/16
@@ -7463,27 +7767,28 @@ Endpoint = ${CONTROLLER_IP}:51821
 PersistentKeepalive = 25
 '@ | Set-Content -Path \$wgConfPath -Encoding UTF8
 
-    if (Test-Path "C:\Program Files\WireGuard\wireguard.exe") {
-        Start-Process -FilePath "C:\Program Files\WireGuard\wireguard.exe" -ArgumentList "/installtunnelservice \`"\$wgConfPath\`"" -Wait
-    }
+    Start-Process -FilePath \$wgExe \`
+        -ArgumentList "/installtunnelservice \`"\$wgConfPath\`"" \`
+        -Wait
 }
 
 Write-Output "OneClick Windows Provisioning Complete."
 --==BOUNDARY==--
 EOF
-      ;;
+    ;;
   custom_iso|*)
       cat > "$user_data_file" <<EOF
 #cloud-config
 hostname: ${vps_name}
 EOF
-      ;;
+    ;;
   esac
   cp "$user_data_file" "$archive_user_data"
   info "Configuring peer VPS networking"
   if [[ "$is_windows" -eq 1 ]]; then
     local win_mac=$(echo "$vps_name" | md5sum | sed -E 's/^(..)(..)(..).*$/52:54:00:\1:\2:\3/')
-    local net_flag="--network network=oneclick-nat,model=virtio --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on"
+    local net_flag="--network network=oneclick-nat,model=virtio --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9"
+    host_gateway=$(ip route show default | awk '{print $3; exit}')
   else
     local net_flag="--network network=oneclick-nat,model=virtio"
   fi
@@ -7493,9 +7798,13 @@ EOF
 	local host_gateway
     host_gateway=$(ip route show default | awk '{print $3}')
     if [[ -n "$virtual_mac" ]]; then
-      net_flag="--network bridge=br0,mac=${virtual_mac},model=virtio"
-	  net_mac_block="match:\n macaddress: \"${virtual_mac}\""
-	  cat > "$network_config_file" <<EOF
+      if [[ "$is_windows" -eq 1 ]]; then
+        net_flag="--network network=oneclick-nat,model=e1000e,mac=$virtual_mac --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9"
+        host_gateway=$(ip route show default | awk '{print $3; exit}')
+      else
+        net_flag="--network bridge=br0,mac=${virtual_mac},model=virtio"
+        net_mac_block="match:\n macaddress: \"${virtual_mac}\""
+        cat > "$network_config_file" <<EOF
 version: 2
 ethernets:
   pub_iface:
@@ -7512,10 +7821,11 @@ ethernets:
     nameservers:
       addresses: [1.1.1.1, 8.8.8.8]
 EOF
+      fi
     else
       net_flag="--network bridge=br0,model=virtio"
-	  net_mac_block="match:\n name: \"e*\""
-	  cat > $network_config_file <<EOF
+      net_mac_block="match:\n name: \"e*\""
+      cat > $network_config_file <<EOF
 version: 2
 renderer: networkd
 ethernets:
@@ -7534,9 +7844,6 @@ ethernets:
         - 1.1.1.1
         - 8.8.8.8
 EOF
-      if [[ "$is_windows" -eq 1 ]]; then
-        net_flag="--network network=oneclick-nat,model=e1000e,mac=$virtual_mac"
-      fi
     fi
     cp "$network_config_file" "$archive_net_config"
     cloud_init_net_argument="--cloud-init user-data=$user_data_file,network-config=$network_config_file"
@@ -8392,21 +8699,102 @@ EOC
 }
 write_win_files() {
   local dir="$1"
-  cd "$dir"
-  mkdir -p iso_root
-  cat > iso_root/Autounattend.xml <<'EOF'
+  pass_admin="$2"
+  mkdir -p "$dir/payload/winpe" "$dir/payload/windows"
+  cat > "$dir/payload/winpe/Autounattend.xml" <<'EOF'
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
-    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
       <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
       <InputLocale>en-US</InputLocale>
       <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
       <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Prepare One-Click Windows boot files</Description>
+          <Path>cmd.exe /c "for %D in (D: E: F: G: H: I: J: K: L: M:) do @if exist %D\oneclick-winpe.cmd call %D\oneclick-winpe.cmd"</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+</unattend>
+EOF
+  cat > "$dir/payload/winpe/oneclick-winpe.cmd" <<'EOF'
+@echo off
+setlocal EnableExtensions
+echo [ONECLICK] Preparing Windows UEFI boot environment.
+> X:\oneclick-diskpart.txt echo select disk 0
+>>X:\oneclick-diskpart.txt echo select partition 1
+>>X:\oneclick-diskpart.txt echo assign letter=S
+>>X:\oneclick-diskpart.txt echo select partition 3
+>>X:\oneclick-diskpart.txt echo assign letter=W
+>>X:\oneclick-diskpart.txt echo exit
+diskpart /s X:\oneclick-diskpart.txt
+if errorlevel 1 goto :fail
+if not exist W:\Windows\System32\winload.efi goto :fail
+bcdboot W:\Windows /s S: /f UEFI /l en-US
+if errorlevel 1 goto :fail
+if not exist S:\EFI\Microsoft\Boot\bootmgfw.efi goto :fail
+mkdir S:\EFI\Boot 2>nul
+copy /y S:\EFI\Microsoft\Boot\bootmgfw.efi S:\EFI\Boot\bootx64.efi >nul
+if errorlevel 1 goto :fail
+if not exist S:\EFI\Microsoft\Boot\BCD goto :fail
+if not exist S:\EFI\Boot\bootx64.efi goto :fail
+> W:\OneClick\BCD_READY echo OK
+echo [ONECLICK] BCD and UEFI loader created successfully.
+wpeutil shutdown
+exit /b 0
+:fail
+echo [ONECLICK] ERROR: Failed to prepare Windows boot files.
+if exist W:\OneClick (
+  > W:\OneClick\BUILD_FAILED echo WinPE BCDBoot stage failed.
+)
+wpeutil shutdown
+exit /b 1
+EOF
+  cat > "$dir/payload/windows/Unattend.xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <ComputerName>*</ComputerName>
     </component>
   </settings>
   <settings pass="oobeSystem">
-    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
@@ -8417,402 +8805,824 @@ write_win_files() {
         <SkipMachineOOBE>true</SkipMachineOOBE>
         <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>${pass_admin}</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
       <AutoLogon>
-        <Password><Value>OneClickTemp123!</Value><PlainText>true</PlainText></Password>
+        <Password>
+          <Value>${pass_admin}</Value>
+          <PlainText>true</PlainText>
+        </Password>
         <Enabled>true</Enabled>
         <Username>Administrator</Username>
         <LogonCount>1</LogonCount>
       </AutoLogon>
-      <UserAccounts>
-        <AdministratorPassword><Value>OneClickTemp123!</Value><PlainText>true</PlainText></AdministratorPassword>
-      </UserAccounts>
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <CommandLine>powershell.exe -ExecutionPolicy Bypass -File "C:\setup.ps1"</CommandLine>
+          <Description>Provision One-Click master image</Description>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\OneClick\setup.ps1</CommandLine>
         </SynchronousCommand>
-        Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq 'Public' } | Set-NetConnectionProfile -NetworkCategory Private
-        Enable-NetFirewallRule -DisplayGroup "Core Networking"
-        Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)"
       </FirstLogonCommands>
     </component>
   </settings>
 </unattend>
 EOF
-  cat > iso_root/setup.ps1 <<'EOF'
+  cat > "$dir/payload/windows/setup.ps1" <<'EOF'
 # Written by Chike Egbuna for One-Click ToolBox
 $ErrorActionPreference = "Stop"
-
-Write-Host "==> Starting One-Click Master Template Provisioning."
-
-if (Test-Path "C:\Drivers\VirtIO") {
-    Write-Host "==> Installing VirtIO Drivers."
-    Get-ChildItem "C:\Drivers\VirtIO" -Filter *.inf -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "Installing driver: $($_.FullName)"
-        pnputil.exe /add-driver "$($_.FullName)" /install
-    }
+$ProgressPreference = "SilentlyContinue"
+$Root = "C:\OneClick"
+$Log  = Join-Path $Root "setup.log"
+function Log([string]$Message) {
+    $line = "$(Get-Date -Format s) $Message"
+    $line | Tee-Object -FilePath $Log -Append
 }
-
 try {
-    $qemuGaPath = Get-ChildItem "C:\Drivers\guest-agent" -Filter "qemu-ga-x86_64.msi" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-    if ($qemuGaPath -and (Test-Path $qemuGaPath)) {
-        Write-Host "Installing QEMU Guest Agent."
-        $process = Start-Process msiexec.exe -ArgumentList "/i `"$qemuGaPath`" /qn /norestart" -Wait -PassThru
-    }
-} catch {
-    Write-Warning "Failed to install QEMU Guest Agent: $_"
-}
+    Log "Starting One-Click master provisioning."
+    if (Test-Path "$Root\VirtIO") {
+        Log "Installing staged VirtIO drivers into the Windows driver store."
 
-if (Test-Path "C:\WireGuard") {
-    $wgMsi = Get-ChildItem "C:\WireGuard" -Filter "*.msi" | Select-Object -ExpandProperty FullName -First 1
-    $wgConf = Get-ChildItem "C:\WireGuard" -Filter "*.conf" | Select-Object -ExpandProperty FullName -First 1
+        $driverInfs = Get-ChildItem "$Root\VirtIO" -Filter "*.inf" -Recurse -ErrorAction SilentlyContinue
 
-    if ($wgMsi -and (Test-Path $wgMsi)) {
-        Write-Host "==> Installing WireGuard Package: $wgMsi"
-        Start-Process msiexec.exe -ArgumentList "/i `"$wgMsi`" /qn /norestart" -Wait
+        if (!$driverInfs) {
+            throw "No staged VirtIO INF files were found."
+        }
 
-        if ($wgConf -and (Test-Path $wgConf)) {
-            Write-Host "==> Registering WireGuard Service with config: $wgConf"
-            $wgExe = "C:\Program Files\WireGuard\wireguard.exe"
-            if (Test-Path $wgExe) {
-                Start-Process $wgExe -ArgumentList "/installtunnelservice `"$wgConf`"" -Wait
+        foreach ($inf in $driverInfs) {
+            Log "Installing VirtIO driver: $($inf.FullName)"
+
+            $p = Start-Process pnputil.exe `
+                -ArgumentList "/add-driver `"$($inf.FullName)`" /install" `
+                -Wait -PassThru -NoNewWindow
+
+            Log "pnputil exit code for $($inf.Name): $($p.ExitCode)"
+
+            if ($p.ExitCode -notin @(0, 259, 1641, 3010)) {
+                throw "VirtIO driver installation failed: $($inf.FullName) [$($p.ExitCode)]"
             }
         }
     }
+    $qemuGa = Get-ChildItem "$Root\guest-agent" -Filter "qemu-ga-x86_64.msi" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName -First 1
+    if ($qemuGa) {
+        Log "Installing QEMU Guest Agent."
+        $p = Start-Process msiexec.exe `
+            -ArgumentList "/i `"$qemuGa`" /qn /norestart /l*v `"$Root\qemu-ga.log`"" `
+            -Wait -PassThru
+        if ($p.ExitCode -notin @(0, 1641, 3010)) {
+            throw "QEMU Guest Agent installation failed: $($p.ExitCode)"
+        }
+    }
+    $wgMsi = Get-ChildItem "$Root\WireGuard" -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty FullName -First 1
+    if ($wgMsi) {
+        Log "Installing staged WireGuard package."
+        $p = Start-Process msiexec.exe `
+            -ArgumentList "/i `"$wgMsi`" /qn /norestart DO_NOT_LAUNCH=1 /l*v `"$Root\wireguard.log`"" `
+            -Wait -PassThru
+        if ($p.ExitCode -notin @(0, 1641, 3010)) {
+            throw "WireGuard installation failed: $($p.ExitCode)"
+        }
+    }
+    $cloudbaseMsi = Join-Path $Root "CloudbaseInitSetup_Stable_x64.msi"
+    if (!(Test-Path $cloudbaseMsi)) {
+        throw "Cloudbase-Init MSI is missing: $cloudbaseMsi"
+    }
+    Log "Installing Cloudbase-Init."
+    $p = Start-Process msiexec.exe `
+        -ArgumentList "/i `"$cloudbaseMsi`" /qn /norestart RUNSERVICEASLOCALSYSTEM=1 /l*v `"$Root\cloudbase-init.log`"" `
+        -Wait -PassThru
+    Log "Cloudbase-Init installer exit code: $($p.ExitCode)"
+    if ($p.ExitCode -notin @(0, 1641, 3010)) {
+        throw "Cloudbase-Init installation failed: $($p.ExitCode)"
+    }
+
+    $cbRoot = "C:\Program Files\Cloudbase Solutions\Cloudbase-Init"
+    if (!(Test-Path $cbRoot)) {
+        $cbRoot = "C:\Program Files (x86)\Cloudbase Solutions\Cloudbase-Init"
+    }
+    if (!(Test-Path $cbRoot)) {
+        throw "Cloudbase-Init installation directory was not found."
+    }
+    $service = Get-Service -Name cloudbase-init -ErrorAction SilentlyContinue
+    if ($service) {
+        Set-Service -Name cloudbase-init -StartupType Automatic
+    }
+    try {
+        Get-NetConnectionProfile -ErrorAction Stop |
+            Where-Object { $_.NetworkCategory -eq 'Public' } |
+            Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+    }
+    catch {
+        Log "Network profile was not ready yet: $_"
+    }
+    Enable-NetFirewallRule -DisplayGroup "Core Networking" -ErrorAction SilentlyContinue
+    Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -ErrorAction SilentlyContinue
+    $finalize = Join-Path $Root "finalize.ps1"
+    if (!(Test-Path $finalize)) {
+        throw "Finalization script is missing: $finalize"
+    }
+    Log "Registering boot-validation/finalization task."
+    $taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$finalize`""
+    & schtasks.exe /Create /TN "OneClickFinalize" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $taskCommand /F | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create OneClickFinalize scheduled task."
+    }
+    "OK" | Set-Content "$Root\STAGE1_READY"
+    Log "Stage 1 complete. Shutting down for fresh-NVRAM/VirtIO validation."
+    shutdown.exe /s /t 3 /f
 }
-
-$msiUrl = "https://github.com/cloudbase/cloudbase-init/releases/download/1.1.4/CloudbaseInitSetup_1_1_4_x64.msi"
-$msiPath = "C:\Windows\Temp\CloudbaseInitSetup.msi"
-
-Write-Host "Downloading Cloudbase-Init."
-Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
-
-Write-Host "Installing Cloudbase-Init."
-$cbProcess = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart AUTO_CONFIG=1" -Wait -PassThru
-
-Set-Service -Name "cloudbase-init" -StartupType Automatic
-
-$cloudbaseDir = "C:\Program Files\Cloudbase Solutions\Cloudbase-Init"
-$unattendCmd = "$cloudbaseDir\conf\Unattended.cmd"
-
-if (Test-Path $unattendCmd) {
-    Write-Host "==> Sealing image with Cloudbase-Init Unattended.cmd."
-    & "$unattendCmd"
+catch {
+    Log "FATAL: $_"
+    "$_" | Set-Content "$Root\BUILD_FAILED"
+    shutdown.exe /s /t 5 /f
+    exit 1
 }
+EOF
+  cat > "$dir/payload/windows/finalize.ps1" <<'EOF'
+# Written by Chike Egbuna for One-Click ToolBox
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$Root = "C:\OneClick"
+$Log  = Join-Path $Root "finalize.log"
+function Log([string]$Message) {
+    $line = "$(Get-Date -Format s) $Message"
+    $line | Tee-Object -FilePath $Log -Append
+}
+try {
+    Log "Fresh-NVRAM/VirtIO boot reached Windows successfully."
+
+    if (!(Test-Path "$Root\STAGE1_READY")) {
+        throw "STAGE1_READY marker is missing."
+    }
+    & schtasks.exe /Delete /TN "OneClickFinalize" /F 2>$null | Out-Null
+    $virtioDisk = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Model -match 'VirtIO|Red Hat' -or
+            $_.PNPDeviceID -match 'VEN_1AF4'
+        }
+    if (!$virtioDisk -and (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
+        $virtioDisk = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FriendlyName -match 'VirtIO|Red Hat' -or
+                $_.InstanceId -match '^PCI\\VEN_1AF4'
+            }
+    }
+    if (!$virtioDisk) {
+        throw "No active VirtIO storage device was detected during validation boot."
+    }
+    "OK" | Set-Content "$Root\VIRTIO_BOOT_OK"
+    $cbRoot = "C:\Program Files\Cloudbase Solutions\Cloudbase-Init"
+    if (!(Test-Path $cbRoot)) {
+        $cbRoot = "C:\Program Files (x86)\Cloudbase Solutions\Cloudbase-Init"
+    }
+    if (!(Test-Path $cbRoot)) {
+        throw "Cloudbase-Init directory is missing."
+    }
+    $cloudbaseUnattend = "$Root\CloudbaseUnattend.xml"
+    if (!(Test-Path $cloudbaseUnattend)) {
+        throw "One-Click Sysprep unattend file is missing."
+    }
+    if (!(Test-Path $cloudbaseUnattend)) {
+        throw "No Cloudbase/Sysprep unattend file is available."
+    }
+    Remove-Item "C:\Windows\Panther\Unattend.xml" -Force -ErrorAction SilentlyContinue
+    Remove-Item "C:\Windows\System32\Sysprep\unattend.xml" -Force -ErrorAction SilentlyContinue
+    Log "Running Sysprep /generalize /oobe /quit."
+    $sysprep = "$env:WINDIR\System32\Sysprep\Sysprep.exe"
+    $args = "/generalize /oobe /quit /quiet /unattend:`"$cloudbaseUnattend`""
+    $p = Start-Process $sysprep -ArgumentList $args -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        throw "Sysprep failed with exit code $($p.ExitCode)."
+    }
+    "OK" | Set-Content "$Root\MASTER_READY"
+    Log "Sysprep completed successfully. Master is sealed."
+    Log "Powering off without another boot."
+    shutdown.exe /s /t 3 /f
+}
+catch {
+    Log "FATAL: $_"
+    "$_" | Set-Content "$Root\BUILD_FAILED"
+    shutdown.exe /s /t 5 /f
+    exit 1
+}
+EOF
+  cat > "$dir/payload/windows/CloudbaseUnattend.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="generalize">
+    <component name="Microsoft-Windows-PnpSysprep"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <PersistAllDeviceInstalls>true</PersistAllDeviceInstalls>
+    </component>
+  </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Cloudbase-Init specialize</Description>
+          <Path>cmd.exe /c &quot;&quot;C:\Program Files\Cloudbase Solutions\Cloudbase-Init\Python\Scripts\cloudbase-init.exe&quot; --config-file &quot;C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init-unattend.conf&quot;&quot;</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+      <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
+      </OOBE>
+    </component>
+  </settings>
+</unattend>
 EOF
 }
 prep_windows() {
-  ## TODO: Sysprep and qcow2 bootable image for windows
   . "/etc/one-click/fleet/controller.env"
-  mkdir -p /etc/one-click/tmp
-  local win_iso_url="${1}"
-  out_name="${2:-win2022}"
-  target_host="$3"
-  dest_dir="/etc/one-click/virtualization/images/"
-  build_dir="/etc/one-click/tmp/win_builder_${out_name}"
-  local required_gb="${4:-$REQ_BUFFER}"
+  local win_iso_url="${1:?Windows ISO URL is required}"
+  local out_name="${2:-win2022}"
+  local target_host="${3:?Target host is required}"
+  local dest_dir="/etc/one-click/virtualization/images"
+  local build_dir="/etc/one-click/tmp/win_builder_${out_name}"
+  local password="$4"
+  local required_gb="${5:-${REQ_BUFFER:-50}}"
   local storage_script="/etc/one-click/virtualization/initialize_storage.sh"
-  virtio_iso_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.262-1/virtio-win.iso"
+  local virtio_iso_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.262-1/virtio-win.iso"
+  local cloudbase_url="https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.msi"
+  local local_remote_script="/tmp/oneclick_remote_build_${out_name}.sh"
+  local clean_dest_dir="${dest_dir%/}"
+  local ssh_key=""
+  local ssh_key_arg=()
+  local target_ip="$target_host"
+  local inv_ip=""
+  local free_kb free_gb build_pid
   mkdir -p "$build_dir" "$dest_dir"
-  local free_kb
   vg_name=one_click_vg
   if ! vgdisplay "$vg_name" &>/dev/null; then
     write_peer_vps_vg_allocation
-    bash "$storage_script" "$disk_size" "$vps_name" "$dest_dir" "$VG_ALLOC" "$ALLOC_THRESHOLD"
+    bash "$storage_script" \
+      "$disk_size" \
+      "$vps_name" \
+      "$dest_dir" \
+      "$VG_ALLOC" \
+      "$ALLOC_THRESHOLD"
   fi
-  local ssh_key=""
   if [ -f "/etc/one-click/fleet/keys/id_ed25519" ]; then
     ssh_key="/etc/one-click/fleet/keys/id_ed25519"
   elif [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
     ssh_key="/home/oneclick/.ssh/id_ed25519"
   fi
-  local ssh_key_arg=""
-  if [ -n "$ssh_key" ]; then
-    ssh_key_arg="-i ${ssh_key}"
+  [ -n "$ssh_key" ] && ssh_key_arg=(-i "$ssh_key")
+  if [ -f "/etc/one-click/fleet/inventory.yml" ]; then
+    inv_ip="$(grep -A 5 "$target_host" /etc/one-click/fleet/inventory.yml | grep ansible_host | head -n1 | awk '{print $2}')"
+    [ -n "$inv_ip" ] && target_ip="$inv_ip"
   fi
   info "Checking disk space in $dest_dir on $target_host."
-  if [[ "$target_host" == $(hostname -s) ]]; then
-    free_kb=$(awk 'NR==2 {print $4}' <(df -k "$dest_dir"))
+  if [[ "$target_host" == "$(hostname -s)" || "${target_ip//[][]}" == "${CONTROLLER_IP:-}" ]]; then
+    free_kb=$(df -kP "$dest_dir" | awk 'NR==2 {print $4}')
   else
-    free_kb=$(ssh -o StrictHostKeyChecking=no $ssh_key_arg "oneclick@${target_host}" "df -kP '$dest_dir' | awk 'NR==2 {print \$4}'")
+    free_kb=$(ssh -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" "oneclick@${target_ip//[][]}" \
+      "df -kP '$dest_dir' | awk 'NR==2 {print \\$4}'") || return 1
   fi
-  local free_gb=$(( free_kb / 1024 / 1024 ))
+  free_gb=$(( free_kb / 1024 / 1024 ))
   info "Free space on $target_host: ${free_gb} GB | Required buffer: ${required_gb} GB"
   if [ "$free_gb" -lt "$required_gb" ]; then
     error "Insufficient disk space in $dest_dir on $target_host to build $out_name template!"
-    exit 1
+    return 1
   fi
   success "Adequate disk space for $out_name verified."
-  write_win_files "$build_dir"
-  local clean_dest_dir="$(echo "$dest_dir" | sed 's#/*$##')"
-  local local_remote_script="/tmp/oneclick_remote_build_${out_name}.sh"
-  local target_ip="$target_host"
-  if [ -f "/etc/one-click/fleet/inventory.yml" ]; then
-    local inv_ip
-    inv_ip="$(grep -A 5 "$target_host" /etc/one-click/fleet/inventory.yml | grep ansible_host | head -n 1 | awk '{print $2}')"
-    if [ -n "$inv_ip" ]; then
-      target_ip="$inv_ip"
-    fi
-  fi
-  info "Checking and installing dependancies"
-  if [[ "$target_host" == $(hostname -s) ]]; then
-    if command -v apt &> /dev/null; then
-      if ! command -v virt-install &> /dev/null; then
-        pkg_mgr -y update
-        pkg_mgr install -y qemu-utils virtinst
-      fi
-    else
-      if ! command -v virt-install &> /dev/null; then
-        pkg_mgr install -y epel-release
-        pkg_mgr install -y qemu-img virt-install
-      fi
-    fi
-  else
-    ssh -tt -o StrictHostKeyChecking=no $ssh_key_arg "oneclick@${target_host}" "
-      if command -v apt &> /dev/null; then
-        if ! command -v virt-install &> /dev/null; then
-          sudo apt -y update
-          sudo apt install -y qemu-utils virtinst
-        fi
-      else
-        if ! command -v virt-install &> /dev/null; then
-          sudo dnf -y install epel-release
-          sudo dnf install -y qemu-img virt-install
-        fi
-      fi
-    "
-  fi
-  info "Generating remote script."
-  cat > "$local_remote_script" << 'EOF'
+  write_win_files "$build_dir" "$password" || {
+    error "Failed to generate Windows build files."
+    return 1
+  }
+  cat > "$local_remote_script" <<'REMOTE_SCRIPT_EOF'
 #!/usr/bin/env bash
-# Written by Chike Egbuna for One-Click
+# Written by Chike Egbuna for One-Click ToolBox
+set -euo pipefail
 BUILD_DIR="$1"
-CLEAN_DEST_DIR="$2"
+DEST_DIR="$2"
 OUT_NAME="$3"
 WIN_ISO_URL="$4"
 VIRTIO_ISO_URL="$5"
-
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+CLOUDBASE_URL="$6"
+DISK_SIZE="$7"
+TARGET_HOST="$8"
+VM_NAME="builder-${OUT_NAME}"
+RAW_IMAGE="${BUILD_DIR}/builder_raw.qcow2"
+FINAL_IMAGE="${DEST_DIR}/${OUT_NAME}.qcow2"
+ISO_CACHE_DIR="/etc/one-click/iso_cache"
+OEM_ISO="${BUILD_DIR}/oneclick-winpe.iso"
+NOPROMPT_ISO="${BUILD_DIR}/windows-noprompt.iso"
+NBD_DEV=""
 red=$(tput setaf 1 2>/dev/null || true)
 green=$(tput setaf 2 2>/dev/null || true)
 blue=$(tput setaf 4 2>/dev/null || true)
 lime=$(tput setaf 193 2>/dev/null || true)
+yellow=$(tput setaf 3 2>/dev/null || true)
+cyan=$(tput setaf 6 2>/dev/null || true)
 reset=$(tput sgr0 2>/dev/null || true)
-
-# Target-aware cleanup function
-build_cleanup() {
-    echo "${blue}[INFO]${lime} Executing build_cleanup routine..."
-
-    # 1. Unmount active filesystems safely
-    if [ -d "${BUILD_DIR}" ]; then
-        sudo umount -f "${BUILD_DIR}/sys_mnt" 2>/dev/null || true
-        sudo umount -f "${BUILD_DIR}/efi_mnt" 2>/dev/null || true
-        sudo umount -f "${BUILD_DIR}/win_mnt" 2>/dev/null || true
-        sudo umount -f "${BUILD_DIR}/virtio_mnt" 2>/dev/null || true
-    fi
-
-    # 2. Safely detach NBD device if assigned
-    if [ -n "${NBD_DEV:-}" ]; then
-        sudo qemu-nbd --disconnect "${NBD_DEV}" 2>/dev/null || true
-    fi
-
-    # 3. Sweep lingering locks on nbd devices 0-7 attached to our target image
-    for dev in /dev/nbd{0..7}; do
-        sudo qemu-nbd --disconnect "$dev" 2>/dev/null || true
-    done
+log()  { echo "${blue}[INFO]${lime} $*"; }
+ok()   { echo "${green}[OK]${lime} $*"; }
+warn() { echo "${yellow}[WARN]${lime} $*"; }
+fail() { echo "${red}[ERROR]${lime} $*" >&2; exit 1; }
+cleanup() {
+  sudo virsh destroy "$VM_NAME" 2>/dev/null || true
+  sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
+  if [ -n "${NBD_DEV:-}" ]; then
+    sudo umount "${BUILD_DIR}/sys_mnt" 2>/dev/null || true
+    sudo umount "${BUILD_DIR}/efi_mnt" 2>/dev/null || true
+    sudo qemu-nbd --disconnect "$NBD_DEV" 2>/dev/null || true
+  fi
+  sudo umount "${BUILD_DIR}/win_mnt" 2>/dev/null || true
+  sudo umount "${BUILD_DIR}/virtio_mnt" 2>/dev/null || true
 }
-
-# Trap script exits/failures to guarantee cleanup execution
-trap build_cleanup EXIT INT TERM
-
+trap cleanup EXIT INT TERM
+install_deps() {
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y \
+      qemu-utils qemu-system-x86 libvirt-clients virtinst ovmf \
+      wimtools ntfs-3g dosfstools parted curl xorriso
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y \
+      qemu-img qemu-kvm libvirt-client virt-install edk2-ovmf \
+      ntfs-3g dosfstools parted curl xorriso
+    if ! command -v wimapply >/dev/null 2>&1 && ! command -v wimlib-imagex >/dev/null 2>&1; then
+      sudo dnf install -y wimlib wimlib-tools 2>/dev/null || true
+    fi
+  fi
+  for c in qemu-img qemu-nbd virt-install virsh parted mkfs.vfat mkfs.ntfs curl; do
+    command -v "$c" >/dev/null 2>&1 || fail "Required command missing: $c"
+  done
+  if command -v wimapply >/dev/null 2>&1; then
+    WIMAPPLY=(/usr/local/bin/wimapply)
+    WIMINFO=(wiminfo)
+  elif command -v wimlib-imagex >/dev/null 2>&1; then
+    WIMAPPLY=(wimlib-imagex apply)
+    WIMINFO=(wimlib-imagex info)
+  else
+    fail "wimlib/wimtools is required."
+  fi
+}
+wait_shutoff() {
+  local label="$1"
+  local timeout="${2:-10000}"
+  local state=""
+  local seen_domain=0
+  local elapsed=0
+  local i
+  log "Waiting for $label VM to initialize."
+  for i in {1..120}; do
+    if sudo virsh dominfo "$VM_NAME" &>/dev/null; then
+      seen_domain=1
+      state=$(sudo virsh domstate "$VM_NAME" 2>/dev/null | tr '[:upper:]' '[:lower:]' | xargs || true)
+      echo "${green}[READY]${lime} $label VM initialized (${state:-unknown}).${reset}"
+      break
+    fi
+    sleep 1
+  done
+  if [ "$seen_domain" -ne 1 ]; then
+    fail "$label VM failed to initialize within 120 seconds."
+  fi
+  log "Waiting for $label to power off."
+  while true; do
+    state=$(sudo virsh domstate "$VM_NAME" 2>/dev/null | tr '[:upper:]' '[:lower:]' | xargs || true)
+    case "$state" in
+      "shut off")
+        ok "$label powered off."
+        return 0
+        ;;
+      "crashed")
+        fail "$label crashed."
+        ;;
+      "")
+        sleep 2
+        if ! sudo virsh dominfo "$VM_NAME" &>/dev/null; then
+          fail "$label disappeared unexpectedly."
+        fi
+        ;;
+    esac
+    if [ "$elapsed" -ge "$timeout" ]; then
+      fail "$label timed out after ${timeout} seconds."
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+}
+mount_image() {
+  sudo modprobe nbd max_part=16 2>/dev/null || true
+  NBD_DEV=""
+  local dev
+  for dev in /dev/nbd{0..15}; do
+    if sudo qemu-nbd --connect="$dev" --format=qcow2 "$RAW_IMAGE" 2>/dev/null; then
+      NBD_DEV="$dev"
+      break
+    fi
+  done
+  [ -n "$NBD_DEV" ] || fail "No free NBD device."
+  sudo partprobe "$NBD_DEV" || true
+  sleep 2
+}
+unmount_image() {
+  sync
+  sudo umount "${BUILD_DIR}/sys_mnt" 2>/dev/null || true
+  sudo umount "${BUILD_DIR}/efi_mnt" 2>/dev/null || true
+  sudo qemu-nbd --disconnect "$NBD_DEV"
+  NBD_DEV=""
+}
+check_marker() {
+  local marker="$1"
+  mount_image
+  sudo mount "${NBD_DEV}p3" "${BUILD_DIR}/sys_mnt"
+  if [ ! -f "${BUILD_DIR}/sys_mnt/OneClick/${marker}" ]; then
+    if [ -f "${BUILD_DIR}/sys_mnt/OneClick/BUILD_FAILED" ]; then
+      echo "----- Windows build failure -----"
+      sudo cat "${BUILD_DIR}/sys_mnt/OneClick/BUILD_FAILED" || true
+      echo "---------------------------------"
+    fi
+    unmount_image
+    fail "Windows marker missing: ${marker}"
+  fi
+  unmount_image
+  ok "Verified Windows marker: ${marker}"
+}
 printf "%s\n" \
   "${lime}=================================================================" \
   "${cyan}[SYSPREP]${lime} Starting Windows Gold $OUT_NAME Template Builder" \
-  "${yellow}[WARN]${lime}This will take a while but will create a Gold image for future use" \
+  "${yellow}[WARN]${lime} This will create a Windows Gold image for future use" \
   "=================================================================${reset}"
 echo "${blue}[INFO]${lime} Installing required disk/servicing tools on target hypervisor."
-if command -v dnf &>/dev/null; then
-  sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm
-  sudo dnf clean all && sudo dnf makecache
-  sudo dnf install -y epel-release
-  sudo dnf groupinstall -y "Development Tools"
-  sudo dnf install -y gcc make pkgconfig libxml2-devel fuse3-devel ntfsprogs ntfs-3g ntfs-3g-devel openssl-devel
-  wget https://wimlib.net/downloads/wimlib-1.14.4.tar.gz
-  tar -xvf wimlib-1.14.4.tar.gz
-  cd wimlib-1.14.4
-  ./configure --without-ntfs-3g
-  make -j$(nproc)
-  sudo make install
-  sudo ldconfig
-  sudo dnf install -y qemu-img hivex rsync curl parted
-elif command -v apt-get &>/dev/null; then
-  sudo apt-get update && sudo apt-get install -y wimtools qemu-utils libhivex-bin rsync curl parted
+install_deps
+sudo mkdir -p "$BUILD_DIR" "$DEST_DIR" "$ISO_CACHE_DIR"
+sudo chown -R "$(id -u):$(id -g)" "$BUILD_DIR" "$DEST_DIR"
+mkdir -p "$BUILD_DIR/win_mnt" "$BUILD_DIR/virtio_mnt" "$BUILD_DIR/sys_mnt" "$BUILD_DIR/efi_mnt"
+log "Downloading/caching installation media."
+if [ ! -s "$ISO_CACHE_DIR/${OUT_NAME}.iso" ]; then
+  sudo curl -fL --retry 5 --retry-delay 3 -o "$ISO_CACHE_DIR/${OUT_NAME}.iso.part" "$WIN_ISO_URL" 2> /dev/null
+  sudo mv "$ISO_CACHE_DIR/${OUT_NAME}.iso.part" "$ISO_CACHE_DIR/${OUT_NAME}.iso"
 fi
-
-# Proactive cleanup before starting fresh allocation
-build_cleanup
-
-sudo modprobe nbd max_part=8 2>/dev/null || true
-echo "${blue}[INFO]${lime} Target Workspace: ${BUILD_DIR}"
-sudo mkdir -p "${BUILD_DIR}" "${CLEAN_DEST_DIR}"
-sudo chown -R "$(whoami):" "${BUILD_DIR}" "${CLEAN_DEST_DIR}"
-cd "${BUILD_DIR}"
-
-echo "${blue}[INFO]${lime} Downloading Windows and VirtIO ISOs."
-curl -fL -C - --retry 5 --retry-delay 3 -o virtio-win.iso "${VIRTIO_ISO_URL}"
-curl -fL -C - --retry 5 --retry-delay 3 -o win.iso "${WIN_ISO_URL}"
-
-echo "${blue}[INFO]${lime} Mounting ISOs."
-mkdir -p win_mnt virtio_mnt
-sudo mount -o loop win.iso win_mnt
-sudo mount -o loop virtio-win.iso virtio_mnt
-
-WIM_FILE=$(find win_mnt/sources/ -iregex '.*/install\.\(wim\|esd\)' | head -n 1)
-
-echo "${blue}[INFO]${lime} Creating and Partitioning 15G GPT QCOW2 Image."
-qemu-img create -f qcow2 builder_raw.qcow2 15G
-
-NBD_DEV=""
-for dev in /dev/nbd{0..7}; do
-  if sudo qemu-nbd --connect="$dev" builder_raw.qcow2; then
-    NBD_DEV="$dev"
-    break
+if [ ! -s "$ISO_CACHE_DIR/virtio-win.iso" ]; then
+  sudo curl -fL --retry 5 --retry-delay 3 -o "$ISO_CACHE_DIR/virtio-win.iso.part" "$VIRTIO_ISO_URL"
+  sudo mv "$ISO_CACHE_DIR/virtio-win.iso.part" "$ISO_CACHE_DIR/virtio-win.iso"
+fi
+if [ ! -s "$BUILD_DIR/payload/windows/CloudbaseInitSetup_Stable_x64.msi" ]; then
+  curl -fL --retry 5 --retry-delay 3 -o "$BUILD_DIR/payload/windows/CloudbaseInitSetup_Stable_x64.msi" "$CLOUDBASE_URL"
+fi
+sudo mount -o loop,ro "$ISO_CACHE_DIR/${OUT_NAME}.iso" "$BUILD_DIR/win_mnt"
+sudo mount -o loop,ro "$ISO_CACHE_DIR/virtio-win.iso" "$BUILD_DIR/virtio_mnt"
+WIM_FILE=$(find "$BUILD_DIR/win_mnt/sources" -maxdepth 1 -type f \( -iname install.wim -o -iname install.esd \) -print -quit)
+[ -f "$WIM_FILE" ] || fail "install.wim/install.esd was not found."
+WIM_INDEX="${WIM_INDEX:-2}"
+"${WIMINFO[@]}" "$WIM_FILE" "$WIM_INDEX" >/dev/null 2>&1 || {
+  "${WIMINFO[@]}" "$WIM_FILE" || true
+  fail "WIM index $WIM_INDEX does not exist. Set WIM_INDEX explicitly."
+}
+log "Creating ${DISK_SIZE}G GPT QCOW2 master workspace."
+rm -f "$RAW_IMAGE" "$FINAL_IMAGE"
+qemu-img create -f qcow2 "$RAW_IMAGE" "${DISK_SIZE}G"
+mount_image
+sudo parted -s "$NBD_DEV" mklabel gpt
+sudo parted -s "$NBD_DEV" mkpart ESP fat32 1MiB 261MiB
+sudo parted -s "$NBD_DEV" set 1 esp on
+sudo parted -s "$NBD_DEV" mkpart MSR 261MiB 277MiB
+sudo parted -s "$NBD_DEV" set 2 msftres on
+sudo parted -s "$NBD_DEV" mkpart Primary ntfs 277MiB 100%
+sudo parted -s "$NBD_DEV" set 3 msftdata on
+sudo partprobe "$NBD_DEV"
+sleep 2
+sudo mkfs.vfat -F32 -n EFI "${NBD_DEV}p1"
+sudo mkfs.ntfs -f -L Windows "${NBD_DEV}p3"
+log "Applying Windows WIM index $WIM_INDEX."
+sudo "${WIMAPPLY[@]}" "$WIM_FILE" "$WIM_INDEX" "${NBD_DEV}p3" 2> /dev/null
+sudo mount "${NBD_DEV}p3" "$BUILD_DIR/sys_mnt"
+sudo mount "${NBD_DEV}p1" "$BUILD_DIR/efi_mnt"
+[ -f "$BUILD_DIR/sys_mnt/Windows/System32/winload.efi" ] || fail "Applied image is missing winload.efi."
+log "Staging provisioning payload."
+sudo mkdir -p \
+  "$BUILD_DIR/sys_mnt/OneClick/VirtIO" \
+  "$BUILD_DIR/sys_mnt/OneClick/guest-agent" \
+  "$BUILD_DIR/sys_mnt/OneClick/WireGuard" \
+  "$BUILD_DIR/sys_mnt/Windows/Panther"
+sudo cp -f "$BUILD_DIR/payload/windows/Unattend.xml" "$BUILD_DIR/sys_mnt/Windows/Panther/Unattend.xml"
+sudo cp -f "$BUILD_DIR/payload/windows/setup.ps1" "$BUILD_DIR/sys_mnt/OneClick/setup.ps1"
+sudo cp -f "$BUILD_DIR/payload/windows/finalize.ps1" "$BUILD_DIR/sys_mnt/OneClick/finalize.ps1"
+sudo cp -f "$BUILD_DIR/payload/windows/CloudbaseUnattend.xml" "$BUILD_DIR/sys_mnt/OneClick/CloudbaseUnattend.xml"
+sudo cp -f "$BUILD_DIR/payload/windows/CloudbaseInitSetup_Stable_x64.msi" "$BUILD_DIR/sys_mnt/OneClick/CloudbaseInitSetup_Stable_x64.msi"
+case "${OUT_NAME,,}" in
+  *2025*) VIRTIO_WINVER="2k25" ;;
+  *)      VIRTIO_WINVER="2k22" ;;
+esac
+log "Staging VirtIO drivers for ${VIRTIO_WINVER}/amd64 only."
+for driver in viostor vioscsi NetKVM vioserial Balloon; do
+  src="$BUILD_DIR/virtio_mnt/$driver/$VIRTIO_WINVER/amd64"
+  if [ -d "$src" ]; then
+    sudo mkdir -p "$BUILD_DIR/sys_mnt/OneClick/VirtIO/$driver"
+    sudo cp -a "$src/." "$BUILD_DIR/sys_mnt/OneClick/VirtIO/$driver/"
+  else
+    warn "VirtIO driver path not present: $driver/$VIRTIO_WINVER/amd64"
   fi
 done
-
-if [ -z "$NBD_DEV" ]; then
-  echo "${red}[ERROR] Could not attach QCOW2 via qemu-nbd.${reset}"
-  exit 1
+[ -f "$BUILD_DIR/sys_mnt/OneClick/VirtIO/viostor/viostor.inf" ] ||   fail "Required VirtIO storage driver was not staged."
+qga=$(find "$BUILD_DIR/virtio_mnt" -type f -iname 'qemu-ga-x86_64.msi' -print -quit)
+[ -n "$qga" ] && sudo cp -f "$qga" "$BUILD_DIR/sys_mnt/OneClick/guest-agent/"
+log "Downloading current WireGuard Windows MSI for the gold image."
+wg_index=$(curl -fsSL "https://download.wireguard.com/windows-client/")
+wg_msi=$(printf '%s\n' "$wg_index" |
+  grep -oE 'wireguard-amd64-[0-9.]+\.msi' |
+  sort -Vu |
+  tail -n1)
+if [ -n "$wg_msi" ]; then
+  curl -fL --retry 5 --retry-delay 3     -o "$BUILD_DIR/sys_mnt/OneClick/WireGuard/$wg_msi"     "https://download.wireguard.com/windows-client/$wg_msi"
+else
+  fail "Could not discover the current WireGuard amd64 MSI."
 fi
-sleep 2
-
-if ! command -v wimapply &>/dev/null; then
-  echo "${blue}[INFO]${lime} Installing missing dependencies."
-  if command -v apt-get &>/dev/null; then
-    sudo apt-get update -y &>/dev/null
-    sudo apt-get install -y ntfs-3g wimtools
-  fi
+sync
+unmount_image
+log "Preparing no-prompt UEFI Windows media for Stage 1."
+NOPROMPT_BOOT="$(
+  find "$BUILD_DIR/win_mnt" -type f -iname 'efisys_noprompt.bin' -print -quit
+)"
+[ -n "$NOPROMPT_BOOT" ] || \
+  fail "Microsoft efisys_noprompt.bin was not found in the supplied Windows ISO."
+NOPROMPT_REL="${NOPROMPT_BOOT#"$BUILD_DIR/win_mnt/"}"
+ETFSBOOT="$(
+  find "$BUILD_DIR/win_mnt" -type f -iname 'etfsboot.com' -print -quit
+)"
+rm -f "$NOPROMPT_ISO"
+if [ -n "$ETFSBOOT" ]; then
+  ETFSBOOT_REL="${ETFSBOOT#"$BUILD_DIR/win_mnt/"}"
+  log "Creating BIOS/UEFI no-prompt Stage-1 Windows ISO."
+  xorriso -as mkisofs -quiet \
+    -iso-level 3 \
+    -J -joliet-long -R \
+    -V ONECLICK_WIN \
+    -b "$ETFSBOOT_REL" \
+    -no-emul-boot \
+    -boot-load-size 8 \
+    -boot-info-table \
+    -eltorito-alt-boot \
+    -e "$NOPROMPT_REL" \
+    -no-emul-boot \
+    -o "$NOPROMPT_ISO" \
+    "$BUILD_DIR/win_mnt"
+else
+  log "Creating UEFI-only no-prompt Stage-1 Windows ISO."
+  xorriso -as mkisofs -quiet \
+    -iso-level 3 \
+    -J -joliet-long -R \
+    -V ONECLICK_WIN \
+    -eltorito-platform efi \
+    -e "$NOPROMPT_REL" \
+    -no-emul-boot \
+    -o "$NOPROMPT_ISO" \
+    "$BUILD_DIR/win_mnt"
 fi
-
-sudo parted -s "$NBD_DEV" mklabel gpt
-sudo parted -s "$NBD_DEV" mkpart ESP fat32 1MiB 101MiB
-sudo parted -s "$NBD_DEV" set 1 boot on
-sudo parted -s "$NBD_DEV" set 1 esp on
-sudo parted -s "$NBD_DEV" mkpart MSR 101MiB 117MiB
-sudo parted -s "$NBD_DEV" set 2 msftres on
-sudo parted -s "$NBD_DEV" mkpart Primary ntfs 117MiB 100%
-sudo parted -s "$NBD_DEV" set 3 msftdata on
-
-sudo mkfs.vfat -F32 "${NBD_DEV}p1"
-sudo mkfs.ntfs -f -L "Windows" "${NBD_DEV}p3"
-
-mkdir -p sys_mnt efi_mnt
-sudo mount "${NBD_DEV}p3" sys_mnt
-sudo mount "${NBD_DEV}p1" efi_mnt
-
-echo "${blue}[INFO]${lime} Applying WIM Image."
-sudo /usr/local/bin/wimapply "$WIM_FILE" 2 sys_mnt/
-
-echo "${blue}[INFO]${lime} Staging VirtIO Drivers & Guest Agent offline."
-sudo mkdir -p sys_mnt/Drivers/VirtIO sys_mnt/Drivers/guest-agent sys_mnt/WireGuard
-sudo cp -rf virtio_mnt/NetKVM virtio_mnt/viostor virtio_mnt/vioserial virtio_mnt/Balloon sys_mnt/Drivers/VirtIO/
-sudo cp -rf virtio_mnt/guest-agent/* sys_mnt/Drivers/guest-agent/ 2>/dev/null || true
-if [ -d "${BUILD_DIR}/wireguard_staged" ]; then
-  sudo cp -rf "${BUILD_DIR}/wireguard_staged/"* sys_mnt/WireGuard/
-fi
-
-echo "${blue}[INFO]${lime} Injecting DevicePath and Viostor Boot Driver into Offline Registry."
-if command -v hivexregedit &>/dev/null; then
-  # 1. Enable Plug-and-Play search for VirtIO drivers
-  sudo hivexregedit --merge sys_mnt/Windows/System32/config/SOFTWARE << 'REG'
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion]
-"DevicePath"=hex(2):25,00,53,00,79,00,73,00,74,00,65,00,6d,00,52,00,6f,00,74,00,25,00,5c,00,69,00,6e,00,66,00,3b,00,43,00,3a,00,5c,00,44,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,56,00,69,00,72,00,74,00,49,00,4f,00,00,00
-REG
-
-  # 2. Force virtio storage driver to start at boot time (Start=0) so Windows can boot on virtio disks
-  sudo hivexregedit --merge sys_mnt/Windows/System32/config/SYSTEM << 'REG'
-[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\viostor]
-"Start"=dword:00000000
-"Type"=dword:00000001
-"ErrorControl"=dword:00000001
-"Group"="SCSI Miniport"
-REG
-fi
-
-echo "${blue}[INFO]${lime} Staging Unattend.xml and setup.ps1."
-sudo mkdir -p sys_mnt/Panther sys_mnt/Windows/System32/Sysprep
-if [ -f "${BUILD_DIR}/Autounattend.xml" ]; then
-  sudo cp -f "${BUILD_DIR}/Autounattend.xml" sys_mnt/Panther/Unattend.xml
-  sudo cp -f "${BUILD_DIR}/Autounattend.xml" sys_mnt/Windows/System32/Sysprep/unattend.xml
-fi
-if [ -f "${BUILD_DIR}/setup.ps1" ]; then
-  sudo cp -f "${BUILD_DIR}/setup.ps1" sys_mnt/setup.ps1
-fi
-
-echo "${blue}[INFO]${lime} Writing Offline UEFI BCD Bootloader."
-sudo mkdir -p efi_mnt/EFI/Microsoft/Boot efi_mnt/EFI/Boot
-
-# Your original file copies (retained)
-sudo cp -rf sys_mnt/Windows/Boot/EFI/* efi_mnt/EFI/Microsoft/Boot/ 2>/dev/null || true
-sudo cp -f efi_mnt/EFI/Microsoft/Boot/bootmgfw.efi efi_mnt/EFI/Boot/bootx64.efi 2>/dev/null || true
-
-# CRITICAL FIX: Populate missing BCD file from Windows System folder
-if [ ! -f "efi_mnt/EFI/Microsoft/Boot/BCD" ]; then
-  echo "${blue}[INFO]${lime} Seeding default BCD hive."
-  sudo cp -f sys_mnt/Windows/Boot/DVD/EFI/BCD efi_mnt/EFI/Microsoft/Boot/BCD 2>/dev/null || \
-  sudo cp -f sys_mnt/Windows/System32/config/BCD-Template efi_mnt/EFI/Microsoft/Boot/BCD 2>/dev/null || true
-fi
-
-# Unmount & disconnect NBD before qemu-img convert
-build_cleanup
-
-echo "${blue}[INFO]${lime} Compressing Final QCOW2 Golden Template."
-qemu-img convert -f qcow2 -O qcow2 -c builder_raw.qcow2 "${CLEAN_DEST_DIR}/${OUT_NAME}.qcow2"
-
-# Remove trap and clean build folder
-trap - EXIT INT TERM
-cd /tmp
-sudo rm -rf "${BUILD_DIR}"
+[ -s "$NOPROMPT_ISO" ] || \
+  fail "Failed to create the no-prompt Stage-1 Windows ISO."
+ok "No-prompt Windows Stage-1 ISO created."
+sudo umount "$BUILD_DIR/win_mnt"
+sudo umount "$BUILD_DIR/virtio_mnt"
+log "Creating WinPE helper ISO."
+rm -rf "$BUILD_DIR/winpe_iso_root"
+mkdir -p "$BUILD_DIR/winpe_iso_root"
+cp -f "$BUILD_DIR/payload/winpe/Autounattend.xml" "$BUILD_DIR/winpe_iso_root/Autounattend.xml"
+cp -f "$BUILD_DIR/payload/winpe/oneclick-winpe.cmd" "$BUILD_DIR/winpe_iso_root/oneclick-winpe.cmd"
+xorriso -as mkisofs -quiet \
+  -o "$OEM_ISO" \
+  -V ONECLICK \
+  -J -R \
+  "$BUILD_DIR/winpe_iso_root"
+printf "%s\n" \
+  "${cyan}=================================================================${reset}" \
+  "${green}                  WINDOWS BOOT PREPARATION                   ${reset}" \
+  "${cyan}=================================================================${reset}" \
+  "Stage:           ${yellow}1 of 3${reset}" \
+  "Action:          ${yellow}Generate Windows BCD from WinPE${reset}" \
+  "Disk Bus:        ${yellow}SATA${reset}" \
+  "Firmware:        ${yellow}UEFI${yellow}" \
+  "TO TRACK SETUP, CLICK ${lime}Ctrl + b + d${yellow} TO DETACH THE TMUX SESSION" \
+  "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
+  "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
+  "${cyan}=================================================================${reset}"
+log "Boot 1/3: creating Windows BCD from WinPE."
+sudo virsh destroy "$VM_NAME" 2>/dev/null || true
+sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
+sudo virt-install \
+  --name "$VM_NAME" \
+  --memory 4096 \
+  --vcpus 4 \
+  --cpu host-passthrough \
+  --os-variant win2k22 \
+  --disk "path=$RAW_IMAGE,format=qcow2,bus=sata,boot_order=3" \
+  --disk "path=$NOPROMPT_ISO,device=cdrom,bus=sata,boot_order=1" \
+  --disk "path=$OEM_ISO,device=cdrom,bus=sata,boot_order=2" \
+  --boot uefi \
+  --graphics vnc,listen=127.0.0.1 \
+  --noautoconsole \
+  --wait -1 &
+P1=$!
+wait_shutoff "WinPE BCDBoot stage"
+wait "$P1" 2>/dev/null || true
+sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
+check_marker BCD_READY
+printf "%s\n" \
+  "${cyan}=================================================================${reset}" \
+  "${green}                WINDOWS MASTER PROVISIONING                  ${reset}" \
+  "${cyan}=================================================================${reset}" \
+  "Stage:           ${yellow}2 of 3${reset}" \
+  "Action:          ${yellow}Install injected One-Click components${reset}" \
+  "Storage Bus:     ${yellow}SATA${reset}" \
+  "Network Model:   ${yellow}e1000e" \
+  "TO TRACK SETUP, CLICK ${lime}Ctrl + b + d${yellow} TO DETACH THE TMUX SESSION" \
+  "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
+  "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
+  "${cyan}=================================================================${lime}"
+log "Boot 2/3: provisioning Windows master."
+VIRTIO_TEST_DISK="$BUILD_DIR/virtio_test.qcow2"
+rm -f "$VIRTIO_TEST_DISK"
+qemu-img create -f qcow2 "$VIRTIO_TEST_DISK" 1G
+sudo virt-install \
+  --name "$VM_NAME" \
+  --memory 4096 \
+  --vcpus 4 \
+  --cpu host-passthrough \
+  --os-variant win2k22 \
+  --disk "path=$RAW_IMAGE,format=qcow2,bus=sata,boot_order=1" \
+  --disk "path=$VIRTIO_TEST_DISK,format=qcow2,bus=virtio" \
+  --boot uefi \
+  --network network=oneclick-nat,model=e1000e \
+  --graphics vnc,listen=127.0.0.1 \
+  --noautoconsole \
+  --import \
+  --wait -1 &
+P2=$!
+wait_shutoff "Windows provisioning stage"
+wait "$P2" 2>/dev/null || true
+rm -f "$VIRTIO_TEST_DISK"
+sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
+check_marker STAGE1_READY
+printf "%s\n" \
+  "${cyan}=================================================================${reset}" \
+  "${green}             FRESH UEFI / VIRTIO VALIDATION BOOT             ${reset}" \
+  "${cyan}=================================================================${reset}" \
+  "Stage:           ${yellow}3 of 3${reset}" \
+  "Action:          ${yellow}Validate, Generalize and Seal Master${reset}" \
+  "Storage Bus:     ${yellow}VirtIO${reset}" \
+  "NVRAM:           ${yellow}Fresh${reset}" \
+  "Install Media:   ${yellow}Detached" \
+  "TO TRACK SETUP, CLICK ${lime}Ctrl + b + d${yellow} TO DETACH THE TMUX SESSION" \
+  "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
+  "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
+  "${cyan}=================================================================${lime}"
+log "Boot 3/3: fresh-NVRAM + VirtIO validation and final Sysprep."
+sudo virt-install \
+  --name "$VM_NAME" \
+  --memory 4096 \
+  --vcpus 4 \
+  --cpu host-passthrough \
+  --os-variant win2k22 \
+  --disk "path=$RAW_IMAGE,format=qcow2,bus=virtio,boot_order=1" \
+  --boot uefi \
+  --network network=oneclick-nat,model=virtio \
+  --graphics vnc,listen=127.0.0.1 \
+  --noautoconsole \
+  --import \
+  --wait -1 &
+P3=$!
+wait_shutoff "fresh-NVRAM/VirtIO validation + Sysprep"
+wait "$P3" 2>/dev/null || true
+sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
+check_marker VIRTIO_BOOT_OK
+check_marker MASTER_READY
+log "Validating uncompressed source image."
+qemu-img check "$RAW_IMAGE"
+threads=$(( $(nproc) / 2 ))
+[ "$threads" -lt 1 ] && threads=1
+log "Compressing final master image."
+qemu-img convert -p -m "$threads" -f qcow2 -O qcow2 -c "$RAW_IMAGE" "$FINAL_IMAGE"
+qemu-img check "$FINAL_IMAGE"
+qemu-img info "$FINAL_IMAGE"
+[ -s "$FINAL_IMAGE" ] || fail "Final QCOW2 was not created."
+printf '%s\n' \
+  "${cyan}=================================================================${reset}" \
+  "${green}                 MASTER IMAGE BUILD SUMMARY                  ${reset}" \
+  "${cyan}=================================================================${reset}" \
+  "Image:           ${yellow}${FINAL_IMAGE}${reset}" \
+  "BCD:             ${green}VERIFIED${reset}" \
+  "Fresh UEFI:      ${green}VERIFIED${reset}" \
+  "VirtIO Storage:  ${green}VERIFIED${reset}" \
+  "Cloudbase-Init:  ${green}INSTALLED${reset}" \
+  "Sysprep:         ${green}GENERALIZED${reset}" \
+  "Format:          ${yellow}QCOW2 Compressed${reset}" \
+  "${cyan}=================================================================${reset}"
 echo "${green}[SUCCESS]${lime} Windows Master Template Created Successfully!${reset}"
-EOF
+trap - EXIT INT TERM
+cleanup
+rm -rf "$BUILD_DIR"
+exit 0
+REMOTE_SCRIPT_EOF
   chmod +x "$local_remote_script"
-  if [[ "$target_ip" =~ : ]]; then
-    target_ip="[${target_ip}]"
+  local is_local=0
+  if [[ "$target_host" == "$(hostname -s)" || "${target_ip//[][]}" == "${CONTROLLER_IP:-}" ]]; then
+    is_local=1
   fi
-  info "Staging generated answer files and setup scripts."
-  if [[ "${target_ip//[][]}" == "$CONTROLLER_IP" ]]; then
-    info "Launching local build execution."
-    bash "$local_remote_script" "${build_dir}" "${clean_dest_dir}" "${out_name}" "${win_iso_url}" "${virtio_iso_url}"
-    if [[ ! -f "${dest_dir}/${out_name}.qcow2" ]]; then
-      error "Creation of master qcow2 image has failed!"
-      return 1
-    fi
-  else
-    scp -o StrictHostKeyChecking=no $ssh_key_arg \
-      "${build_dir}/iso_root/Autounattend.xml" \
-      "${build_dir}/iso_root/setup.ps1" \
-      "oneclick@${target_ip}:/home/oneclick/" &>/dev/null
-    info "Transferring payload to $vps_name target hypervisor ($target_ip)."
-    scp -o StrictHostKeyChecking=no $ssh_key_arg "$local_remote_script" "oneclick@${target_ip}:/tmp/remote_build.sh" &>/dev/null
-    info "Launching remote build execution."
-    ssh -tt -o StrictHostKeyChecking=no $ssh_key_arg "oneclick@${target_ip//[][]}" "
-      sudo mkdir -p ${build_dir}/iso_root/
-      sudo mv -f Autounattend.xml ${build_dir}/iso_root/
-      sudo mv -f setup.ps1 ${build_dir}/iso_root/
-      sudo bash /tmp/remote_build.sh '${build_dir}' '${clean_dest_dir}' '${out_name}' '${win_iso_url}' '${virtio_iso_url}'
-      if [[ ! -f '${dest_dir}/${out_name}.qcow2' ]]; then
-        error 'Creation of master qcow2 image has failed!'
+  if (( is_local )); then
+    info "Launching local Windows master build."
+    bash "$local_remote_script" \
+      "$build_dir" \
+      "$clean_dest_dir" \
+      "$out_name" \
+      "$win_iso_url" \
+      "$virtio_iso_url" \
+      "$cloudbase_url" \
+      "$REQ_BUFFER" \
+      "$target_host" || {
+        error "Windows master-image build failed."
+        rm -f "$local_remote_script"
         return 1
-      fi
-    "
+      }
+  else
+    info "Transferring Windows build payload to $target_host."
+    ssh -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" "oneclick@${target_ip//[][]}" \
+      "sudo mkdir -p '$build_dir/payload/winpe' '$build_dir/payload/windows' && sudo chown -R oneclick:oneclick '$build_dir'" || return 1
+    scp -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" \
+      "$build_dir/payload/winpe/Autounattend.xml" \
+      "$build_dir/payload/winpe/oneclick-winpe.cmd" \
+      "oneclick@${target_ip//[][]}:$build_dir/payload/winpe/" || return 1
+    scp -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" \
+      "$build_dir/payload/windows/Unattend.xml" \
+      "$build_dir/payload/windows/setup.ps1" \
+      "$build_dir/payload/windows/finalize.ps1" \
+      "$build_dir/payload/windows/CloudbaseUnattend.xml" \
+      "oneclick@${target_ip//[][]}:$build_dir/payload/windows/" || return 1
+    if [ -d "$build_dir/wireguard_staged" ]; then
+      scp -r -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" \
+        "$build_dir/wireguard_staged" \
+        "oneclick@${target_ip//[][]}:$build_dir/" || return 1
+    fi
+    scp -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" \
+      "$local_remote_script" \
+      "oneclick@${target_ip//[][]}:/tmp/remote_build.sh" || return 1
+    info "Launching remote Windows master build."
+    ssh -tt -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" "oneclick@${target_ip//[][]}" \
+      "sudo bash /tmp/remote_build.sh \
+        '$build_dir' \
+        '$clean_dest_dir' \
+        '$out_name' \
+        '$win_iso_url' \
+        '$virtio_iso_url' \
+        '$cloudbase_url'" || {
+          error "Remote Windows master-image build failed."
+          rm -f "$local_remote_script"
+          return 1
+        }
+    ssh -o StrictHostKeyChecking=no "${ssh_key_arg[@]}" "oneclick@${target_ip//[][]}" \
+      "sudo rm -f /tmp/remote_build.sh" 2>/dev/null || true
   fi
   rm -f "$local_remote_script"
   printf "$(tput setaf 166)[SYSPREP]${reset} %s\n" \
     "=================================================================" \
     "${green}Gold $out_name Template Created:${reset}" \
-    "Location: ${dest_dir}${out_name}.qcow2" \
+    "Location: ${dest_dir}/${out_name}.qcow2" \
     "Host: $target_host" \
-    "Format: QCOW2" \
+    "Format: QCOW2 Compressed" \
+    "BCD: Verified" \
+    "UEFI: Fresh NVRAM Verified" \
+    "VirtIO: Boot Verified" \
+    "Sysprep: Generalized" \
     "================================================================="
   return 0
 }
@@ -8828,7 +9638,7 @@ fleet_vps_web_console() {
     local facts=$(ansible-inventory -i "${inventory:-${inventory_file}}" --list) || true
     if [[ -z "$target_host" ]]; then
       warn "$vps_name is not a VM"
-	  return 1
+      return 1
     fi
   fi
   local session_timeout="${VNC_WEB_TIMEOUT}"
@@ -8845,7 +9655,7 @@ fleet_vps_web_console() {
   fi
   local vnc_display
   if [[ "$target_host" == $(hostname -s) ]]; then
-    vnc_display=$(virsh vncdisplay $vps_name 2>/dev/null | grep -E '^:[0-9]+' | tr -d ' \r\n')
+    vnc_display=$(virsh vncdisplay $vps_name 2>/dev/null | sed -E 's/^([^:]*)?(:[0-9]+)/\2/' | tr -d ' \r\n')
   else
     vnc_display=$(ANSIBLE_HOST_KEY_CHECKING=False \
       ANSIBLE_SSH_TIMEOUT=3 \
@@ -8900,16 +9710,26 @@ fleet_vps_web_console() {
     --heartbeat 30 \
     "[::]:$proxy_port" &>/dev/null &
   local ws_pid=$!
+  cleanup_vnc() {
+    cleanup_session_pid "${ws_pid:-}"
+    cleanup_session_port "${proxy_port:-}"
+    cleanup_session_port "${tunnel_port:-}"
+    [[ -n "${token:-}" ]] && rm -f "${token_dir}/${token}.tokens"
+    [[ -n "${proxy_port:-}" ]] && cleanup_firewall_rules "$proxy_port"
+  }
+  trap cleanup_vnc ERR INT TERM
   (
     sleep "$session_timeout"
-    kill -9 "$ws_pid" &>/dev/null || true
-    fuser -k "${proxy_port}/tcp" &>/dev/null || true
-    fuser -k "${tunnel_port}/tcp" &>/dev/null || true
+    cleanup_session_pid "$ws_pid"
+    cleanup_session_port "$proxy_port"
+    cleanup_session_port "$tunnel_port"
     rm -f "${token_dir}/${token}.tokens"
+    cleanup_firewall_rules "$proxy_port"
   ) &>/dev/null & disown
   local controller_ip=$CONTROLLER_IP
   read -rp "${cyan}[USER] ${orange}WOULD YOU LIKE TO LOCK DOWN THE VNC SESSION TO A SPECIFIC IP:${reset} " lock_vnc
   lock_vnc="${lock_vnc,,}"
+  load_rule_engine
   if [[ "$lock_vnc" =~ ^(y|yes)$ ]]; then
     recorded_ip="$(awk '{print $1}' <<< $SSH_CLIENT)"
     read -p "Please enter the IP address to grant access to or press enter to use your IP $recorded_ip: " rec_ip
@@ -8918,10 +9738,10 @@ fleet_vps_web_console() {
     else
       source_ip="$rec_ip"
     fi
-    one-click engine "allow all from ${source_ip} to port ${proxy_port}" -y
-    one-click engine "drop port $proxy_port" -y
+    rule_engine "allow all from ${source_ip} to port ${proxy_port}" -y
+    rule_engine "drop port $proxy_port" -y
   else
-    one-click engine "allow all to port ${proxy_port}" -y
+    rule_engine "allow all to port ${proxy_port}" -y
   fi
   if [[ "$controller_ip" =~ : ]]; then
     controller_ip="[$controller_ip]"
@@ -8938,6 +9758,50 @@ fleet_vps_web_console() {
     "${cyan}http://${controller_ip}:${proxy_port}/vnc.html?path=websockify?token=${token}&autoconnect=true${reset}" \
     "${cyan}=================================================================${reset}" \
     "${yellow}Note: This viewer port will automatically self-destruct after timeout.${reset}" ""
+}
+cleanup_firewall_session() {
+  local session_id="$1"
+  local fw line
+  [[ -z "$session_id" ]] && return 0
+  for fw in iptables ip6tables; do
+    command -v "$fw" &>/dev/null || continue
+    while :; do
+      line=$(
+        "$fw" -L INPUT -n --line-numbers 2>/dev/null |
+          awk -v tag="oneclick:${session_id}" '
+            index($0, tag) {
+              print $1
+            }
+          ' |
+          sort -rn |
+          head -n1
+      )
+      [[ -n "$line" ]] || break
+      "$fw" -D INPUT "$line" 2>/dev/null || break
+    done
+  done
+}
+cleanup_session_port() {
+  local port="$1"
+  [[ -n "$port" ]] &&
+    fuser -k "${port}/tcp" &>/dev/null || true
+}
+cleanup_session_pid() {
+  local pid="$1"
+  [[ -n "$pid" ]] &&
+    kill "$pid" &>/dev/null || true
+}
+cleanup_vnc_session() {
+  local ws_pid="$1"
+  local proxy_port="$2"
+  local tunnel_port="$3"
+  local token_file="$4"
+  local firewall_session="$5"
+  cleanup_session_pid "$ws_pid"
+  cleanup_session_port "$proxy_port"
+  cleanup_session_port "$tunnel_port"
+  [[ -n "$token_file" ]] && rm -f "$token_file"
+  cleanup_firewall_session "$firewall_session"
 }
 fleet_vps_reinstall() {
   local vps_name="$1"
@@ -9633,6 +10497,7 @@ fleet_vps_image_fetch() {
   local custom_name="${2:-}"
   local is_windows="${3:-}"
   local host="${4:-}"
+  local password="$5"
   local storage_dir="/etc/one-click/virtualization/images"
   mkdir -p "$storage_dir"
   local file_name
@@ -9649,7 +10514,7 @@ fleet_vps_image_fetch() {
   info "Fetching base cloud image asset from: $image_url"
   printf "${cyan}[DOWNLOAD]${blue} Saving target destination to: ${magenta}${destination_path}${reset}\n"
   if [[ "$is_windows" -eq 1 ]]; then
-    prep_windows "$image_url" "${custom_name/.*}" "$host"
+    prep_windows "$image_url" "${custom_name/.*}" "$host" "$password"
   else
     if curl -L -o "$destination_path" "$image_url"; then
       chmod 644 "$destination_path"
@@ -11004,12 +11869,42 @@ EOF
 }
 sync_custom_ssh_keys() {
   local target_ip="$1"
-  local private_key="$2"
+  local private_key="${2:-}"
+
   info "Preserving user-added SSH authorized keys across transition."
+
+  # Dynamically resolve working private key if none provided or provided key is missing/unusable
+  if [[ -z "$private_key" || ! -f "$private_key" ]] || ! ssh -i "$private_key" -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=no "oneclick@${target_ip}" "true" &>/dev/null; then
+    local candidate_keys=(
+      "/etc/one-click/fleet/keys/id_ed25519"
+      "/home/oneclick/.ssh/id_ed25519"
+      "/etc/one-click/fleet/keys/id_rsa"
+      "/home/oneclick/.ssh/id_rsa"
+    )
+
+    private_key=""
+    for key in "${candidate_keys[@]}"; do
+      if [[ -f "$key" ]]; then
+        if ssh -i "$key" -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=no "oneclick@${target_ip}" "true" &>/dev/null; then
+          private_key="$key"
+          info "Successfully authenticated using key: [$private_key]"
+          break
+        fi
+      fi
+    done
+
+    if [[ -z "$private_key" ]]; then
+      error "Could not establish SSH connection to [$target_ip] using any key in fleet or home directories."
+      return 1
+    fi
+  fi
+
   local tmp_user_auth="/tmp/user_auth_keys.tmp"
   local tmp_root_auth="/tmp/root_auth_keys.tmp"
+
   [[ -f /home/oneclick/.ssh/authorized_keys ]] && cp /home/oneclick/.ssh/authorized_keys "$tmp_user_auth"
   [[ -f /root/.ssh/authorized_keys ]] && sudo cp /root/.ssh/authorized_keys "$tmp_root_auth"
+
   if [[ -f "$tmp_user_auth" ]]; then
     scp -i "$private_key" -o StrictHostKeyChecking=no "$tmp_user_auth" "oneclick@${target_ip}:/tmp/incoming_user_keys"
     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << 'EOF'
@@ -11022,6 +11917,7 @@ sync_custom_ssh_keys() {
       rm -f /tmp/incoming_user_keys
 EOF
   fi
+
   if [[ -f "$tmp_root_auth" ]]; then
     scp -i "$private_key" -o StrictHostKeyChecking=no "$tmp_root_auth" "oneclick@${target_ip}:/tmp/incoming_root_keys"
     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << 'EOF'
@@ -11033,6 +11929,7 @@ EOF
       rm -f /tmp/incoming_root_keys
 EOF
   fi
+
   rm -f "$tmp_user_auth" "$tmp_root_auth"
 }
 apply_node_firewall_transition() {
@@ -11040,11 +11937,12 @@ apply_node_firewall_transition() {
   local target_controller_ip="$2"
   local nic
   . "/etc/one-click/fleet/controller.env"
+  . "/etc/os-release"
   nic=$(ip route show default | awk '{print $5}')
   local source_os=""
   [[ -f /etc/os-release ]] && source /etc/os-release
   if [[ "$mode" == "promote_to_master" ]]; then
-    echo "${lime}>>>${reset} Promoting $target_destination to CONTROLLER. Removing fleet-peer drop rules."
+    echo "${lime}>>>${reset} Promoting $node to CONTROLLER. Removing fleet-peer drop rules."
     if [[ "$ID_LIKE" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
       firewall-cmd --zone=public --add-port=22/tcp --permanent 2>/dev/null || true
       firewall-cmd --zone=public --add-port=51821/udp --permanent 2>/dev/null || true
@@ -11062,8 +11960,8 @@ apply_node_firewall_transition() {
       iptables -A ONE-CLICK-FLEET -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
     fi
   elif [[ "$mode" == "demote_to_peer" ]]; then
-    echo "${lime}>>>${reset} Demoting $CONTROLLER_NAME to HYPERVISOR-PEER. Applying fleet-peer DROP rules."
-    if [[ "$ID_LIKE" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
+    echo "${lime}>>>${reset} Demoting $(hostname -s) to HYPERVISOR-PEER. Applying fleet-peer DROP rules."
+    if [[ "${ID_LIKE:-$ID}" =~ (rhel|centos|fedora|alma|rocky) ]] && systemctl is-active --quiet firewalld; then
       sudo firewall-cmd --zone=public --remove-port=22/tcp --permanent 2>/dev/null || true
       sudo firewall-cmd --reload &>/dev/null || true
     elif ! sudo iptables -I INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
@@ -11086,190 +11984,6 @@ apply_node_firewall_transition() {
       fi
     fi
   fi
-}
-fleet_migrate_controller() {
-  target_destination="$1"
-  local inventory_json="/etc/one-click/virtualization/inventory.json"
-  local inventory_file="/etc/one-click/fleet/inventory.yml"
-  local backup_ledger="/etc/one-click/virtualization/backup_ledger.json"
-  local snapshot_ledger="/etc/one-click/virtualization/snapshot_ledger.json"
-  local state_dir="/etc/one-click/state"
-  if [[ -f "/etc/one-click/fleet/controller.env" ]]; then
-    . "/etc/one-click/fleet/controller.env"
-  else
-    error "Missing core controller configuration profiles. Migration halted."
-    return 1
-  fi
-  if [[ -z "$target_destination" ]]; then
-    error "No target destination node specified."
-    return 1
-  fi
-  if [[ "$target_destination" == "$CONTROLLER_NAME" ]]; then
-    error "Target destination matches the current active controller. Migration Aborted."
-    return 1
-  fi
-  info "Resolving target destination networking routes."
-  local private_key="/etc/one-click/fleet/keys/id_ed25519"
-  if [[ ! -f "$private_key" ]]; then
-    private_key="/home/oneclick/.ssh/id_ed25519"
-  fi
-  local target_ip
-  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$target_destination" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
-  if [[ -z "$target_ip" ]]; then
-    target_ip="$target_destination"
-  fi
-  if ! ping -c 1 -W 2 "$target_ip" &>/dev/null; then
-    error "Target node [$target_destination] ($target_ip) is unreachable. Aborting migration."
-    return 1
-  fi
-  warn "${orange}CRITICAL ACTION INITIATED:${reset} Promoting cluster control to [$target_destination] ($target_ip)."
-  read -p "${cyan}[USER]${reset} Are you absolutely sure you want to transfer controller authority? (y|n): " confirm
-  if [[ "$confirm" != "y" && "$confirm" != "yes" ]]; then
-    info "Migration canceled by operator."
-    return 0
-  fi
-  sync_custom_ssh_keys "$target_ip" "$private_key"
-  info "Packaging controller database, state logs and automation playbooks."
-  local migration_archive="/tmp/one-click-master-migration.tar.gz"
-  rm -f "$migration_archive"
-  local tar_targets=(
-    "/etc/one-click/virtualization/allocated_ports.db"
-    "/etc/one-click/fleet/inventory.yml"
-    "/etc/one-click/fleet/playbooks"
-    "/etc/one-click/fleet/keys"
-    "/etc/one-click/virtualization/inventory.json"
-    "/etc/one-click/virtualization/available_ips.txt"
-    "/etc/one-click/virtualization/used_ips.txt"
-    "/etc/one-click/virtualization/ports_pool.txt"
-  )
-  mkdir -p /etc/one-click/sync
-  [[ -f "$backup_ledger" ]] && tar_targets+=("/etc/one-click/virtualization/backup_ledger.json")
-  [[ -f "$snapshot_ledger" ]] && tar_targets+=("/etc/one-click/virtualization/snapshot_ledger.json")
-  [[ -d "$state_dir" ]] && tar_targets+=("/etc/one-click/fleet/state")
-  tar -czf "$migration_archive" -C /etc/one-click/sync "${tar_targets[@]}" 2>/dev/null
-  info "Streaming configuration payload to new master controller."
-  cat "$migration_archive" | ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "cat > /tmp/migration.tar.gz"
-  local transition_func
-  transition_func=$(declare -f apply_node_firewall_transition)
-  info "Unpacking states, modifying firewall, and elevating [$target_destination] to active cluster master."
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << EOF
-    $transition_func
-    sudo mkdir -p /etc/one-click/sync
-    sudo tar -xzf /tmp/migration.tar.gz -C /etc/one-click/sync
-    rm -f /tmp/migration.tar.gz
-    sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOT
-ROLE=peer
-FLEET_IDENTITY=\$(hostname)
-STATUS=active
-CONTROLLER_TARGET_IP=127.0.0.1
-LAST_SYNC=\$(date +%s)
-EOT
-    sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOT
-CONTROLLER_IP="${target_ip}"
-CONTROLLER_NAME="${target_destination}"
-ROLE_TYPE="controller"
-IS_MASTER="true"
-EOT
-    apply_node_firewall_transition "promote_to_master" "${target_ip}"
-EOF
-  info "Transferring configurations to remaining peers."
-  local fleet_hosts
-  fleet_hosts=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | grep -v "hosts (" | awk '{print $1}')
-  for node in $fleet_hosts; do
-    [[ "$node" == "$target_destination" ]] && continue
-    local node_ip
-    node_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$node" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
-    [[ -z "$node_ip" ]] && continue
-    [[ "$node_ip" == "${sys_ip:-${sys_ipv6}}" ]] && continue
-    if ! ping -c 1 -W 2 "$node_ip" &>/dev/null; then
-      warn "Peer node [$node] ($node_ip) is unreachable. Skipping firewall update."
-      continue
-    fi
-    info "Updating configuration on peer [$node] ($node_ip)."
-    ssh -i "$private_key" -o ConnectTimeout=5 -o StrictHostKeyChecking=no "oneclick@${node_ip}" "sudo bash -s" << EOF || { warn "Failed to update peer [$node] ($node_ip) over SSH. Moving to next node."; continue; }
-      if [ -f /etc/one-click/fleet/controller.env ]; then
-        sudo sed -i '/^CONTROLLER_IP=/d;/^CONTROLLER_NAME=/d;/^IS_MASTER=/d' /etc/one-click/fleet/controller.env
-        echo "CONTROLLER_IP=\"${target_ip}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-        echo "CONTROLLER_NAME=\"${target_destination}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-        echo "IS_MASTER=\"false\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-      fi
-      if ! sudo iptables -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
-        sudo nft add table ip filter 2>/dev/null || true
-        sudo nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
-        if ! sudo nft list chain ip filter ONE-CLICK-FLEET 2>/dev/null | grep -q "ip saddr ${target_ip} tcp dport 22 accept"; then
-          sudo nft insert rule ip filter ONE-CLICK-FLEET index 1 ip saddr "${target_ip}" tcp dport 22 accept 2>/dev/null || true
-        fi
-      else
-        sudo iptables -N ONE-CLICK-FLEET 2>/dev/null || true
-        sudo iptables -C ONE-CLICK-FLEET -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
-        sudo iptables -I ONE-CLICK-FLEET 1 -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-      fi
-EOF
-  done
-
-  info "Demoting local system parameters to managed peer status."
-  sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOF
-ROLE=peer
-FLEET_IDENTITY=$(hostname | tr -d '[:space:]')
-STATUS=managed
-CONTROLLER_TARGET_IP=$target_ip
-LAST_SYNC=$(date +%s)
-EOF
-  sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOF
-CONTROLLER_IP="${target_ip}"
-CONTROLLER_NAME="${target_destination}"
-ROLE_TYPE="hypervisor-peer"
-ORIGINAL_ROLE_TYPE="$ROLE_TYPE"
-IS_MASTER="false"
-EOF
-  apply_node_firewall_transition "demote_to_peer" "$target_ip"
-  info "Purging local key assets, master files, and playbooks."
-  sudo rm -rf /etc/one-click/fleet/keys
-  sudo rm -rf /etc/one-click/fleet/playbooks
-  sudo rm -f "$inventory_json" "$backup_ledger" "$snapshot_ledger"
-  sudo rm -f /etc/one-click/virtualization/available_ips.txt /etc/one-click/virtualization/used_ips.txt
-  sudo rm -f "$migration_archive"
-  success "Migration process completed successfully!"
-  success "Master dominance authority securely transferred to [$target_destination] ($target_ip)."
-  warn "This node has dropped its encryption keyways and is operating as a standard cluster member."
-}
-fleet_rule_engine() {
-  fleet_init
-  build_vars
-  . "$fleet_root/controller.env"
-  if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
-    error "Security Block: Rule broadcasting must be initiated from the central Fleet Controller."
-    return 1
-  fi
-  local target_host="$1"
-  local rule_command="$2"
-  for host_conf in "$fleet_root"/state/*.conf; do
-    [[ ! -f "$host_conf" ]] && continue
-    local current_slug
-    current_slug=$(basename "$host_conf")
-    local solved_ip
-    solved_ip=$(grep '^IP=' "$host_conf" | cut -d= -f2-)
-    if [[ -n "$solved_ip" ]]; then
-      if [[ " $rule_command " =~ [[:space:]]${current_slug//.*}[[:space:]] ]]; then
-        info "Resolving fleet name '${current_slug//.*}' to IP: ${solved_ip}"
-        rule_command=$(echo "$rule_command" | sed "s/${current_slug//.*}/${solved_ip}/g")
-      fi
-    fi
-  done
-  if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
-    load_rule_engine
-    rule_engine "$rule_command chain ONE-CLICK-FLEET" -y
-  else
-    info "Dispatching custom firewall instruction payload to target: $target_host."
-    ANSIBLE_HOST_KEY_CHECKING=False \
-      ANSIBLE_SSH_TIMEOUT=3 \
-      ANSIBLE_GATHERING=explicit \
-      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-	  ansible "$target_host" \
-      -i "$fleet_root/inventory.yml" \
-      -m shell -a "/usr/local/bin/one-click engine \"$rule_command chain ONE-CLICK-FLEET\" -y" 2>/dev/null
-    fi
-  success "Firewall rule dispatched and applied to execution path successfully."
 }
 dry_run() {
   local cmds ns critical_ports broken check_list ssh_port target_ports used_ports=()
@@ -12562,9 +13276,9 @@ clean_duplicate_rules() {
         }
         { print }
       ' "$dup_tmpfile" > "${dup_tmpfile}.deduped"
-      ${fw_bin:-iptables}-restore < "${dup_tmpfile}.deduped" 2>/dev/null || {
+        ${fw_bin:-iptables}-restore < "${dup_tmpfile}.deduped" 2>/dev/null || {
         warn "Restore failed using ${fw_bin:-iptables}-restore."
-        rm -f "$tmpfile" "$dup_cleanfile" "${dup_tmpfile}.deduped" || true
+        rm -f "$dup_tmpfile" "$dup_cleanfile" "${dup_tmpfile}.deduped" || true
         return 1
       }
       ;;
@@ -13549,6 +14263,7 @@ log_browser_menu() {
     printf "║ %-46s ║\n" " [2]. Browse Journalctl (Services)"
 	printf "║ %-46s ║\n" " [3]. Live Web Log Viewer"
 	printf "║ %-46s ║\n" " [4]. Live Log Viewer"
+	printf "║ %-46s ║\n" " [5]. SSH Login Logs"
     printf "║ %-46s ║\n" " [0]. Exit"
     echo "╚════════════════════════════════════════════════╝"
     tput sgr0
@@ -13568,6 +14283,7 @@ log_browser_menu() {
         fi
         live_journal_view      ;;
       4) live_system_logs_view ;;
+      5) live_ssh_view         ;;
       0) exit                  ;;
     esac
   done
@@ -13716,10 +14432,10 @@ live_journal_view() {
   fi
   if [[ -n "$client_ip" && "$client_ip" != "127.0.0.1" ]]; then
     info "Enforcing firewall lockdown exclusively to requesting client IP: ${client_ip}"
-    sudo iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-    sudo iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
-    sudo iptables -I INPUT -p tcp --dport "$ws_port" -s 127.0.0.1 -j ACCEPT 2>/dev/null || true
-    sudo iptables -A INPUT -p tcp --dport "$ws_port" -j DROP 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+    iptables -I INPUT -p tcp --dport "$ws_port" -s 127.0.0.1 -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -p tcp --dport "$ws_port" -j DROP 2>/dev/null || true
   fi
   setup_log_viewer_vhost "$session_token" "$web_port" "$ws_port" || return 1
   local ws_url="ws://${ui_target}:${web_port}/${session_token}/ws"
@@ -13747,6 +14463,7 @@ live_journal_view() {
   local seen_labels=()
   for item in "${raw_targets[@]}"; do
     IFS=":" read -r label target_type <<< "$item"
+
     if [[ " ${seen_labels[*]} " =~ " ${label} " ]]; then
       continue
     fi
@@ -13762,6 +14479,7 @@ live_journal_view() {
     seen_labels+=("$label")
     local log_path="/var/log/one-click/log_viewer/${label}/access.log"
     mkdir -p "/var/log/one-click/log_viewer/${label}"
+
     if [[ "${target_type//*@}" == "$local_ip" ]] || [[ "$target_type" == "local" ]]; then
       remote_targets+=("${label}:local:${log_path}:${target_type}")
     else
@@ -13770,6 +14488,10 @@ live_journal_view() {
   done
   if [ ${#remote_targets[@]} -eq 0 ]; then
     error "No hosts available to stream logs after applying exclusions. Aborting session."
+    cleanup_session_port "$web_port"
+    cleanup_session_port "$ws_port"
+    cleanup_firewall_rules "$web_port"
+    cleanup_firewall_rules "$ws_port"
     return 1
   fi
   local ssh_key=""
@@ -13796,7 +14518,6 @@ live_journal_view() {
   cleanup() {
     warn "Session expired or terminated. Cleaning up streams, vhost, and security rules."
     kill $(jobs -p) 2>/dev/null || true
-
     if [[ -n "$session_token" ]]; then
       rm -f "/etc/nginx/conf.d/sess_${session_token}.conf"
       if command -v apache2 &>/dev/null; then
@@ -13807,11 +14528,15 @@ live_journal_view() {
     fi
     reload_webserver
     if [[ -n "$client_ip" && "$client_ip" != "${sys_ip:-${sys_ipv6}}" ]]; then
-      sudo iptables -D INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-      sudo iptables -D INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
-      sudo iptables -D INPUT -p tcp --dport "$ws_port" -s 127.0.0.1 -j ACCEPT 2>/dev/null || true
-      sudo iptables -D INPUT -p tcp --dport "$ws_port" -j DROP 2>/dev/null || true
+      iptables -D INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+      iptables -D INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+      iptables -D INPUT -p tcp --dport "$ws_port" -s 127.0.0.1 -j ACCEPT 2>/dev/null || true
+      iptables -D INPUT -p tcp --dport "$ws_port" -j DROP 2>/dev/null || true
     fi
+    cleanup_session_port "$web_port"
+    cleanup_session_port "$ws_port"
+    cleanup_firewall_rules "$web_port"
+    cleanup_firewall_rules "$ws_port"
     rm -rf "$tmp_dir"
     rm -rf "${output_dir}/${session_token}"
     rm -f "${available_ports_dir}/current_web_port" "${available_ports_dir}/current_ws_port"
@@ -13835,7 +14560,7 @@ live_journal_view() {
     if [[ "$ssh_target" == "local" ]] || [[ "$host_ip" == "$local_ip" ]]; then
       bash -c "$log_stream_cmd" | sed -u "s/^/${label} /" > "$fifo" &
     else
-      ssh "${ssh_opts[@]}" "$ssh_target" "$log_stream_cmd" sed -u "s/^/${label} /" > "$fifo" 2> /dev/null &
+      ssh "${ssh_opts[@]}" "$ssh_target" "$log_stream_cmd" sed -u "s/^/${label} /" > "$fifo" 2>/dev/null &
     fi
     fifo_list+=("$fifo")
   done
@@ -13856,23 +14581,34 @@ live_journal_view() {
     --fifo-out="$goaccess_fifo_out" &
   info "Dashboard (Restricted to ${client_ip:-All}) will expire at: $(date -d "now + $session_minutes minutes")"
   success "Access Live Console Here: ${orange}http://${ui_target}:${web_port}/${session_token}/${reset}"
-  ( sleep "$session_seconds" && kill -SIGTERM $$ 2>/dev/null ) &
+  (
+    sleep "$session_seconds"
+    cleanup_session_port "$web_port"
+    cleanup_session_port "$ws_port"
+    cleanup_firewall_rules "$web_port"
+    cleanup_firewall_rules "$ws_port"
+    kill -SIGTERM $$ 2>/dev/null
+  ) &
   info "Session active in background (PID: ${timer_pid})."
   info "${yellow}To terminate early, run: kill ${timer_pid}${reset}"
   disown "$timer_pid" 2>/dev/null || true
   read -rp "Press Enter to continue..."
+  cleanup
+  trap - EXIT
   return 0
 }
 generate_dashboard_html() {
   local target_html="$1"
   local session_token="$2"
   local session_minutes="${3:-20}"
+  local expire_ts
+  expire_ts=$(date -d "now + ${session_minutes} minutes" +%s)
   cat <<EOF > "$target_html"
 <!DOCTYPE html>
 <html lang="en" class="h-full bg-slate-950 text-slate-100">
 <head>
   <meta charset="UTF-8">
-  <title>One-Click Web Log Console</title>
+  <title>One-Click Log Browser</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .log-line:hover { background-color: rgba(255,255,255,0.05); }
@@ -13916,21 +14652,23 @@ generate_dashboard_html() {
     let rawLogLines = [];
     let isFetching = false;
     const hosts = [];
-    let totalSeconds = ${session_minutes} * 60;
+    const expireTimestamp = ${expire_ts};
     const countdownEl = document.getElementById('timer-countdown');
     const timerBadge = document.getElementById('session-timer');
     function updateTimer() {
-      const minutes = Math.floor(totalSeconds / 60);
-      const seconds = totalSeconds % 60;
+      const now = Math.floor(Date.now() / 1000);
+      const remainingSeconds = Math.max(0, expireTimestamp - now);
+      const minutes = Math.floor(remainingSeconds / 60);
+      const seconds = remainingSeconds % 60;
       countdownEl.innerText = \`\${String(minutes).padStart(2, '0')}:\${String(seconds).padStart(2, '0')}\`;
-      if (totalSeconds <= 120) {
+      if (remainingSeconds <= 120 && remainingSeconds > 0) {
         timerBadge.className = "bg-red-950/50 border border-red-800 rounded px-3 py-1 text-xs text-red-400 font-semibold flex items-center gap-2 animate-pulse";
       }
-      if (totalSeconds <= 0) {
+      if (remainingSeconds <= 0) {
+        timerBadge.className = "bg-red-950 border border-red-800 rounded px-3 py-1 text-xs text-red-500 font-bold flex items-center gap-2";
+        countdownEl.innerText = "EXPIRED";
         document.getElementById('log-console').innerHTML = '<div class="text-red-500 font-bold p-6 text-center text-base">Session expired. Security rules and background log streaming destroyed.</div>';
-        return;
       }
-      totalSeconds--;
     }
     setInterval(updateTimer, 1000);
     updateTimer();
@@ -14144,11 +14882,11 @@ live_system_logs_view() {
   if [[ -n "$client_ip" && "$client_ip" != "127.0.0.1" && "$client_ip" != "::1" ]]; then
     info "Locking session access exclusively to requesting IP: ${client_ip}"
     if [[ "$client_ip" =~ : ]]; then
-      sudo ip6tables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-      sudo ip6tables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+      ip6tables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+      ip6tables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
     else
-      sudo iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-      sudo iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+      iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+      iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
     fi
   fi
   local raw_targets=()
@@ -14167,7 +14905,6 @@ live_system_logs_view() {
   local seen_labels=()
   for item in "${raw_targets[@]}"; do
     IFS=":" read -r label target_type <<< "$item"
-
     if [[ " ${seen_labels[*]} " =~ " ${label} " ]]; then
       continue
     fi
@@ -14189,6 +14926,8 @@ live_system_logs_view() {
   done
   if [ ${#remote_targets[@]} -eq 0 ]; then
     error "No hosts available to stream system logs. Aborting."
+    cleanup_session_port "$web_port"
+    cleanup_firewall_rules "$web_port"
     return 1
   fi
   local logs_mount_dir="/etc/one-click/logs/${session_token}"
@@ -14204,7 +14943,11 @@ live_system_logs_view() {
     fi
   done
   echo "[ ${host_json_items} ]" > "${logs_mount_dir}/hosts.json"
-  setup_native_system_log_vhost "$session_token" "$web_port" "$logs_mount_dir" || return 1
+  setup_native_system_log_vhost "$session_token" "$web_port" "$logs_mount_dir" || {
+    cleanup_session_port "$web_port"
+    cleanup_firewall_rules "$web_port"
+    return 1
+  }
   local ssh_key=""
   if [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
     ssh_key="/home/oneclick/.ssh/id_ed25519"
@@ -14237,7 +14980,7 @@ live_system_logs_view() {
     if [[ "$ssh_target" == "local" ]] || [[ "${ssh_target//*@}" == "$local_hostname" ]]; then
       stdbuf -oL bash -c "$log_stream_cmd" >> "$host_log_file" &
     else
-      stdbuf -oL ssh "${ssh_opts[@]}" "$ssh_target" "$log_stream_cmd" >> "$host_log_file" 2> /dev/null &
+      stdbuf -oL ssh "${ssh_opts[@]}" "$ssh_target" "$log_stream_cmd" >> "$host_log_file" 2>/dev/null &
     fi
   done
   local timer_pid=$!
@@ -14266,15 +15009,25 @@ live_system_logs_view() {
         sudo iptables -D INPUT -p tcp --dport '${web_port}' -s '${client_ip}' -j DROP 2>/dev/null || true
       fi
     fi
+    cleanup_session_port '${web_port}'
+    cleanup_firewall_rules '${web_port}'
     info 'Native System Log session destroyed.'
   " EXIT
   info "Dashboard (Restricted to ${client_ip:-All}) will expire at: $(date -d "now + $session_minutes minutes")"
   success "Access Live Console Here: ${orange}http://${ui_target}:${web_port}/${session_token}/${reset}"
-  ( sleep "$session_seconds" && kill -SIGTERM $$ 2>/dev/null ) &
+  (
+    sleep "$session_seconds"
+    cleanup_session_port "$web_port"
+    cleanup_firewall_rules "$web_port"
+    kill -SIGTERM $$ 2>/dev/null
+  ) &
   info "Session active in background for ${session_minutes} minutes."
   info "To terminate early, run: kill ${timer_pid}"
   disown "$timer_pid" 2>/dev/null || true
   read -rp "Press Enter to continue..."
+  cleanup_session_port "$web_port"
+  cleanup_firewall_rules "$web_port"
+  trap - EXIT
 }
 browse_files() {
   mapfile -t logs < <(
@@ -14329,7 +15082,7 @@ browse_files() {
       ctrl-f)
         read -rp "${cyan}[USER]: ${reset}Delete $(basename "$file")? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-          sudo truncate -s 0 "$file"
+          truncate -s 0 "$file"
           success "Log cleared."
           sleep 1
         fi
@@ -14339,7 +15092,7 @@ browse_files() {
         read -rp "${yellow}[WARNING]: ${reset}Clear ALL ${#logs[@]} logs (~$total_human)? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
           for f in "${logs[@]}"; do
-            sudo truncate -s 0 "$f" 2>/dev/null
+            truncate -s 0 "$f" 2>/dev/null
           done
           success "All logs cleared."
           sleep 2
@@ -14383,8 +15136,8 @@ browse_journal() {
       ctrl-f)
         read -rp "${yellow}[WARNING]: ${reset}Clear journal for $unit? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-          sudo journalctl --unit="$unit" --rotate
-          sudo journalctl --unit="$unit" --vacuum-time=1s
+          journalctl --unit="$unit" --rotate
+          journalctl --unit="$unit" --vacuum-time=1s
           success "Journal for $unit cleared."
           sleep 2
         fi
@@ -14392,8 +15145,8 @@ browse_journal() {
       ctrl-a)
         read -rp "${yellow}[WARNING]: ${reset}Vacuum ALL journal logs ($journal_usage)? [y|n]: " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-          sudo journalctl --rotate
-          sudo journalctl --vacuum-time=1s
+          journalctl --rotate
+          journalctl --vacuum-time=1s
           success "All journal logs cleared."
           sleep 2
         fi
@@ -14431,6 +15184,501 @@ reload_webserver() {
     systemctl enable "$service_name" --now
   fi
 }
+# ==== Faileld Log ins ====
+live_ssh_view() {
+  build_vars
+  local session_minutes="${LOG_VIEWER_SESSION:-10}"
+  local excluded_hosts=()
+  if [[ -n "${2:-}" ]]; then
+    IFS=',' read -r -a excluded_hosts <<< "$2"
+  fi
+  local session_seconds=$((session_minutes * 60))
+  local session_token=$(openssl rand -hex 16)
+  local expire_ts=$(date -d "now + $session_minutes minutes" +%s)
+  local inventory_file="/etc/one-click/fleet/inventory.yml"
+  local available_ports_dir="/etc/one-click/log_viewer/ports"
+  mkdir -p "$available_ports_dir"
+  if [[ "${SSH_CLIENT:-}" =~ : ]]; then
+    ui_target="$sys_ipv6"
+  else
+    ui_target="$sys_ip"
+  fi
+  if [[ "$ui_target" =~ : ]]; then
+    ui_target="[$ui_target]"
+  fi
+  local web_port
+  web_port=$(get_free_port)
+  echo "$web_port" > "${available_ports_dir}/current_web_port"
+  local client_ip
+  client_ip=$(echo "${SSH_CLIENT:-}" | awk '{print $1}')
+  [[ -z "$client_ip" ]] && client_ip=$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')
+  if [[ -n "$client_ip" && "$client_ip" != "127.0.0.1" && "$client_ip" != "::1" ]]; then
+    info "Locking session access exclusively to requesting IP: ${client_ip}"
+    if [[ "$client_ip" =~ : ]]; then
+      ip6tables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+      ip6tables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+    else
+      iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
+      iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+    fi
+  fi
+  local raw_targets=()
+  if [[ -f "$inventory_file" ]] && command -v ansible &>/dev/null; then
+    info "Discovering fleet members from Ansible inventory."
+    local host_list
+    host_list=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | grep -v "hosts (" | awk '{print $1}')
+    for host in $host_list; do
+      raw_targets+=("${host}:${host}")
+    done
+  fi
+  local local_hostname
+  local_hostname=$(hostname -s)
+  raw_targets+=("${local_hostname}:local")
+  local remote_targets=()
+  local seen_labels=()
+  for item in "${raw_targets[@]}"; do
+    IFS=":" read -r label target_type <<< "$item"
+    if [[ " ${seen_labels[*]} " =~ " ${label} " ]]; then
+      continue
+    fi
+    local skip=0
+    for ex in "${excluded_hosts[@]}"; do
+      if [[ "$label" == "$ex" ]]; then
+        skip=1
+        warn "Excluding host from stream: ${label}"
+        break
+      fi
+    done
+    [[ $skip -eq 1 ]] && continue
+    seen_labels+=("$label")
+    if [[ "${target_type//*@}" == "$local_hostname" ]] || [[ "$target_type" == "local" ]]; then
+      remote_targets+=("${label}:local")
+    else
+      remote_targets+=("${label}:oneclick@${label}")
+    fi
+  done
+  if [ ${#remote_targets[@]} -eq 0 ]; then
+    error "No hosts available to stream SSH logs. Aborting."
+    return 1
+  fi
+  local ssh_key=""
+  if [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
+    ssh_key="/home/oneclick/.ssh/id_ed25519"
+  elif [ -f "/etc/one-click/fleet/keys/id_ed25519" ]; then
+    ssh_key="/etc/one-click/fleet/keys/id_ed25519"
+  fi
+  local ssh_opts=("-o" "ConnectTimeout=5" "-o" "StrictHostKeyChecking=no" "-o" "BatchMode=yes")
+  [ -n "$ssh_key" ] && ssh_opts+=("-i" "$ssh_key")
+  local tmp_dir
+  tmp_dir=$(mktemp -d /tmp/custom_ssh_sess_XXXXXX)
+  local logs_dir="${tmp_dir}/logs"
+  mkdir -p "$logs_dir"
+  local log_read_cmd='
+    log_path="/etc/one-click/rule-engine/guard/ssh"
+    if [ -d "$log_path" ]; then
+      cat "$log_path"/*.log 2>/dev/null
+    elif [ -f "$log_path" ]; then
+      cat "$log_path" 2>/dev/null
+    fi
+  '
+  local log_tail_cmd='
+    log_path="/etc/one-click/rule-engine/guard/ssh"
+    if [ -d "$log_path" ]; then
+      stdbuf -oL tail -q -n 0 -F "$log_path"/*.log 2>/dev/null
+    elif [ -f "$log_path" ]; then
+      stdbuf -oL tail -n 0 -F "$log_path" 2>/dev/null
+    fi
+  '
+  info "Pre-seeding historical metrics across ${#remote_targets[@]} fleet nodes..."
+  local node_list=()
+  local raw_history="${tmp_dir}/raw_history.tmp"
+  touch "$raw_history"
+  for target in "${remote_targets[@]}"; do
+    IFS=":" read -r label ssh_target <<< "$target"
+    node_list+=("$label")
+    touch "${logs_dir}/${label}.json"
+    if [[ "$ssh_target" == "local" ]] || [[ "${ssh_target//*@}" == "$local_hostname" ]]; then
+      bash -c "$log_read_cmd" 2>/dev/null | jq -c --arg h "$label" 'select(.ip != null) | {node: $h, ip: .ip, user: (.user // "unknown")}' >> "$raw_history" &
+    else
+      ssh "${ssh_opts[@]}" "$ssh_target" "$log_read_cmd" 2>/dev/null | jq -c --arg h "$label" 'select(.ip != null) | {node: $h, ip: .ip, user: (.user // "unknown")}' >> "$raw_history" &
+    fi
+  done
+  wait
+  python3 - "$raw_history" "${tmp_dir}/summary.json" <<'EOF'
+import sys, json
+
+raw_file, out_file = sys.argv[1], sys.argv[2]
+all_ips, all_users = {}, {}
+hosts = {}
+
+try:
+    with open(raw_file, 'r') as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                ip = data.get('ip')
+                user = data.get('user') or 'unknown'
+                node = data.get('node') or 'local'
+
+                if ip:
+                    all_ips[ip] = all_ips.get(ip, 0) + 1
+                    all_users[user] = all_users.get(user, 0) + 1
+
+                    if node not in hosts:
+                        hosts[node] = {'ips': {}, 'users': {}}
+                    hosts[node]['ips'][ip] = hosts[node]['ips'].get(ip, 0) + 1
+                    hosts[node]['users'][user] = hosts[node]['users'].get(user, 0) + 1
+            except Exception:
+                pass
+except Exception:
+    pass
+
+res = {
+    "all": {"ips": all_ips, "users": all_users},
+    "hosts": hosts
+}
+
+with open(out_file, 'w') as f:
+    json.dump(res, f)
+EOF
+  for target in "${remote_targets[@]}"; do
+    IFS=":" read -r label ssh_target <<< "$target"
+    local node_file="${logs_dir}/${label}.json"
+    if [[ "$ssh_target" == "local" ]] || [[ "${ssh_target//*@}" == "$local_hostname" ]]; then
+      stdbuf -oL bash -c "$log_tail_cmd" 2>/dev/null | jq --unbuffered -c --arg h "$label" 'select(.ip != null) | . + {node: $h}' >> "$node_file" &
+    else
+      stdbuf -oL ssh "${ssh_opts[@]}" "$ssh_target" "$log_tail_cmd" 2>/dev/null | jq --unbuffered -c --arg h "$label" 'select(.ip != null) | . + {node: $h}' >> "$node_file" &
+    fi
+  done
+  printf '%s\n' "${node_list[@]}" > "${tmp_dir}/nodes.txt"
+  cat << 'EOF' > "${tmp_dir}/server.py"
+import os, sys, time, json
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+PORT = int(sys.argv[1])
+SESSION_TOKEN = sys.argv[2]
+TMP_DIR = sys.argv[3]
+LOGS_DIR = os.path.join(TMP_DIR, "logs")
+SUMMARY_FILE = os.path.join(TMP_DIR, "summary.json")
+EXPIRE_TS = int(sys.argv[4])
+with open(os.path.join(TMP_DIR, "nodes.txt")) as f:
+    NODES = [line.strip() for line in f if line.strip()]
+
+HTML_CONTENT = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>One-Click Log Browser</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {{ background: #0f172a; color: #f8fafc; font-family: system-ui, sans-serif; margin: 0; padding: 24px; }}
+    header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 16px; }}
+    h1 {{ color: #38bdf8; margin: 0; font-size: 1.5rem; }}
+    .header-info {{ display: flex; gap: 12px; align-items: center; }}
+    #status {{ font-size: 0.875rem; font-weight: 600; padding: 6px 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: #94a3b8; }}
+    #timer {{ font-size: 0.875rem; font-weight: 700; padding: 6px 12px; background: #0f172a; border: 1px solid #eab308; border-radius: 6px; color: #eab308; font-family: monospace; }}
+    .host-tabs {{ display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 2px solid #334155; padding-bottom: 8px; overflow-x: auto; }}
+    .tab-btn {{ background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 0.85rem; cursor: pointer; white-space: nowrap; }}
+    .tab-btn.active {{ background: #38bdf8; color: #0f172a; border-color: #38bdf8; font-weight: bold; }}
+    .toolbar {{ display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }}
+    .btn {{ background: #1e293b; color: #38bdf8; border: 1px solid #38bdf8; padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 0.85rem; cursor: pointer; }}
+    .btn:hover {{ background: #38bdf8; color: #0f172a; }}
+    .btn-danger {{ color: #ef4444; border-color: #ef4444; }}
+    .section-card {{ background: #1e293b; padding: 20px; border-radius: 10px; border: 1px solid #334155; margin-bottom: 24px; }}
+    .section-title {{ font-size: 1.1rem; color: #f1f5f9; margin-top: 0; margin-bottom: 16px; }}
+    .chart-box {{ position: relative; width: 100%; min-height: 300px; }}
+    .console-box {{ background: #090d16; border: 1px solid #334155; border-radius: 6px; padding: 12px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.825rem; }}
+    .log-line {{ border-bottom: 1px solid #1e293b; padding: 4px 0; display: flex; gap: 12px; }}
+    .log-ts {{ color: #64748b; }}
+    .log-node {{ color: #a855f7; font-weight: bold; width: 110px; }}
+    .log-ip {{ color: #ef4444; font-weight: bold; width: 130px; }}
+    .log-user {{ color: #38bdf8; width: 110px; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SSH Guard - Failed Login Logs</h1>
+    <div class="header-info">
+      <div id="timer">Expires in: --:--</div>
+      <div id="status">Connecting...</div>
+    </div>
+  </header>
+  <div class="host-tabs" id="hostTabContainer"></div>
+  <div class="toolbar">
+    <button class="btn btn-danger" onclick="exportIptablesBlocklist()">🛡️ Export IPTables Blocklist Script</button>
+    <button class="btn" onclick="copyTopIPs()">📋 Copy Top 10 IPs to Clipboard</button>
+    <button class="btn" onclick="exportCSV()">📊 Export CSV Report</button>
+  </div>
+  <div class="section-card">
+    <div class="section-title">🚨 Offending IP Address Count<span id="nodeSubtitle" style="color: #94a3b8; font-size: 0.9rem;">(All Nodes)</span></div>
+    <div class="chart-box"><canvas id="ipChart"></canvas></div>
+  </div>
+  <div class="section-card">
+    <div class="section-title">👤 Most Used Usernames</div>
+    <div class="chart-box"><canvas id="userChart"></canvas></div>
+  </div>
+  <div class="section-card">
+    <div class="section-title">⚡ Live SSH Activity Tracker</div>
+    <div class="console-box" id="consoleFeed"><div style="color: #64748b;">Connecting...</div></div>
+  </div>
+  <script>
+    const expireTimestamp = {EXPIRE_TS};
+    const nodes = {json.dumps(NODES)};
+    let activeTab = 'ALL';
+    let evtSource = null;
+    let ipCounts = {{}};
+    let userCounts = {{}};
+    let initialClusterData = {{}};
+    function updateCountdown() {{
+      const now = Math.floor(Date.now() / 1000);
+      const remaining = Math.max(0, expireTimestamp - now);
+      const timerElem = document.getElementById('timer');
+      if (remaining <= 0) {{
+        timerElem.innerText = 'Session Expired';
+        timerElem.style.borderColor = '#ef4444';
+        timerElem.style.color = '#ef4444';
+        return;
+      }}
+      const m = Math.floor(remaining / 60);
+      const s = remaining % 60;
+      timerElem.innerText = `Expires in: ${{String(m).padStart(2,'0')}}:${{String(s).padStart(2,'0')}}`;
+      if (remaining <= 60) {{
+        timerElem.style.borderColor = '#ef4444';
+        timerElem.style.color = '#ef4444';
+      }}
+    }}
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+    const tabContainer = document.getElementById('hostTabContainer');
+    tabContainer.innerHTML = `<button class="tab-btn active" id="tab-ALL" onclick="switchTab('ALL')">🌐 OC Fleet (Aggregated)</button>`;
+    nodes.forEach(n => {{
+      tabContainer.innerHTML += `<button class="tab-btn" id="tab-${{n}}" onclick="switchTab('${{n}}')">🖥️ ${{n}}</button>`;
+    }});
+    const ipCtx = document.getElementById('ipChart').getContext('2d');
+    const userCtx = document.getElementById('userChart').getContext('2d');
+    const ipChart = new Chart(ipCtx, {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ label: 'Failed Attempts', data: [], backgroundColor: [], barThickness: 12 }}] }},
+      options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+    }});
+    const userChart = new Chart(userCtx, {{
+      type: 'bar',
+      data: {{ labels: [], datasets: [{{ label: 'Target Attempts', data: [], backgroundColor: '#8b5cf6', barThickness: 10 }}] }},
+      options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }} }}
+    }});
+    function getColors(data) {{
+      return data.map(v => v >= 3000 ? '#ef4444' : (v >= 1000 ? '#eab308' : '#3b82f6'));
+    }}
+    let updateScheduled = false;
+    function scheduleChartUpdate() {{
+      if (updateScheduled) return;
+      updateScheduled = true;
+      requestAnimationFrame(() => {{
+        const sortedIPs = Object.entries(ipCounts).sort((a,b) => b[1]-a[1]).slice(0, 50);
+        ipChart.data.labels = sortedIPs.map(e => e[0]);
+        ipChart.data.datasets[0].data = sortedIPs.map(e => e[1]);
+        ipChart.data.datasets[0].backgroundColor = getColors(sortedIPs.map(e => e[1]));
+        ipChart.update('none');
+        const sortedUsers = Object.entries(userCounts).sort((a,b) => b[1]-a[1]).slice(0, 50);
+        userChart.data.labels = sortedUsers.map(e => e[0]);
+        userChart.data.datasets[0].data = sortedUsers.map(e => e[1]);
+        userChart.update('none');
+        updateScheduled = false;
+      }});
+    }}
+    function switchTab(node) {{
+      activeTab = node;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(`tab-${{node}}`).classList.add('active');
+      document.getElementById('nodeSubtitle').innerText = node === 'ALL' ? '(All Nodes)' : `(Node: ${{node}})`;
+      if (node === 'ALL' && initialClusterData.all) {{
+        ipCounts = Object.assign({{}}, initialClusterData.all.ips);
+        userCounts = Object.assign({{}}, initialClusterData.all.users);
+      }} else if (initialClusterData.hosts && initialClusterData.hosts[node]) {{
+        ipCounts = Object.assign({{}}, initialClusterData.hosts[node].ips);
+        userCounts = Object.assign({{}}, initialClusterData.hosts[node].users);
+      }} else {{
+        ipCounts = {{}};
+        userCounts = {{}};
+      }}
+      document.getElementById('consoleFeed').innerHTML = '';
+      scheduleChartUpdate();
+      if (evtSource) evtSource.close();
+      connectStream(node);
+    }}
+    function connectStream(node) {{
+      document.getElementById('status').innerText = `Connected: ${{node}}`;
+      evtSource = new EventSource(`/{SESSION_TOKEN}/stream/${{node}}`);
+      evtSource.onmessage = (e) => {{
+        try {{
+          const payload = JSON.parse(e.data);
+          if (payload.type === 'init') {{
+            initialClusterData = payload;
+            if (activeTab === 'ALL' && payload.all) {{
+              ipCounts = Object.assign({{}}, payload.all.ips);
+              userCounts = Object.assign({{}}, payload.all.users);
+            }} else if (payload.hosts && payload.hosts[activeTab]) {{
+              ipCounts = Object.assign({{}}, payload.hosts[activeTab].ips);
+              userCounts = Object.assign({{}}, payload.hosts[activeTab].users);
+            }}
+            scheduleChartUpdate();
+            return;
+          }}
+          if (payload.type === 'live' && payload.data.ip) {{
+            const item = payload.data;
+            ipCounts[item.ip] = (ipCounts[item.ip] || 0) + 1;
+            userCounts[item.user || 'unknown'] = (userCounts[item.user || 'unknown'] || 0) + 1;
+            scheduleChartUpdate();
+            const feed = document.getElementById('consoleFeed');
+            const row = document.createElement('div');
+            row.className = 'log-line';
+            row.innerHTML = `<span class="log-ts">[${{new Date().toLocaleTimeString()}}]</span>` +
+                            `<span class="log-node">[${{item.node || 'local'}}]</span>` +
+                            `<span class="log-ip">${{item.ip}}</span>` +
+                            `<span class="log-user">user: ${{item.user || 'unknown'}}</span>`;
+            feed.insertBefore(row, feed.firstChild);
+            if (feed.children.length > 100) feed.removeChild(feed.lastChild);
+          }}
+        }} catch(err) {{}}
+      }};
+    }}
+    function exportIptablesBlocklist() {{
+      const offenders = Object.entries(ipCounts).filter(e => e[1] >= 1000).map(e => e[0]);
+      if (!offenders.length) return alert('No IPs over threshold (1000).');
+      let script = `#!/bin/bash\\n# Blocklist for ${{activeTab}}\\n`;
+      offenders.forEach(ip => script += `iptables -A INPUT -s ${{ip}} -j DROP\\n`);
+      download(script, `blocklist_${{activeTab}}.sh`);
+    }}
+    function copyTopIPs() {{
+      const top = Object.entries(ipCounts).sort((a,b) => b[1]-a[1]).slice(0, 10).map(e => e[0]).join('\\n');
+      navigator.clipboard.writeText(top).then(() => alert('Top 10 copied!'));
+    }}
+    function exportCSV() {{
+      let csv = 'IP,Attempts,Risk\\n';
+      Object.entries(ipCounts).sort((a,b) => b[1]-a[1]).forEach(([ip, c]) => {{
+        csv += `${{ip}},${{c}},${{c>=3000?'CRITICAL':(c>=1000?'HIGH':'MODERATE')}}\\n`;
+      }});
+      download(csv, `report_${{activeTab}}.csv`);
+    }}
+    function download(content, name) {{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob = new Blob([content]));
+      a.download = name;
+      a.click();
+    }}
+    connectStream('ALL');
+  </script>
+</body>
+</html>"""
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+class SSEHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        clean_path = self.path.split('?')[0].rstrip('/')
+        if clean_path == f"/{SESSION_TOKEN}":
+            body = HTML_CONTENT.encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if clean_path.startswith(f"/{SESSION_TOKEN}/stream/"):
+            target_node = clean_path.split('/')[-1]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            if os.path.exists(SUMMARY_FILE):
+                try:
+                    with open(SUMMARY_FILE, "r") as sf:
+                        summary_data = sf.read().strip()
+                        if summary_data:
+                            init_payload = json.dumps({"type": "init", **json.loads(summary_data)})
+                            self.wfile.write(f"data: {init_payload}\n\n".encode('utf-8'))
+                            self.wfile.flush()
+                except Exception:
+                    pass
+
+            if target_node == "ALL":
+                target_files = [os.path.join(LOGS_DIR, f) for f in os.listdir(LOGS_DIR) if f.endswith('.json')]
+            else:
+                target_files = [os.path.join(LOGS_DIR, f"{target_node}.json")]
+
+            handles = []
+            for tf in target_files:
+                if os.path.exists(tf):
+                    h = open(tf, "r")
+                    h.seek(0, os.SEEK_END)
+                    handles.append(h)
+
+            try:
+                while True:
+                    read_any = False
+                    for h in handles:
+                        line = h.readline()
+                        if line:
+                            read_any = True
+                            line_str = line.strip()
+                            if line_str:
+                                live_payload = json.dumps({"type": "live", "data": json.loads(line_str)})
+                                self.wfile.write(f"data: {live_payload}\n\n".encode('utf-8'))
+                                self.wfile.flush()
+                    if not read_any:
+                        time.sleep(0.1)
+            except (OSError, BrokenPipeError):
+                pass
+            finally:
+                for h in handles:
+                    h.close()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+if __name__ == "__main__":
+    server = ThreadedHTTPServer(('0.0.0.0', PORT), SSEHandler)
+    server.serve_forever()
+EOF
+  cleanup() {
+    warn "Cleaning up SSH Log Visualizer session."
+    kill $(jobs -p) 2>/dev/null || true
+    if [[ -n "${client_ip}" && "${client_ip}" != '127.0.0.1' && "${client_ip}" != '::1' ]]; then
+      if [[ "${client_ip}" =~ : ]]; then
+        ip6tables -D INPUT -p tcp --dport "${web_port}" -s "${client_ip}" -j ACCEPT 2>/dev/null || true
+        ip6tables -D INPUT -p tcp --dport "${web_port}" -j DROP 2>/dev/null || true
+      else
+        iptables -D INPUT -p tcp --dport "${web_port}" -s "${client_ip}" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport "${web_port}" -j DROP 2>/dev/null || true
+      fi
+    fi
+    cleanup_session_port "$web_port"
+    cleanup_firewall_rules "$web_port"
+    rm -rf "$tmp_dir"
+    rm -f "${available_ports_dir}/current_web_port"
+    info "SSH Log Visualizer session destroyed."
+  }
+  trap cleanup EXIT
+  python3 "${tmp_dir}/server.py" "$web_port" "$session_token" "$tmp_dir" "$expire_ts" &
+  local timer_pid=$!
+  info "Dashboard (Restricted to ${client_ip:-All}) will expire at: $(date -d "@$expire_ts")"
+  success "Access Live Console Here: http://${ui_target}:${web_port}/${session_token}/"
+  (
+    sleep "$session_seconds"
+    cleanup_session_port "$web_port"
+    cleanup_firewall_rules "$web_port"
+    kill -SIGTERM $$ 2>/dev/null
+  ) &
+  info "Session active in background for ${session_minutes} minutes."
+  info "To terminate early, run: kill ${timer_pid}"
+  disown "$timer_pid" 2>/dev/null || true
+  read -rp "Press Enter to continue..."
+}
 # ============================================== End Of Log Browser ======================================================
 create_service() {
   rsync_cmd="${1:-}"
@@ -14455,7 +15703,6 @@ RemainAfterExit=no
 [Install]
 WantedBy=multi-user.target
 EOF
-
   sudo systemctl daemon-reload
   sudo systemctl enable "$service_name"
 }
