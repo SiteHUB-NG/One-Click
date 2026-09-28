@@ -3096,8 +3096,8 @@ EOF
   generate_node_credentials "$host"
   info "Waiting for $host remote host configuration." \
     "$msg" \
-    "Press ${yellow}Ctrl+C${reset} at any time to cancel this setup block safely." \
-    "Checking connectivity status"
+    "Press ${yellow}Ctrl+C${reset} at any time to cancel this setup block safely."
+  info "Checking connectivity status"
   if [[ "$server_type" == "hypervisor" && "$role_type" == "vps-peer" ]]; then
     connect_ip="${private_ip}"
   else
@@ -3112,26 +3112,38 @@ EOF
   local saved_err_trap
   saved_err_trap=$(trap -p ERR)
   trap '' ERR
-  while true; do
-    ssh \
-      -n \
-      -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
-      -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
-      -o ConnectTimeout=1 \
-      -o BatchMode=yes \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      ${porto:+"${porto[@]}"} \
-      "oneclick@$connect_ip" \
-      "echo ready" >/dev/null 2>&1;
-    if [[ $? -eq 0 ]]; then
-      success "Key handshake established!"
-      break
-    else
-      echo -n "."
-      sleep 5
-    fi
-  done
+  if [[ "$is_windows" -eq 1 ]]; then
+    while true; do
+      if ping -c1 -W1 "$connect_ip" &>/dev/null; then
+        success "WireGuard connectivity established!"
+        break
+      else
+        echo -n "."
+        sleep 5
+      fi
+    done
+  else
+    while true; do
+      ssh \
+        -n \
+        -o IdentityFile=/home/oneclick/.ssh/id_ed25519 \
+        -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519 \
+        -o ConnectTimeout=1 \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        ${porto:+"${porto[@]}"} \
+        "oneclick@$connect_ip" \
+        "echo ready" >/dev/null 2>&1;
+      if [[ $? -eq 0 ]]; then
+        success "Key handshake established!"
+        break
+      else
+        echo -n "."
+        sleep 5
+      fi
+    done
+  fi
   if [[ -n "$saved_err_trap" ]]; then
     eval "$saved_err_trap"
   else
@@ -7787,7 +7799,7 @@ EOF
   info "Configuring peer VPS networking"
   if [[ "$is_windows" -eq 1 ]]; then
     local win_mac=$(echo "$vps_name" | md5sum | sed -E 's/^(..)(..)(..).*$/52:54:00:\1:\2:\3/')
-    local net_flag="--network network=oneclick-nat,model=virtio --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9"
+    local net_flag="--network network=oneclick-nat,model=virtio --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9 --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0"
     host_gateway=$(ip route show default | awk '{print $3; exit}')
   else
     local net_flag="--network network=oneclick-nat,model=virtio"
@@ -7799,7 +7811,7 @@ EOF
     host_gateway=$(ip route show default | awk '{print $3}')
     if [[ -n "$virtual_mac" ]]; then
       if [[ "$is_windows" -eq 1 ]]; then
-        net_flag="--network network=oneclick-nat,model=e1000e,mac=$virtual_mac --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9"
+        net_flag="--network bridge=br0,model=e1000e,mac=$virtual_mac --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9 --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0"
         host_gateway=$(ip route show default | awk '{print $3; exit}')
       else
         net_flag="--network bridge=br0,mac=${virtual_mac},model=virtio"
@@ -8463,35 +8475,55 @@ EOF
     fi
     warn "Please wait! This may take some time."
     while [ $counter -lt 50 ]; do
-      if ssh -i /etc/one-click/fleet/keys/id_ed25519 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=2 \
-        -o PasswordAuthentication=no \
-         oneclick@"$target_vps_ip" "echo HEALTH_CHECK_OK" &> /dev/null; then
+      if [[ "$is_windows" -eq 1 ]]; then
+        if virsh qemu-agent-command "$vps_name" \
+          '{"execute":"guest-ping"}' &>/dev/null; then
           ssh_ready=1
           break
-      else
-        if [[ ! -f "$local_reset_check" ]]; then
-          touch "$local_reset_check"
-          virsh reset "$vps_name"
-          sleep 20
+        else
+          if [[ ! -f "$local_reset_check" ]]; then
+            touch "$local_reset_check"
+            virsh reset "$vps_name"
+            sleep 20
+          fi
         fi
+        counter=$((counter + 1))
+        sleep 2
+      else
+        if ssh -i /etc/one-click/fleet/keys/id_ed25519 \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o ConnectTimeout=2 \
+          -o PasswordAuthentication=no \
+          oneclick@"$target_vps_ip" "echo HEALTH_CHECK_OK" &> /dev/null; then
+            ssh_ready=1
+            break
+        else
+          if [[ ! -f "$local_reset_check" ]]; then
+            touch "$local_reset_check"
+            virsh reset "$vps_name"
+            sleep 20
+          fi
+        fi
+        counter=$((counter + 1))
+        sleep 2
       fi
-      counter=$((counter + 1))
-      sleep 2
     done
     rm -f "$local_reset_check"
     if [ "$ssh_ready" -ne 1 ]; then
       error "Local boot validation timed out. Target guest $vps_name is unresponsive."
       return 1
     fi
-    success "Guest network active. Executing payload."
-    ssh \
-      -i /etc/one-click/fleet/keys/id_ed25519 \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-        oneclick@"$target_vps_ip" << EOC
+    if [[ "$is_windows" -eq 1 ]]; then
+      success "Local Windows KVM node ${vps_name} deployed successfully!" "Payload executing in the background"
+      info "Use the VNC link above to track the progress"
+    else
+      success "Guest network active. Executing payload."
+      ssh \
+        -i /etc/one-click/fleet/keys/id_ed25519 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+          oneclick@"$target_vps_ip" << EOC
 if command -v apt-get >/dev/null; then
   sudo apt-get update -y
   sudo apt-get install -y -o DPkg::Lock::Timeout=120 \
@@ -8524,7 +8556,8 @@ sudo systemctl enable --now qemu-guest-agent 2>/dev/null || true
 sudo systemctl enable --now wg-quick@one-click 2>/dev/null || true
 EOC
 
-    success "Local guest kvm node ${vps_name} deployed successfully!"
+      success "Local Linux KVM node ${vps_name} deployed successfully!"
+    fi
   else
     info "Initiating remote hypervisor deployment for ${vps_name}."
     warn "Please wait! This may take some time."
@@ -8547,34 +8580,56 @@ EOC
           fi
         fi
         counter=0
-        while [ \$counter -lt 30 ]; do
-          if ssh -i /home/oneclick/.ssh/id_ed25519 \\
-            -o StrictHostKeyChecking=no \\
-            -o UserKnownHostsFile=/dev/null \\
-            -o ConnectTimeout=2 \\
-            -o PasswordAuthentication=no \\
-             oneclick@$remote_vps_ip \"echo HEALTH_CHECK_OK\" &> /dev/null; then
+        ssh_ready=0
+        local_reset_check="/tmp/reset-check-${vps_name}"
+        while [ \$counter -lt 50 ]; do
+          if [[ \"$is_windows\" -eq 1 ]]; then
+            if virsh qemu-agent-command "$vps_name" \
+              '{\"execute\":\"guest-ping\"}' &>/dev/null; then
               ssh_ready=1
               break
-          else
-            if [[ ! -f reset-check ]]; then
-              touch reset-check
-			  echo \"Health Check \$counter\"
-			  if [[ \"\$counter\" =~ ^[2468]\$ || \"\$counter\" =~ ^[0-9][24680] ]]; then
-                sudo virsh reset $vps_name
-			  fi
-              sleep 20
+            else
+              if [[ ! -f \"\$local_reset_check\" ]]; then
+                touch \"\$local_reset_check\"
+                virsh reset \"$vps_name\"
+                sleep 20
+              fi
             fi
+            counter=$((counter + 1))
+            sleep 2
+          else
+            if ssh -i /home/oneclick/.ssh/id_ed25519 \\
+              -o StrictHostKeyChecking=no \\
+              -o UserKnownHostsFile=/dev/null \\
+              -o ConnectTimeout=2 \\
+              -o PasswordAuthentication=no \\
+               oneclick@$remote_vps_ip \"echo HEALTH_CHECK_OK\" &> /dev/null; then
+                ssh_ready=1
+                break
+            else
+              if [[ ! -f reset-check ]]; then
+                touch reset-check
+                echo \"Health Check \$counter\"
+                if [[ \"\$counter\" =~ ^[2468]\$ || \"\$counter\" =~ ^[0-9][24680] ]]; then
+                  sudo virsh reset $vps_name
+			    fi
+                sleep 20
+              fi
+            fi
+            counter=\$((\$counter + 1))
+            sleep 2
           fi
-          counter=\$((\$counter + 1))
-          sleep 2
         done
         rm -f reset-check
-        ssh \\
-          -i /home/oneclick/.ssh/id_ed25519 \\
-          -o StrictHostKeyChecking=no \\
-          -o UserKnownHostsFile=/dev/null \\
-          oneclick@$remote_vps_ip << 'EOC'
+        if [[ \"$is_windows\" -eq 1 ]]; then
+          printf \"\$(tput setaf 2)[SUCCESS]\$(tput sgr 0) %s\n\" \"Local Windows KVM node ${vps_name} deployed successfully!\" \"Payload executing in the background\"
+          echo \"[INFO] Use the VNC link above to track the progress\"
+        else
+          ssh \\
+            -i /home/oneclick/.ssh/id_ed25519 \\
+            -o StrictHostKeyChecking=no \\
+            -o UserKnownHostsFile=/dev/null \\
+            oneclick@$remote_vps_ip << 'EOC'
 if command -v apt-get >/dev/null; then
   while sudo fuser /var/lib/dpkg/lock-frontends >/dev/null 2>&1; do
     sleep 2
@@ -8614,6 +8669,7 @@ sudo wg-quick up one-click 2> /dev/null || true
 echo \"$(cat $fleet_root/keys/id_ed25519.pub)\" >> /home/oneclick/.ssh/authorized_keys
 echo \"${green}[SUCCESS]${reset} Remote guest kvm node ${vps_name} deployed successfully!\"
 EOC
+        fi
       " 2> /dev/null
   fi
   success "$vps_name built on $target_host successfully."
@@ -8748,6 +8804,7 @@ if errorlevel 1 goto :fail
 if not exist W:\Windows\System32\winload.efi goto :fail
 bcdboot W:\Windows /s S: /f UEFI /l en-US
 if errorlevel 1 goto :fail
+if errorlevel 1 goto :fail
 if not exist S:\EFI\Microsoft\Boot\bootmgfw.efi goto :fail
 mkdir S:\EFI\Boot 2>nul
 copy /y S:\EFI\Microsoft\Boot\bootmgfw.efi S:\EFI\Boot\bootx64.efi >nul
@@ -8876,6 +8933,11 @@ try {
         if ($p.ExitCode -notin @(0, 1641, 3010)) {
             throw "QEMU Guest Agent installation failed: $($p.ExitCode)"
         }
+        $qgaService = Get-Service -Name "qemu-ga" -ErrorAction SilentlyContinue
+        if ($qgaService) {
+            Set-Service -Name "qemu-ga" -StartupType Automatic
+            Start-Service -Name "qemu-ga" -ErrorAction SilentlyContinue
+        }
     }
     $wgMsi = Get-ChildItem "$Root\WireGuard" -Filter "*.msi" -Recurse -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty FullName -First 1
@@ -8893,10 +8955,18 @@ try {
         throw "Cloudbase-Init MSI is missing: $cloudbaseMsi"
     }
     Log "Installing Cloudbase-Init."
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
     $p = Start-Process msiexec.exe `
-        -ArgumentList "/i `"$cloudbaseMsi`" /qn /norestart RUNSERVICEASLOCALSYSTEM=1 /l*v `"$Root\cloudbase-init.log`"" `
+        -ArgumentList "/i `"$cloudbaseMsi`" /qn /norestart RUNSERVICEASLOCALSYSTEM=1" `
         -Wait -PassThru
+
+    $sw.Stop()
+
     Log "Cloudbase-Init installer exit code: $($p.ExitCode)"
+    Log "Cloudbase-Init installation time: $([math]::Round($sw.Elapsed.TotalSeconds, 1)) seconds."
+
     if ($p.ExitCode -notin @(0, 1641, 3010)) {
         throw "Cloudbase-Init installation failed: $($p.ExitCode)"
     }
@@ -8908,6 +8978,30 @@ try {
     if (!(Test-Path $cbRoot)) {
         throw "Cloudbase-Init installation directory was not found."
     }
+    $cloudbaseConf = Join-Path $cbRoot "conf\cloudbase-init.conf"
+@"
+[DEFAULT]
+username=Administrator
+groups=Administrators
+inject_user_password=false
+first_logon_behaviour=no
+metadata_services=cloudbaseinit.metadata.services.nocloudservice.NoCloudConfigDriveService
+allow_reboot=true
+stop_service_on_exit=false
+
+[config_drive]
+cdrom=true
+raw_hdd=true
+vfat=true
+types=iso,vfat
+locations=cdrom,hdd,partition
+
+[nocloud]
+metadata_file=meta-data
+userdata_file=user-data
+network_file=network-config
+"@ | Set-Content -Path $cloudbaseConf -Encoding ASCII
+    Set-Service -Name cloudbase-init -StartupType Automatic
     $service = Get-Service -Name cloudbase-init -ErrorAction SilentlyContinue
     if ($service) {
         Set-Service -Name cloudbase-init -StartupType Automatic
@@ -9082,6 +9176,24 @@ prep_windows() {
   local storage_script="/etc/one-click/virtualization/initialize_storage.sh"
   local virtio_iso_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.262-1/virtio-win.iso"
   local cloudbase_url="https://www.cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.msi"
+  local cloudbase_github_url="https://github.com/cloudbase/cloudbase-init/releases/download/1.1.8/CloudbaseInitSetup_1_1_8_x64.msi"
+  if ! curl -fsI --connect-timeout 5 "$cloudbase_url" &>/dev/null; then
+    warn "Cloudbase download server unavailable. Finding latest GitHub release."
+    for major in {2..1}; do
+      for minor in {2..0}; do
+        for patch in {9..0}; do
+          version="${major}.${minor}.${patch}"
+          version_file="${version//./_}"
+          github_url="https://github.com/cloudbase/cloudbase-init/releases/download/${version}/CloudbaseInitSetup_${version_file}_x64.msi"
+          if curl -fsIL --connect-timeout 3 "$github_url" &>/dev/null; then
+            cloudbase_url="$github_url"
+            info "Using Cloudbase-Init GitHub release $version."
+            break 3
+          fi
+        done
+      done
+    done
+  fi
   local local_remote_script="/tmp/oneclick_remote_build_${out_name}.sh"
   local clean_dest_dir="${dest_dir%/}"
   local ssh_key=""
@@ -9437,7 +9549,7 @@ printf "%s\n" \
   "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
   "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
   "${cyan}=================================================================${reset}"
-log "Boot 1/3: creating Windows BCD from WinPE."
+log "BCDBOOT --> 1/3: creating Windows BCD from WinPE."
 sudo virsh destroy "$VM_NAME" 2>/dev/null || true
 sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
 sudo virt-install \
@@ -9460,17 +9572,14 @@ sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
 check_marker BCD_READY
 printf "%s\n" \
   "${cyan}=================================================================${reset}" \
-  "${green}                WINDOWS MASTER PROVISIONING                  ${reset}" \
+  "${green}             WINDOWS GOLD TEMPLATE PROVISIONING                 ${reset}" \
   "${cyan}=================================================================${reset}" \
   "Stage:           ${yellow}2 of 3${reset}" \
   "Action:          ${yellow}Install injected One-Click components${reset}" \
-  "Storage Bus:     ${yellow}SATA${reset}" \
+  "Storage Bus:     ${yellow}VirtIO${reset}" \
   "Network Model:   ${yellow}e1000e" \
-  "TO TRACK SETUP, CLICK ${lime}Ctrl + b + d${yellow} TO DETACH THE TMUX SESSION" \
-  "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
-  "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
   "${cyan}=================================================================${lime}"
-log "Boot 2/3: provisioning Windows master."
+log "PROVISION --> 2/3: provisioning Windows master."
 VIRTIO_TEST_DISK="$BUILD_DIR/virtio_test.qcow2"
 rm -f "$VIRTIO_TEST_DISK"
 qemu-img create -f qcow2 "$VIRTIO_TEST_DISK" 1G
@@ -9480,8 +9589,7 @@ sudo virt-install \
   --vcpus 4 \
   --cpu host-passthrough \
   --os-variant win2k22 \
-  --disk "path=$RAW_IMAGE,format=qcow2,bus=sata,boot_order=1" \
-  --disk "path=$VIRTIO_TEST_DISK,format=qcow2,bus=virtio" \
+  --disk "path=$RAW_IMAGE,format=qcow2,bus=virtio,cache=writeback,boot_order=1" \
   --boot uefi \
   --network network=oneclick-nat,model=e1000e \
   --graphics vnc,listen=127.0.0.1 \
@@ -9496,18 +9604,15 @@ sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
 check_marker STAGE1_READY
 printf "%s\n" \
   "${cyan}=================================================================${reset}" \
-  "${green}             FRESH UEFI / VIRTIO VALIDATION BOOT             ${reset}" \
+  "${green}                     SYSPREP FINALIZING                         ${reset}" \
   "${cyan}=================================================================${reset}" \
   "Stage:           ${yellow}3 of 3${reset}" \
   "Action:          ${yellow}Validate, Generalize and Seal Master${reset}" \
   "Storage Bus:     ${yellow}VirtIO${reset}" \
   "NVRAM:           ${yellow}Fresh${reset}" \
   "Install Media:   ${yellow}Detached" \
-  "TO TRACK SETUP, CLICK ${lime}Ctrl + b + d${yellow} TO DETACH THE TMUX SESSION" \
-  "RUN THE FOLLOWING COMMAND TO LAUNCH A VNC SESSION" \
-  "${lime}one-click --vnc "$VM_NAME" $TARGET_HOST" \
   "${cyan}=================================================================${lime}"
-log "Boot 3/3: fresh-NVRAM + VirtIO validation and final Sysprep."
+log "VALIDATION --> 3/3: NVRAM + VirtIO validation."
 sudo virt-install \
   --name "$VM_NAME" \
   --memory 4096 \
@@ -9522,7 +9627,7 @@ sudo virt-install \
   --import \
   --wait -1 &
 P3=$!
-wait_shutoff "fresh-NVRAM/VirtIO validation + Sysprep"
+wait_shutoff "Validation + Sysprep"
 wait "$P3" 2>/dev/null || true
 sudo virsh undefine "$VM_NAME" --nvram 2>/dev/null || true
 check_marker VIRTIO_BOOT_OK
@@ -9604,7 +9709,9 @@ REMOTE_SCRIPT_EOF
         '$out_name' \
         '$win_iso_url' \
         '$virtio_iso_url' \
-        '$cloudbase_url'" || {
+        '$cloudbase_url' \
+        '$REQ_BUFFER' \
+        '$target_host'" || {
           error "Remote Windows master-image build failed."
           rm -f "$local_remote_script"
           return 1
@@ -9654,6 +9761,7 @@ fleet_vps_web_console() {
     fi
   fi
   local vnc_display
+  set +e
   if [[ "$target_host" == $(hostname -s) ]]; then
     vnc_display=$(virsh vncdisplay $vps_name 2>/dev/null | sed -E 's/^([^:]*)?(:[0-9]+)/\2/' | tr -d ' \r\n')
   else
@@ -9666,6 +9774,7 @@ fleet_vps_web_console() {
         -u oneclick --become \
         -m shell -a "virsh vncdisplay $vps_name 2>/dev/null" 2>/dev/null | grep -E '^:[0-9]+' | tr -d ' \r\n')
   fi
+  set -e
   if [[ -z "$vnc_display" ]]; then
     error "VM $vps_name has no active graphical display."
     return 1
@@ -13279,7 +13388,7 @@ clean_duplicate_rules() {
         ${fw_bin:-iptables}-restore < "${dup_tmpfile}.deduped" 2>/dev/null || {
         warn "Restore failed using ${fw_bin:-iptables}-restore."
         rm -f "$dup_tmpfile" "$dup_cleanfile" "${dup_tmpfile}.deduped" || true
-        return 1
+        #return 1
       }
       ;;
   esac
