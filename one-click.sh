@@ -34,7 +34,7 @@ IPv6_ONLY_2_v4=false
 # Log viewer web UI session timeout in minutes. Default is 20 minutes
 LOG_VIEWER_SESSION=20
 # ============================================
-export TERM="${TERM:-xterm}"
+export TERM="${TERM:-xterm-256color}"
 set -euo pipefail
 shopt -u globstar nullglob
 source /etc/os-release
@@ -415,6 +415,7 @@ install_dependancies() {
 		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
 		install_dep "wget" "type wget" "wget" "$pkg_mgr"
 		install_dep "xz-utils" "type xz-utils" "xz-utils" "$pkg_mgr"
+		install_dep "auditd" "command -v auditctl" "auditd" "$pkg_mgr"
         ;;
       rhel|centos|fedora)
         pkg_mgr="dnf"
@@ -437,6 +438,7 @@ install_dependancies() {
 		install_dep "gzip" "type gzip" "gzip" "$pkg_mgr"
 		install_dep "wget" "type wget" "wget" "$pkg_mgr"
 		install_dep "xz" "type xz" "xz" "$pkg_mgr"
+		install_dep "auditd" "command -v auditctl" "auditd" "$pkg_mgr"
         ;;
       *)
         printf '%s\n' "Unknown OS: $id"
@@ -1145,7 +1147,7 @@ except ValueError:
       return 1
     fi
   fi
-  error "Subnet '$subnet_input' is valid."
+  success "Subnet '$subnet_input' is valid."
   return 0
 }
 if [[ $1 == "menu" ]]; then
@@ -1756,7 +1758,7 @@ if [[ "$1" == "--vps" ]]; then
       fi
 	  if [[ ! -f "$master_image_source" ]]; then
 	    if [[ "${base_image_name,,}" =~ win|windows ]]; then
-		  fleet_vps_image_fetch "$target_url" "$resolved_filename" 1 "$target_host"
+		  fleet_vps_image_fetch "$target_url" "$resolved_filename" 1 "$target_host" "$raw_password"
 		  base_image_name="$resolved_filename"
         elif [[ -n "$target_url" ]]; then
           info "Shorthand image profile alias detected. Auto-fetching target base cloud image."
@@ -2476,7 +2478,7 @@ if [[ "$1" == "update-y" ]]; then
           warn "Reverting old version"
           mkdir -p "$cache_dir/"
           mv -f /etc/one-click/upgrade-staging/modules/ "$cache_dir/" 2>/dev/null
-          mv -f /usr/localbin/one-click/one-click /etc/one-click/upgrade-staging/
+          mv -f /usr/local/bin/one-click/one-click /etc/one-click/upgrade-staging/
           mv -f /etc/one-click/upgrade-staging$(basename "$manpage") "$manpage"
           exit 1
         fi
@@ -2618,7 +2620,6 @@ _one_click() {
   cmds["fleet:'dir'"]=
   cmds["fleet:'update-keys'"]=
   cmds["fleet: 'migrate-master'"]=
-  cmds["fleet: '--sync'"]=
 
   cmds["engine:'open filter' 'open mangle' 'open raw' 'open alias'"]=
   cmds["engine:'flush filter' 'flush mangle' 'flush nat' 'flush all'"]=
@@ -3080,7 +3081,7 @@ if [[ $# -gt 0 ]]; then
               warn "Reverting old version"
               mkdir -p /var/cache/one-click/
               mv -f /etc/one-click/upgrade-staging/modules/ /var/cache/one-click/ 2>/dev/null
-              mv -f /usr/localbin/one-click/one-click /etc/one-click/upgrade-staging/
+              mv -f /usr/local/bin/one-click /etc/one-click/upgrade-staging/
               mv -f /etc/one-click/upgrade-staging$(basename "$manpage") "$manpage"
               exit 1
             fi
@@ -3129,7 +3130,8 @@ if [[ $# -gt 0 ]]; then
             elif [[ -d /etc/apache2 ]]; then
               if mv -f /etc/apache2/apache2.conf.one-click.bak /etc/apache2/apache2.conf &> /dev/null; then
                 info "Nginx default conf restored"
-              else ip=
+              else
+                ip=
                 error "Default conf file has been moved! Please manually replace"
               fi
             elif [[ -d /etc/httpd ]]; then
