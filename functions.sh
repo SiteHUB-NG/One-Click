@@ -1587,11 +1587,16 @@ fleet_migrate_controller() {
   local inventory_file="/etc/one-click/fleet/inventory.yml"
   local backup_ledger="/etc/one-click/virtualization/backup_ledger.json"
   local snapshot_ledger="/etc/one-click/virtualization/snapshot_ledger.json"
-  local state_dir="/etc/one-click/state"
+  local state_dir="/etc/one-click/fleet/state"
   if [[ -f "/etc/one-click/fleet/controller.env" ]]; then
     . "/etc/one-click/fleet/controller.env"
   else
     error "Missing core controller configuration profiles. Migration halted."
+    return 1
+  fi
+  build_vars
+  if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
+    error "Controller migration must be initiated from the active Fleet Controller."
     return 1
   fi
   if [[ -z "$target_destination" ]]; then
@@ -1602,18 +1607,32 @@ fleet_migrate_controller() {
     error "Target destination matches the current active controller. Migration Aborted."
     return 1
   fi
+  local demoted_role="${ORIGINAL_ROLE_TYPE:-hypervisor-peer}"
+  [[ "$demoted_role" == "controller" || -z "$demoted_role" ]] && demoted_role="hypervisor-peer"
   info "Resolving target destination networking routes."
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
   if [[ ! -f "$private_key" ]]; then
     private_key="/home/oneclick/.ssh/id_ed25519"
   fi
+  if [[ ! -f "$private_key" ]]; then
+    error "Fleet SSH identity key is unavailable. Migration halted."
+    return 1
+  fi
   local target_ip
-  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$target_destination" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
+  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" \
+    ansible-inventory -i "$inventory_file" --host "$target_destination" 2>/dev/null |
+    jq -r '.ansible_host // empty' | tr -d '[:space:]')
   if [[ -z "$target_ip" ]]; then
-    target_ip="$target_destination"
+    error "Target node '$target_destination' is not present in the active Fleet inventory."
+    return 1
   fi
   if ! ping -c 1 -W 2 "$target_ip" &>/dev/null; then
     error "Target node [$target_destination] ($target_ip) is unreachable. Aborting migration."
+    return 1
+  fi
+  if ! ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null "oneclick@${target_ip}" true &>/dev/null; then
+    error "Target node [$target_destination] ($target_ip) cannot be reached with the Fleet identity."
     return 1
   fi
   warn "${orange}CRITICAL ACTION INITIATED:${reset} Promoting cluster control to [$target_destination] ($target_ip)."
@@ -1622,137 +1641,208 @@ fleet_migrate_controller() {
     info "Migration canceled by operator."
     return 0
   fi
+  local fleet_hosts node node_ip
+  fleet_hosts=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null |
+    grep -v "hosts (" | awk '{print $1}')
+  for node in $fleet_hosts; do
+    [[ "$node" == "$target_destination" || "$node" == "$CONTROLLER_NAME" || "$node" == "localhost" ]] && continue
+    node_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" \
+      ansible-inventory -i "$inventory_file" --host "$node" 2>/dev/null |
+      jq -r '.ansible_host // empty' | tr -d '[:space:]')
+    if [[ -z "$node_ip" ]]; then
+      error "Could not resolve peer [$node]. Migration aborted before promotion."
+      return 1
+    fi
+    if ! ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null "oneclick@${node_ip}" true &>/dev/null; then
+      error "Peer [$node] ($node_ip) is unreachable with the Fleet identity. Migration aborted before promotion."
+      return 1
+    fi
+  done
   sync_custom_ssh_keys "$target_ip" "$private_key"
   info "Staging WireGuard configurations for migration."
   sudo mkdir -p /etc/one-click/sync/wireguard
   cp -f /etc/wireguard/{one-click.conf,oc_*.key} /etc/one-click/sync/wireguard/ 2>/dev/null || true
-  info "Demoting current wireguard controller"
-  sed -Ei "s/${target_destination}/$(hostname -s)/g;" /etc/one-click/sync/wireguard/one-click.conf 2>/dev/null || true
+  if [[ ! -s /etc/one-click/sync/wireguard/one-click.conf ]]; then
+    error "Controller WireGuard configuration could not be staged. Migration halted."
+    return 1
+  fi
+  info "Preparing the promoted node's former peer identity for the current controller."
+  sed -Ei "s/${target_destination}/$(hostname -s)/g" /etc/one-click/sync/wireguard/one-click.conf 2>/dev/null || true
   info "Packaging controller database, state logs, WireGuard assets, and automation playbooks."
   local migration_archive="/tmp/one-click-master-migration.tar.gz"
   rm -f "$migration_archive"
-  local tar_targets=(
-    "/etc/one-click/virtualization/allocated_ports.db"
-    "/etc/one-click/fleet/inventory.yml"
-    "/etc/one-click/fleet/playbooks"
-    "/etc/one-click/fleet/keys"
-    "/etc/one-click/virtualization/inventory.json"
-    "/etc/one-click/virtualization/available_ips.txt"
-    "/etc/one-click/virtualization/used_ips.txt"
-    "/etc/one-click/virtualization/ports_pool.txt"
-    "/etc/one-click/sync/wireguard"
+  local -a tar_targets=()
+  local -a candidate_targets=(
+    "etc/one-click/virtualization/allocated_ports.db"
+    "etc/one-click/fleet/inventory.yml"
+    "etc/one-click/fleet/playbooks"
+    "etc/one-click/fleet/keys"
+    "etc/one-click/virtualization/inventory.json"
+    "etc/one-click/virtualization/available_ips.txt"
+    "etc/one-click/virtualization/used_ips.txt"
+    "etc/one-click/virtualization/ports_pool.txt"
+    "etc/one-click/sync/wireguard"
   )
-  mkdir -p /etc/one-click/sync
-  [[ -f "$backup_ledger" ]] && raw_targets+=("${backup_ledger#/}")
-  [[ -f "$snapshot_ledger" ]] && raw_targets+=("${snapshot_ledger#/}")
-  [[ -d "$state_dir" ]] && raw_targets+=("etc/one-click/fleet/state")
-  local valid_targets=()
-  for path in "${raw_targets[@]}"; do
-    if [[ -e "/$path" ]]; then
-      tar_targets+=("$path")
-    fi
+  [[ -f "$backup_ledger" ]] && candidate_targets+=("${backup_ledger#/}")
+  [[ -f "$snapshot_ledger" ]] && candidate_targets+=("${snapshot_ledger#/}")
+  [[ -d "$state_dir" ]] && candidate_targets+=("${state_dir#/}")
+  local archive_target
+  for archive_target in "${candidate_targets[@]}"; do
+    [[ -e "/$archive_target" ]] && tar_targets+=("$archive_target")
   done
   if [[ ${#tar_targets[@]} -eq 0 ]]; then
     error "No valid controller configuration files found to archive."
     return 1
   fi
-  tar --ignore-failed-read -czf "$migration_archive" -C / "${tar_targets[@]}" 2>/dev/null
+  if ! tar -czf "$migration_archive" -C / "${tar_targets[@]}" 2>/dev/null; then
+    error "Failed to create the controller migration archive."
+    return 1
+  fi
   info "Pushing controller configuration to new master controller."
-  cat "$migration_archive" | ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "cat > /tmp/migration.tar.gz"
+  if ! ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null "oneclick@${target_ip}" \
+      "cat > /tmp/migration.tar.gz" < "$migration_archive"; then
+    error "Failed to transfer controller migration archive to [$target_destination]."
+    return 1
+  fi
   local transition_func
   transition_func=$(declare -f apply_node_firewall_transition)
+  local endpoint_target="$target_ip"
+  [[ "$endpoint_target" == *:* && "$endpoint_target" != \[*\] ]] && endpoint_target="[$endpoint_target]"
+
   info "Unpacking states, modifying firewall, and elevating [$target_destination] to active cluster master."
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << EOF
-    $transition_func
-    if ! command -v ansible &>/dev/null && command -v ansible-inventory &>/dev/null; then
-      echo "${blue}[INFO]${reset} Ansible not found. Installing package on $target_destination."
-      if command -v apt-get &>/dev/null; then
-        sudo apt-get update -qq && sudo apt-get install -y -qq ansible
-      elif command -v dnf &>/dev/null; then
-        sudo dnf install -y -q ansible-core || sudo dnf install -y -q ansible
-      elif command -v yum &>/dev/null; then
-        sudo yum install -y -q ansible
-      else
-        echo "${red}[ERROR]${reset} Unable to detect package manager to install Ansible."
-        return
-      fi
-    fi
-    if ! command -v ansible &>/dev/null; then
-      echo "${red}[ERROR]${reset} Ansible installation failed or binary is missing from PATH."
-      return 1
-    fi
-    sudo mkdir -p /etc/one-click/sync
-    sudo tar -xzf /tmp/migration.tar.gz -C /
-    rm -f /tmp/migration.tar.gz
-    if [[ -f /etc/wireguard/one-click.conf ]]; then
-      sudo systemctl stop wg-quick@one-click 2>/dev/null || true
-      mkdir -p /tmp/wireguard
-      sudo mv -f /etc/wireguard/one-click.conf /tmp/wireguard/one-click.conf
-      sudo sed -Ei 's/^(Endpoint = )[^:]*/\1${target_ip}/' /tmp/wireguard/one-click.conf 2>/dev/null || true
-    fi
-    if [[ -d /etc/one-click/sync/wireguard ]]; then
-      sudo systemctl stop wg-quick@one-click 2>/dev/null || true
-      sudo mkdir -p /etc/wireguard
-      sudo cp -f /etc/one-click/sync/wireguard/* /etc/wireguard/ 2>/dev/null || true
-      sudo chmod 600 /etc/wireguard/* 2>/dev/null || true
-      sudo systemctl enable wg-quick@one-click 2>/dev/null || true
-      sudo systemctl restart wg-quick@one-click 2>/dev/null || true
-    fi
-    sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOT
-ROLE=peer
+  if ! ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null "oneclick@${target_ip}" "sudo bash -s" << EOF
+$transition_func
+set -e
+if ! command -v ansible &>/dev/null; then
+  echo "${blue}[INFO]${reset} Ansible not found. Installing package on $target_destination."
+  if command -v apt-get &>/dev/null; then
+    apt-get update -qq && apt-get install -y -qq ansible
+  elif command -v dnf &>/dev/null; then
+    dnf install -y -q ansible-core || dnf install -y -q ansible
+  elif command -v yum &>/dev/null; then
+    yum install -y -q ansible
+  else
+    echo "${red}[ERROR]${reset} Unable to detect package manager to install Ansible." >&2
+    exit 1
+  fi
+fi
+if ! command -v ansible &>/dev/null || ! command -v ansible-inventory &>/dev/null; then
+  echo "${red}[ERROR]${reset} Ansible installation failed or binaries are missing from PATH." >&2
+  exit 1
+fi
+mkdir -p /etc/one-click/sync
+tar -xzf /tmp/migration.tar.gz -C /
+rm -f /tmp/migration.tar.gz
+if [[ -f /etc/wireguard/one-click.conf ]]; then
+  systemctl stop wg-quick@one-click 2>/dev/null || true
+  mkdir -p /tmp/wireguard
+  mv -f /etc/wireguard/one-click.conf /tmp/wireguard/one-click.conf
+  sed -Ei 's|^(Endpoint = ).*(:[0-9]+)$|\1${endpoint_target}\2|' /tmp/wireguard/one-click.conf 2>/dev/null || true
+  chown oneclick:oneclick /tmp/wireguard/one-click.conf
+  chmod 600 /tmp/wireguard/one-click.conf
+fi
+if [[ ! -s /etc/one-click/sync/wireguard/one-click.conf ]]; then
+  echo "${red}[ERROR]${reset} Migrated controller WireGuard configuration is missing." >&2
+  exit 1
+fi
+mkdir -p /etc/wireguard
+cp -f /etc/one-click/sync/wireguard/* /etc/wireguard/ 2>/dev/null || true
+chmod 600 /etc/wireguard/* 2>/dev/null || true
+systemctl daemon-reload
+systemctl enable wg-quick@one-click 2>/dev/null || true
+systemctl restart wg-quick@one-click
+
+cat > /etc/one-click/fleet/identity.conf <<EOT
+ROLE=controller
 FLEET_IDENTITY=\$(hostname)
 STATUS=active
 CONTROLLER_TARGET_IP=127.0.0.1
 LAST_SYNC=\$(date +%s)
 EOT
-    sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOT
+
+cat > /etc/one-click/fleet/controller.env <<EOT
 CONTROLLER_IP="${target_ip}"
 CONTROLLER_NAME="${target_destination}"
 ROLE_TYPE="controller"
+ORIGINAL_ROLE_TYPE="hypervisor-peer"
 IS_MASTER="true"
 EOT
-    apply_node_firewall_transition "promote_to_master" "${target_ip}"
+
+apply_node_firewall_transition "promote_to_master" "${target_ip}"
 EOF
-  info "Grabbing new controller $(hostname -s)'s wireguard conf"
-  scp -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}":/tmp/wireguard/one-click.conf /etc/wireguard/one-click.conf 2>/dev/null || true
-  info "Updating WireGuard endpoints and configurations across remaining fleet peers."
-  local fleet_hosts
-  fleet_hosts=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | grep -v "hosts (" | awk '{print $1}')
+  then
+    error "Promotion of [$target_destination] failed. The current controller has not been demoted."
+    return 1
+  fi
+  # identity after the promoted node assumes the controller WireGuard identity.
+  local old_controller_peer_conf="/tmp/one-click-demoted-controller.conf"
+  rm -f "$old_controller_peer_conf"
+  if ! scp -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "oneclick@${target_ip}:/tmp/wireguard/one-click.conf" "$old_controller_peer_conf" &>/dev/null; then
+    error "New controller was promoted, but its former peer WireGuard profile could not be retrieved. Current controller has not been demoted."
+    return 1
+  fi
+  if [[ ! -s "$old_controller_peer_conf" ]]; then
+    error "Retrieved demotion WireGuard profile is empty. Current controller has not been demoted."
+    return 1
+  fi
+  info "Updating WireGuard endpoints and controller metadata across remaining fleet peers."
+  local peer_update_failed=0
   for node in $fleet_hosts; do
-    [[ "$node" == "$target_destination" || "$node" == "$CONTROLLER_NAME" ]] && continue
-    local node_ip
-    node_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$node" 2>/dev/null | jq -r '.ansible_host // empty' | tr -d '[:space:]')
-    [[ -z "$node_ip" ]] && continue
-    [[ "$node_ip" == "${sys_ip:-${sys_ipv6}}" ]] && continue
-    if ! ping -c 1 -W 2 "$node_ip" &>/dev/null; then
-      warn "Peer node [$node] ($node_ip) is unreachable. Skipping peer update."
-      continue
-    fi
-    info "Updating Promoted WireGuard Controller endpoint and controller metadata on peer [$node] ($node_ip)."
-    ssh -i "$private_key" -o ConnectTimeout=5 -o StrictHostKeyChecking=no "oneclick@${node_ip}" "sudo bash -s" << EOF || { warn "Failed to update peer [$node] ($node_ip) over SSH. Moving to next node."; continue; }
-      if [ -f /etc/one-click/fleet/controller.env ]; then
-        sudo sed -i '/^CONTROLLER_IP=/d;/^CONTROLLER_NAME=/d;/^IS_MASTER=/d' /etc/one-click/fleet/controller.env
-        echo "CONTROLLER_IP=\"${target_ip}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-        echo "CONTROLLER_NAME=\"${target_destination}\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-        echo "IS_MASTER=\"false\"" | sudo tee -a /etc/one-click/fleet/controller.env > /dev/null
-      fi
-      if [ -f /etc/wireguard/one-click.conf ]; then
-        sudo sed -Ei 's/^(Endpoint = )[^:]/\1${target_ip}/' /etc/wireguard/one-click.conf
-        sudo systemctl restart wg-quick@one-click 2>/dev/null || true
-      fi
-      if ! sudo iptables -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
-        sudo nft add table ip filter 2>/dev/null || true
-        sudo nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
-        if ! sudo nft list chain ip filter ONE-CLICK-FLEET 2>/dev/null | grep -q "ip saddr ${target_ip} tcp dport 22 accept"; then
-          sudo nft insert rule ip filter ONE-CLICK-FLEET index 1 ip saddr "${target_ip}" tcp dport 22 accept 2>/dev/null || true
-        fi
-      else
-        sudo iptables -N ONE-CLICK-FLEET 2>/dev/null || true
-        sudo iptables -C ONE-CLICK-FLEET -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
-        sudo iptables -I ONE-CLICK-FLEET 1 -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-      fi
+    [[ "$node" == "$target_destination" || "$node" == "$CONTROLLER_NAME" || "$node" == "localhost" ]] && continue
+    node_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" \
+      ansible-inventory -i "$inventory_file" --host "$node" 2>/dev/null |
+      jq -r '.ansible_host // empty' | tr -d '[:space:]')
+    [[ -z "$node_ip" ]] && { peer_update_failed=1; continue; }
+
+    info "Updating promoted controller endpoint on peer [$node] ($node_ip)."
+    if ! ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null "oneclick@${node_ip}" "sudo bash -s" << EOF
+set -e
+if [[ -f /etc/one-click/fleet/controller.env ]]; then
+  sed -i '/^CONTROLLER_IP=/d;/^CONTROLLER_NAME=/d;/^IS_MASTER=/d' /etc/one-click/fleet/controller.env
+  {
+    echo 'CONTROLLER_IP="${target_ip}"'
+    echo 'CONTROLLER_NAME="${target_destination}"'
+    echo 'IS_MASTER="false"'
+  } >> /etc/one-click/fleet/controller.env
+fi
+if [[ -f /etc/wireguard/one-click.conf ]]; then
+  sed -Ei 's|^(Endpoint = ).*(:[0-9]+)$|\1${endpoint_target}\2|' /etc/wireguard/one-click.conf
+  systemctl restart wg-quick@one-click
+fi
+if command -v iptables &>/dev/null; then
+  iptables -N ONE-CLICK-FLEET 2>/dev/null || true
+  iptables -C ONE-CLICK-FLEET -s "${target_ip}" -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+    iptables -I ONE-CLICK-FLEET 1 -s "${target_ip}" -p tcp --dport 22 -j ACCEPT
+elif command -v nft &>/dev/null; then
+  nft add table ip filter 2>/dev/null || true
+  nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
+  if ! nft list chain ip filter ONE-CLICK-FLEET 2>/dev/null | grep -q "ip saddr ${target_ip} tcp dport 22 accept"; then
+    nft insert rule ip filter ONE-CLICK-FLEET ip saddr "${target_ip}" tcp dport 22 accept
+  fi
+fi
 EOF
+    then
+      warn "Failed to update peer [$node] ($node_ip)."
+      peer_update_failed=1
+    fi
   done
+  if [[ "$peer_update_failed" -ne 0 ]]; then
+    error "New controller promotion succeeded, but one or more peers were not updated. The current controller has not been demoted."
+    return 1
+  fi
+  info "Applying the promoted node's former peer identity to this controller."
+  sudo cp -f "$old_controller_peer_conf" /etc/wireguard/one-click.conf
+  sudo chmod 600 /etc/wireguard/one-click.conf
+  sudo systemctl restart wg-quick@one-click || {
+    error "Failed to activate the demoted-controller WireGuard identity. Local controller metadata has not been rewritten."
+    return 1
+  }
   sudo tee /etc/one-click/fleet/identity.conf > /dev/null <<EOF
 ROLE=peer
 FLEET_IDENTITY=$(hostname | tr -d '[:space:]')
@@ -1763,54 +1853,80 @@ EOF
   sudo tee /etc/one-click/fleet/controller.env > /dev/null <<EOF
 CONTROLLER_IP="${target_ip}"
 CONTROLLER_NAME="${target_destination}"
-ROLE_TYPE="hypervisor-peer"
-ORIGINAL_ROLE_TYPE="$ROLE_TYPE"
+ROLE_TYPE="${demoted_role}"
+ORIGINAL_ROLE_TYPE="${demoted_role}"
 IS_MASTER="false"
 EOF
   apply_node_firewall_transition "demote_to_peer" "$target_ip"
-  info "Purging local assets."
+  info "Purging local migration staging assets."
   rm -rf /etc/one-click/sync/wireguard
-  rm -f "$migration_archive"
+  rm -f "$migration_archive" "$old_controller_peer_conf"
+  ssh -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null "oneclick@${target_ip}" \
+    "sudo rm -rf /tmp/wireguard" &>/dev/null || true
   success "Migration process completed successfully!"
   success "Master dominance and WireGuard controller authority securely transferred to [$target_destination] ($target_ip)."
-  warn "This node has dropped its encryption keyways and is operating as a standard cluster member."
+  warn "This node is now operating as a standard cluster member."
 }
 fleet_rule_engine() {
   fleet_init
   build_vars
   . "$fleet_root/controller.env"
+
   if [[ "${sys_ip:-${sys_ipv6}}" != "$CONTROLLER_IP" ]]; then
     error "Security Block: Rule broadcasting must be initiated from the central Fleet Controller."
     return 1
   fi
+
   local target_host="$1"
   local rule_command="$2"
+  if [[ -z "$rule_command" ]]; then
+    error "No firewall rule instruction was supplied."
+    return 1
+  fi
+
   for host_conf in "$fleet_root"/state/*.conf; do
     [[ ! -f "$host_conf" ]] && continue
-    local current_slug
+    local current_slug current_name solved_ip
     current_slug=$(basename "$host_conf")
-    local solved_ip
+    current_name="${current_slug%.conf}"
     solved_ip=$(grep '^IP=' "$host_conf" | cut -d= -f2-)
-    if [[ -n "$solved_ip" ]]; then
-      if [[ " $rule_command " =~ [[:space:]]${current_slug//.*}[[:space:]] ]]; then
-        info "Resolving fleet name '${current_slug//.*}' to IP: ${solved_ip}"
-        rule_command=$(echo "$rule_command" | sed "s/${current_slug//.*}/${solved_ip}/g")
-      fi
+    if [[ -n "$solved_ip" && " $rule_command " =~ [[:space:]]${current_name}[[:space:]] ]]; then
+      info "Resolving fleet name '${current_name}' to IP: ${solved_ip}"
+      rule_command=$(printf '%s\n' "$rule_command" | sed "s/${current_name}/${solved_ip}/g")
     fi
   done
-  if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
+
+  local local_host
+  local_host=$(hostname -s)
+
+  if [[ -z "$target_host" || "$target_host" == "localhost" || "$target_host" == "127.0.0.1" || \
+        "$target_host" == "$local_host" || "$target_host" == "$CONTROLLER_NAME" || "$target_host" == "$CONTROLLER_IP" ]]; then
     load_rule_engine
-    rule_engine "$rule_command chain ONE-CLICK-FLEET" -y
+    if ! rule_engine "$rule_command chain ONE-CLICK-FLEET" -y; then
+      error "Firewall rule failed on the Fleet Controller."
+      return 1
+    fi
   else
     info "Dispatching custom firewall instruction payload to target: $target_host."
-    ANSIBLE_HOST_KEY_CHECKING=False \
+    local rule_b64
+    rule_b64=$(printf '%s' "$rule_command" | base64 | tr -d '\n')
+
+    if ! ANSIBLE_HOST_KEY_CHECKING=False \
       ANSIBLE_SSH_TIMEOUT=3 \
       ANSIBLE_GATHERING=explicit \
       ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-	  ansible "$target_host" \
-      -i "$fleet_root/inventory.yml" \
-      -m shell -a "/usr/local/bin/one-click engine \"$rule_command chain ONE-CLICK-FLEET\" -y" 2>/dev/null
+      ansible "$target_host" \
+        -i "$fleet_root/inventory.yml" \
+        -u oneclick --become \
+        -m shell \
+        -a "rule=\$(printf '%s' '$rule_b64' | base64 -d); /usr/local/bin/one-click engine \"\$rule chain ONE-CLICK-FLEET\" -y" \
+        &>/dev/null; then
+      error "Firewall rule dispatch failed on target: $target_host."
+      return 1
     fi
+  fi
+
   success "Firewall rule dispatched and applied to execution path successfully."
 }
 fleet_write_playbooks() {
@@ -3046,6 +3162,59 @@ fleet_add() {
     sed -Ei.one-click_bak -e "/# One-Click/{a\ ${ip}\t${host}" -e '}' /etc/hosts
   fi
   fleet_init
+  local peer_state_file="$fleet_root/state/${host}.conf"
+  local fleet_ip="${private_ip:-${ip}}"
+  local initial_mesh_ip=""
+  if [[ "$role_type" == "vps-peer" ]]; then
+    initial_mesh_ip="${private_ip:-${fleet_ip}}"
+  fi
+  if [[ -f "$peer_state_file" ]]; then
+    if grep -q '^HOSTNAME=' "$peer_state_file"; then
+      sed -Ei "s|^HOSTNAME=.*|HOSTNAME=${host}|" "$peer_state_file"
+    else
+      echo "HOSTNAME=${host}" >> "$peer_state_file"
+    fi
+    if grep -q '^IP=' "$peer_state_file"; then
+      sed -Ei "s|^IP=.*|IP=${fleet_ip}|" "$peer_state_file"
+    else
+      echo "IP=${fleet_ip}" >> "$peer_state_file"
+    fi
+    if grep -q '^NAT_IP=' "$peer_state_file"; then
+      sed -Ei "s|^NAT_IP=.*|NAT_IP=${ip}|" "$peer_state_file"
+    else
+      echo "NAT_IP=${ip}" >> "$peer_state_file"
+    fi
+    if [[ "$role_type" == "vps-peer" ]]; then
+      if grep -q '^MESH_IP=' "$peer_state_file"; then
+        sed -Ei "s|^MESH_IP=.*|MESH_IP=${initial_mesh_ip}|" "$peer_state_file"
+      else
+        echo "MESH_IP=${initial_mesh_ip}" >> "$peer_state_file"
+      fi
+    elif ! grep -q '^MESH_IP=' "$peer_state_file"; then
+      echo "MESH_IP=" >> "$peer_state_file"
+    fi
+    if grep -q '^PORT=' "$peer_state_file"; then
+      sed -Ei "s|^PORT=.*|PORT=${port}|" "$peer_state_file"
+    else
+      echo "PORT=${port}" >> "$peer_state_file"
+    fi
+    if grep -q '^ROLE_TYPE=' "$peer_state_file"; then
+      sed -Ei "s|^ROLE_TYPE=.*|ROLE_TYPE=${role_type}|" "$peer_state_file"
+    else
+      echo "ROLE_TYPE=${role_type}" >> "$peer_state_file"
+    fi
+  else
+    cat > "$peer_state_file" <<EOF
+HOSTNAME=${host}
+IP=${fleet_ip}
+NAT_IP=${ip}
+MESH_IP=${initial_mesh_ip}
+PORT=${port}
+ROLE_TYPE=${role_type}
+EOF
+  fi
+  sed -i '/^NODE_PUBKEY=/d;/^NODE_PRIVKEY_B64=/d' "$peer_state_file"
+  generate_node_credentials "$host"
   bash /etc/one-click/write_inventory.sh "$role_type" "${private_ip:-}" "${ip:-}"
   echo "${orange}[${red}[${reset}$host IS BEING ADDED TO THE FLEET${red}]${orange}]"
   cat <<EOF
@@ -3096,7 +3265,6 @@ EOF
   else
     local msg="Awaiting automated trust confirmation from [${yellow}$host (${private_ip:-${ip}})${reset}]."
   fi
-  generate_node_credentials "$host"
   info "Waiting for $host remote host configuration." \
     "$msg" \
     "Press ${yellow}Ctrl+C${reset} at any time to cancel this setup block safely."
@@ -3220,13 +3388,11 @@ EOF
           error "IP Pool Exhausted! Unable to register hypervisor network mesh tunnel."
           return 1
         fi
-        cat > "$fleet_root/state/$host.conf" <<EOF
-HOSTNAME=$host
-IP=${private_ip:-${ip}}
-NAT_IP=${local_ip:-${remote_vps_ip:-$ip}}
-MESH_IP=${hv_private_ip:-${vps_private_ip:-}}
-PORT=$port
-EOF
+        if grep -q '^MESH_IP=' "$fleet_root/state/$host.conf"; then
+          sed -Ei "s|^MESH_IP=.*|MESH_IP=${hv_private_ip}|" "$fleet_root/state/$host.conf"
+        else
+          echo "MESH_IP=${hv_private_ip}" >> "$fleet_root/state/$host.conf"
+        fi
         info "Generating Wireguard Cryptographic Keys locally on Controller for $hv_node_name."
         local hv_private_key hv_public_key hv_preshared_key master_pub_key
         hv_private_key=$(wg genkey)
@@ -3837,6 +4003,12 @@ fleet_remove() {
     info "Host $host is not present in active fleet state."
     return 0
   fi
+
+  local removed_pubkey=""
+  removed_pubkey=$(sed -n 's/^NODE_PUBKEY=//p' "$target_conf" | tail -n 1)
+  removed_pubkey="${removed_pubkey#\"}"
+  removed_pubkey="${removed_pubkey%\"}"
+
   rm -f "$target_conf"
   bash /etc/one-click/write_inventory.sh
   info "Removed $host locally from state configurations."
@@ -3850,8 +4022,36 @@ fleet_remove() {
     -i "$fleet_root/inventory.yml" \
     -u oneclick \
     -b \
-    -e "controller_name=$CONTROLLER_IP" &>/dev/null || true
+    -e "controller_name=$CONTROLLER_NAME" &>/dev/null || true
   bash /etc/one-click/write_inventory.sh
+
+  if [[ -n "$removed_pubkey" ]]; then
+    local removed_pubkey_b64
+    removed_pubkey_b64=$(printf '%s' "$removed_pubkey" | base64 | tr -d '\n')
+
+    info "Revoking removed peer SSH identity from remaining fleet members."
+    ANSIBLE_HOST_KEY_CHECKING=False \
+    ANSIBLE_SSH_TIMEOUT=3 \
+    ANSIBLE_GATHERING=explicit \
+    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+    ansible all \
+      -i "$fleet_root/inventory.yml" \
+      -u oneclick \
+      -b \
+      -m shell \
+      -a "set -e
+          auth=/home/oneclick/.ssh/authorized_keys
+          [ -f \"\$auth\" ] || exit 0
+          removed_key=\$(printf '%s' '$removed_pubkey_b64' | base64 -d)
+          tmp=\$(mktemp)
+          grep -Fvx -- \"\$removed_key\" \"\$auth\" > \"\$tmp\" || true
+          cat \"\$tmp\" > \"\$auth\"
+          rm -f \"\$tmp\"
+          chown oneclick:oneclick \"\$auth\"
+          chmod 600 \"\$auth\"" &>/dev/null || {
+        warn "Removed $host from fleet state, but its SSH key could not be revoked from every remaining peer."
+      }
+  fi
   if [[ -d "/etc/bind/zones" ]]; then
     info "Purging removed peer from DNS cluster authority mappings."
     for meta in /etc/one-click/dns/domains/*/meta.conf; do
@@ -3892,11 +4092,9 @@ rm -f /var/lib/libvirt/images/${clean_vps_name}.raw
 rm -rf /tmp/build_${clean_vps_name} /tmp/build_${target_name}
 rm -f /tmp/${clean_vps_name}_user_data.yml /tmp/${clean_vps_name}_meta_data.yml /tmp/${clean_vps_name}_network_config.yml
 rm -f /tmp/unattend_${clean_vps_name}.xml
-
 VG_NAME="one_click_vg"
 LV_NAME="lv_${clean_vps_name}"
 LV_PATH="/dev/${VG_NAME}/${LV_NAME}"
-
 if lvdisplay "${LV_PATH}" &>/dev/null; then
   lvchange -an "${LV_PATH}" 2>/dev/null || true
   dmsetup remove -f "${VG_NAME}-${LV_NAME//-/--}" 2>/dev/null || true
@@ -3907,6 +4105,17 @@ if lvdisplay "/dev/${VG_NAME}/lv_${target_name}" &>/dev/null; then
   lvchange -an "/dev/${VG_NAME}/lv_${target_name}" 2>/dev/null || true
   lvremove -f -y "/dev/${VG_NAME}/lv_${target_name}" 2>/dev/null || true
 fi
+if virsh dominfo "${target_name}" &>/dev/null || \
+   virsh dominfo "${clean_vps_name}" &>/dev/null || \
+   [[ -e "/var/lib/libvirt/images/${target_name}.qcow2" ]] || \
+   [[ -e "/var/lib/libvirt/images/${clean_vps_name}.qcow2" ]] || \
+   [[ -e "/var/lib/libvirt/images/${clean_vps_name}.raw" ]] || \
+   [[ -e "/var/lib/libvirt/images/${target_name}_cloudinit.iso" ]] || \
+   [[ -e "/var/lib/libvirt/images/${clean_vps_name}_cloudinit.iso" ]] || \
+   lvdisplay "${LV_PATH}" &>/dev/null || \
+   lvdisplay "/dev/${VG_NAME}/lv_${target_name}" &>/dev/null; then
+  exit 1
+fi
 EOF
   )
   cleanup_payload="${cleanup_payload//%NAME%/$clean_vps_name}"
@@ -3914,19 +4123,26 @@ EOF
   local local_hostname
   local_hostname=$(hostname -s 2>/dev/null || echo "localhost")
   if [[ "$target_host" == "$local_hostname" || "$target_host" == "127.0.0.1" || "$target_host" == "localhost" ]]; then
-    eval "$cleanup_payload"
+    if ! eval "$cleanup_payload"; then
+      error "Hypervisor purge verification failed for '$clean_vps_name' on local host [$target_host]."
+      return 1
+    fi
   else
-    ANSIBLE_HOST_KEY_CHECKING=False \
-    ANSIBLE_SSH_TIMEOUT=5 \
-    ANSIBLE_GATHERING=explicit \
-    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-    ansible "$target_host" \
-      -i /etc/one-click/fleet/inventory.yml \
-      -u oneclick --become \
-      -m shell -a "$cleanup_payload" &>/dev/null || true
+    if ! ANSIBLE_HOST_KEY_CHECKING=False \
+      ANSIBLE_SSH_TIMEOUT=5 \
+      ANSIBLE_GATHERING=explicit \
+      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+      ansible "$target_host" \
+        -i /etc/one-click/fleet/inventory.yml \
+        -u oneclick --become \
+        -m shell -a "$cleanup_payload" &>/dev/null; then
+      error "Hypervisor purge could not be confirmed for '$clean_vps_name' on [$target_host]."
+      return 1
+    fi
   fi
   rm -rf "/etc/one-click/virtualization/deployments/${clean_vps_name}" 2>/dev/null || true
   rm -rf "/etc/one-click/virtualization/staging/${clean_vps_name}" 2>/dev/null || true
+  return 0
 }
 fleet_list() {
   local inventory_file="$fleet_root/inventory.yml"
@@ -3992,26 +4208,41 @@ fleet_verify() {
     ) &
   done < <(
     awk '
+      function emit_host() {
+        if (current_host != "" && current_ip != "") {
+          print current_host, current_ip, (current_port != "" ? current_port : "22")
+        }
+        current_host = ""
+        current_ip = ""
+        current_port = ""
+      }
+
       /^[[:space:]]*(all|vars|hosts):/ { next }
+
       /^[[:space:]]*[^:]+:[[:space:]]*$/ {
-        gsub(/[[:space:]:]/, "", $1)
-        current_host = $1
+        emit_host()
+        host_name = $1
+        gsub(/[[:space:]:]/, "", host_name)
+        current_host = host_name
         next
       }
+
       /ansible_host:/ {
-        gsub(/[[:space:]]/, "", $2)
-        if (current_host != "") {
-          print current_host, $2
-          current_host = ""
-        }
+        host_ip = $2
+        gsub(/[[:space:]"]/, "", host_ip)
+        current_ip = host_ip
+        next
       }
-	  /ansible_port:/ {
-        gsub(/[[:space:]]/, "", $2)
-        if (current_host != "" && current_ip != "") {
-          print current_host, current_ip, $2
-          current_host = ""
-          current_ip = ""
-        }
+
+      /ansible_port:/ {
+        host_port = $2
+        gsub(/[[:space:]"]/, "", host_port)
+        current_port = host_port
+        next
+      }
+
+      END {
+        emit_host()
       }
     ' "$fleet_root/inventory.yml"
   ) | sort -t'|' -k2 -r | column -t
@@ -4305,50 +4536,16 @@ fleet_bench() {
            export DEBIAN_FRONTEND=noninteractive
            export NEEDRESTART_MODE=a
            if command -v apt-get &> /dev/null; then
-             apt_lock=\"/var/lib/dpkg/lock-frontend\"
-             if [ -f \"\$apt_lock\" ]; then
-               pid=\$(sudo fuser \"\$apt_lock\" 2>/dev/null | awk '{print \$1}')
-               [ -z \"\$pid\" ] && pid=\$(lsof -t \"\$apt_lock\" 2>/dev/null)
-               if [ ! -z \"\$pid\" ]; then
-                 sudo kill -9 \"\$pid\" 2>/dev/null
-                 sleep 1
-               fi
-               sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-             fi
-             debconf_lock=\"/var/cache/debconf/config.dat-lock\"
-             if [ -f \"\$debconf_lock\" ] || sudo fuser \"/var/cache/debconf/config.dat\" &> /dev/null; then
-               d_pid=\$(sudo fuser \"/var/cache/debconf/config.dat\" 2>/dev/null | awk '{print \$1}')
-               if [ ! -z \"\$d_pid\" ]; then
-                 sudo kill -9 \"\$d_pid\" 2>/dev/null
-                 sleep 1
-               fi
-               sudo rm -f /var/cache/debconf/config.dat-lock
-               sudo rm -f /var/cache/debconf/passwords.dat-lock
-             fi
-             sudo dpkg --configure -a --force-confdef --force-confold &> /dev/null
-             sudo apt-get update -y &> /dev/null
-             sudo apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" &> /dev/null
-             sudo apt-get install -f -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" iperf3 fio &> /dev/null
-           fi
-           if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
-             dnf_lock=\"/var/run/dnf.pid\"
-             [ ! -f \"\$dnf_lock\" ] && dnf_lock=\"/var/run/yum.pid\"
-             if [ -f \"\$dnf_lock\" ]; then
-               pid=\$(cat \"\$dnf_lock\" 2>/dev/null)
-               if [ ! -z \"\$pid\" ] && kill -0 \"\$pid\" &> /dev/null; then
-                 sudo kill -9 \"\$pid\" 2>/dev/null
-                 sleep 1
-               fi
-               sudo rm -f /var/run/dnf.pid /var/run/yum.pid /var/lib/dnf/lock /var/lib/rpm/.rpm.lock
-             fi
+             sudo apt-get update -y &> /dev/null || exit 1
+             sudo apt-get install -y \
+               -o Dpkg::Options::=\"--force-confdef\" \
+               -o Dpkg::Options::=\"--force-confold\" \
+               iperf3 fio &> /dev/null || exit 1
+           elif command -v dnf &> /dev/null || command -v yum &> /dev/null; then
              pkg_mgr=\$(command -v dnf || command -v yum)
-             sudo \$pkg_mgr clean all &> /dev/null
-             if command -v dnf &> /dev/null; then
-               sudo dnf history redo last -y &> /dev/null || true
-             fi
-             sudo \$pkg_mgr makecache &> /dev/null
-             sudo \$pkg_mgr check-update -y &> /dev/null || [ \$? -eq 100 ]
-             sudo \$pkg_mgr install -y --setopt=install_weak_deps=False iperf3 fio &> /dev/null
+             sudo \$pkg_mgr install -y --setopt=install_weak_deps=False iperf3 fio &> /dev/null || exit 1
+           else
+             exit 1
            fi
            exit 1
          fi" 2>/dev/null; then
@@ -4434,8 +4631,6 @@ fleet_bench() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "oneclick@$ip" "
-        echo 'nameserver 8.8.8.8' | sudo tee -a /etc/resolv.conf > /dev/null
-        echo 'nameserver 1.1.1.1' | sudo tee -a /etc/resolv.conf > /dev/null
         if [ ! -f /usr/local/bin/one-click ]; then
           sudo mkdir -p /var/log/one-click/
           sudo bash /home/oneclick/one-click setup
@@ -4450,7 +4645,7 @@ fleet_bench() {
           fi
         fi
         if ! command -v fio &> /dev/null; then
-          if ! command -v apt &> /dev/null; then
+          if command -v apt &> /dev/null; then
             sudo apt -y update
             echo 'fio fio/start_daemon boolean false' | sudo debconf-set-selections
             DEBIAN_FRONTEND=noninteractive sudo apt-get install -y fio
@@ -5418,7 +5613,7 @@ EOF
   local hardware_capable=1
   if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
     if ! grep -Ec '(vmx|svm)' /proc/cpuinfo &>/dev/null; then
-	  hardware_capacle=0
+	  hardware_capable=0
 	fi
     info '> Verifying KVM internal NAT network infrastructure switches.'
     if ! virsh net-info oneclick-nat &>/dev/null; then
@@ -5486,20 +5681,30 @@ EOF
         ip_addr=$(ip -o -4 addr show dev $physical_nic | awk '{print $4}' | head -n 1)
         gateway=$(ip route show default | awk '{print $3}')
         nameservers=$(grep -i nameserver /etc/resolv.conf | awk '{print $2}' | tr '\n' ' ' | sed 's/ \$//')
-        old_conn=${physical_nic}
+        old_conn=$(nmcli -g GENERAL.CONNECTION device show "$physical_nic" 2>/dev/null | head -n 1)
+        [[ "$old_conn" == "--" ]] && old_conn=""
+        if [[ -z "$old_conn" ]]; then
+          error "> Could not resolve the active NetworkManager profile for $physical_nic. Bridge conversion aborted."
+          return 1
+        fi
         nmcli connection add type bridge con-name br0 ifname br0 ip4 "$ip_addr" gw4 "$gateway" &>/dev/null
         nmcli connection modify br0 ipv4.dns "1.1.1.1 8.8.8.8" ipv6.dns "2606:4700:4700::1111 2001:4860:4860::8888" &>/dev/null || nmcli connection modify br0 ipv4.dns "$nameservers" &>/dev/null
         nmcli connection modify br0 bridge.stp no bridge.forward-delay 0 &>/dev/null
         nmcli connection add type ethernet con-name br0-slave ifname "$physical_nic" master br0 &>/dev/null
-        [ -n "$old_conn" ] && nmcli connection delete "$old_conn" &>/dev/null
         nmcli connection up br0 &>/dev/null
         nmcli connection up br0-slave &>/dev/null
         sleep 10
         if ping -c2 "$gateway" >/dev/null 2>&1; then
-          [ -n "$old_conn" ] && nmcli connection delete "$old_conn" || true
+          nmcli connection delete "$old_conn" &>/dev/null || true
           info '> Public Layer-2 bridge br0 online and routing successfully.'
         else
-          error '> Bridge validation failed. Original profile retained.'
+          nmcli connection down br0-slave &>/dev/null || true
+          nmcli connection down br0 &>/dev/null || true
+          nmcli connection delete br0-slave &>/dev/null || true
+          nmcli connection delete br0 &>/dev/null || true
+          nmcli connection up "$old_conn" &>/dev/null || true
+          error '> Bridge validation failed. Original profile restored.'
+          return 1
         fi
       elif command -v netplan &>/dev/null; then
         netplan_file=\"/etc/netplan/50-cloud-init.yaml\"
@@ -5656,20 +5861,30 @@ EOF
           ip_addr=\$(ip -o -4 addr show dev \$physical_nic | awk '{print \$4}' | head -n 1)
           gateway=\$(ip route show default | awk '{print \$3}')
           nameservers=\$(grep -i nameserver /etc/resolv.conf | awk '{print \$2}' | tr '\n' ' ' | sed 's/ \$//')
-          old_conn=\$(nmcli -g NAME connection show --active | grep -E \"(\$physical_nic|Wired)\" | head -n 1)
+          old_conn=\$(nmcli -g GENERAL.CONNECTION device show \"\$physical_nic\" 2>/dev/null | head -n 1)
+          [ \"\$old_conn\" = \"--\" ] && old_conn=\"\"
+          if [ -z \"\$old_conn\" ]; then
+            echo \">>> Could not resolve the active NetworkManager profile for \$physical_nic. Bridge conversion aborted.\" >&2
+            exit 1
+          fi
           nmcli connection add type bridge con-name br0 ifname br0 ip4 \"\$ip_addr\" gw4 \"\$gateway\" &>/dev/null
           nmcli connection modify br0 ipv4.dns \"1.1.1.1 8.8.8.8\" ipv6.dns \"2606:4700:4700::1111 2001:4860:4860::8888\" &>/dev/null || nmcli connection modify br0 ipv4.dns \"\$nameservers\" &>/dev/null
           nmcli connection modify br0 bridge.stp no bridge.forward-delay 0 &>/dev/null
           nmcli connection add type ethernet con-name br0-slave ifname \"\$physical_nic\" master br0 &>/dev/null
-          [ -n \"\$old_conn\" ] && nmcli connection delete \"\$old_conn\" &>/dev/null
           nmcli connection up br0 &>/dev/null
           nmcli connection up br0-slave &>/dev/null
           sleep 10
           if ping -c2 "\$gateway" >/dev/null 2>&1; then
-            [ -n "\$old_conn" ] && nmcli connection delete "\$old_conn"
+            nmcli connection delete "\$old_conn" &>/dev/null || true
             echo '>>> Public Layer-2 bridge br0 online and routing successfully.'
           else
-            echo '>>> Bridge validation failed. Original profile retained.'
+            nmcli connection down br0-slave &>/dev/null || true
+            nmcli connection down br0 &>/dev/null || true
+            nmcli connection delete br0-slave &>/dev/null || true
+            nmcli connection delete br0 &>/dev/null || true
+            nmcli connection up "\$old_conn" &>/dev/null || true
+            echo '>>> Bridge validation failed. Original profile restored.' >&2
+            exit 1
           fi
         elif command -v netplan &>/dev/null; then
           netplan_file=\"/etc/netplan/50-cloud-init.yaml\"
@@ -5983,7 +6198,31 @@ fleet_vps_migrate() {
     error "Critical Fault: Failed to capture valid KVM configuration blueprint metadata."
     return 1
   fi
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh shutdown $target_vm" &>/dev/null || true
+  local source_was_running=0
+  local source_state
+  source_state=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh domstate '$target_vm' 2>/dev/null" 2>/dev/null | tr -d '\r')
+  if [[ "$source_state" == "running" ]]; then
+    source_was_running=1
+    info "Stopping $target_vm cleanly on source hypervisor before disk synchronization."
+    if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh shutdown '$target_vm'" &>/dev/null; then
+      error "Failed to request a clean shutdown of $target_vm on source hypervisor [$source_host]."
+      return 1
+    fi
+    local shutdown_wait=0
+    while [[ "$shutdown_wait" -lt 120 ]]; do
+      source_state=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh domstate '$target_vm' 2>/dev/null" 2>/dev/null | tr -d '\r')
+      [[ "$source_state" == "shut off" ]] && break
+      sleep 2
+      shutdown_wait=$((shutdown_wait + 2))
+    done
+    if [[ "$source_state" != "shut off" ]]; then
+      error "Source VM did not shut down within 120 seconds. Migration aborted before any source data was removed."
+      return 1
+    fi
+  elif [[ "$source_state" != "shut off" ]]; then
+    error "Source VM is in unsupported state '$source_state'. Migration requires the VM to be running or shut off."
+    return 1
+  fi
   info "Staging operational storage parameters on destination node."
   ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
     mkdir -p /var/lib/libvirt/images
@@ -6002,13 +6241,12 @@ fleet_vps_migrate() {
   ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo chown root:root /tmp/${target_vm}.xml && sudo chmod 600 /tmp/${target_vm}.xml" &>/dev/null
   info "Replicating disk block to $dest_host ($dest_ip)." \
     "[ $source_host ] => [ $dest_host ]"
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo chown -R oneclick:oneclick /var/lib/libvirt/images" &>/dev/null
   ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo chown oneclick:oneclick /var/lib/libvirt/images" &>/dev/null
   ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "bash -s" << EOF
     sync_success=1
     for node_key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
       if [ ! -e "\$node_key" ]; then continue; fi
-      rsync -avz --progress --no-implied-dirs \
+      sudo rsync -avz --progress --no-implied-dirs \
         -e "ssh -i \$node_key -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
         --include="${target_vm}.qcow2" \
         --include="${target_vm}_cloudinit.iso" \
@@ -6024,15 +6262,12 @@ fleet_vps_migrate() {
 EOF
   local sync_status=$?
   if [[ $sync_status -eq 0 ]]; then
-    success "Data block synchronization completed successfully."
-    ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo bash -c '
-      virsh undefine $target_vm 2>/dev/null || true
-      rm -f /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
-      chown -R root:root /var/lib/libvirt/images
-    '" &>/dev/null
+    success "Data block synchronization completed successfully. Source VM retained until destination validation completes."
   else
-    error "Data stream broken. Reverting source file access locks."
-    ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo chown -R root:root /var/lib/libvirt/images" &>/dev/null
+    error "Data stream broken. Source VM has not been removed."
+    if [[ "$source_was_running" -eq 1 ]]; then
+      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
+    fi
     return 1
   fi
   ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
@@ -6043,13 +6278,33 @@ EOF
     chmod 644 /var/lib/libvirt/images/${target_vm}_cloudinit.iso 2>/dev/null || true
   '" &>/dev/null
   info "Registering runtime boundaries and starting VM on $dest_host."
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
-    virsh define /tmp/${target_vm}.xml
-    virsh autostart $target_vm &> /dev/null
-    sleep 2
-	virsh start $target_vm &> /dev/null || die "Failed to start $vps_name"
-    rm -f /tmp/${target_vm}.xml
-  '" &>/dev/null
+  if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -s" &>/dev/null <<EOF
+set -e
+virsh define "/tmp/${target_vm}.xml" >/dev/null
+virsh autostart "${target_vm}" >/dev/null
+state=\$(virsh domstate "${target_vm}" 2>/dev/null | tr -d '\r')
+if [[ "\$state" != "running" ]]; then
+  virsh start "${target_vm}" >/dev/null
+fi
+sleep 2
+state=\$(virsh domstate "${target_vm}" 2>/dev/null | tr -d '\r')
+[[ "\$state" == "running" ]]
+rm -f "/tmp/${target_vm}.xml"
+EOF
+  then
+    error "Destination VM failed activation validation on [$dest_host]. Source VM has not been removed."
+    ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
+      virsh destroy ${target_vm} 2>/dev/null || true
+      virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
+      rm -f /tmp/${target_vm}.xml /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
+      chown root:root /var/lib/libvirt/images
+    '" &>/dev/null || true
+    if [[ "$source_was_running" -eq 1 ]]; then
+      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
+    fi
+    return 1
+  fi
+  success "Destination VM is defined and running on [$dest_host]."
   info "Updating dynamic network routing ledger in virtualization inventory."
   if jq --arg vm "$target_vm" \
         --arg new_host "$dest_host" \
@@ -6059,9 +6314,29 @@ EOF
      mv "${inventory_json}.tmp" "$inventory_json"
      success "Virtualization state ledger successfully updated."
   else
-     error "Critical Failure: Failed to update virtualization inventory ledger state."
+     error "Critical Failure: Failed to update virtualization inventory ledger state. Reverting destination activation."
      rm -f "${inventory_json}.tmp"
+     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
+       virsh destroy ${target_vm} 2>/dev/null || true
+       virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
+       rm -f /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
+       chown root:root /var/lib/libvirt/images
+     '" &>/dev/null || true
+     if [[ "$source_was_running" -eq 1 ]]; then
+       ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
+     fi
      return 1
+  fi
+  info "Destination ownership confirmed. Removing retained source VM assets from [$source_host]."
+  if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo bash -c '
+    virsh autostart ${target_vm} --disable 2>/dev/null || true
+    virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
+    rm -f /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
+    ! virsh dominfo ${target_vm} &>/dev/null
+    ! test -e /var/lib/libvirt/images/${target_vm}.qcow2
+  '" &>/dev/null; then
+    warn "Migration is active on [$dest_host], but source cleanup on [$source_host] was incomplete. Do not manually start the retained source definition."
+    return 1
   fi
   success "Migration process complete. $target_vm is now active on $dest_host."
 }
@@ -6103,7 +6378,7 @@ fleet_vps_snapshot() {
       ;;
     restore)
       warn "Reverting '$target_vm' to snapshot '$snap_name'. The VM will be restarted."
-      virsh_cmd="virsh destroy $target_vm 2>/dev/null || true; virsh snapshot-revert --domain $target_vm --snapshotname \"$snap_name\" --current; virsh start $target_vm"
+      virsh_cmd="virsh destroy $target_vm 2>/dev/null || true; virsh snapshot-revert --domain $target_vm --snapshotname \"$snap_name\" --current && virsh start $target_vm"
 	  stat_error="Restoration of snapshot $snap_name has failed on [$target_host]. Please review the logs on $target_host"
 	  stat_success="The snapshot $snap_name has successfully been restored on [$target_host]"
       ;;
@@ -6186,34 +6461,39 @@ fleet_vps_backup() {
   fi
   local remote_backup_base="/etc/one-click/virtualization/backups"
   local remote_host_dir="${remote_backup_base}/${target_vm}"
-  local lvm_archive="${remote_host_dir}/${target_vm}_${backup_name}.lvm.gz"
-  local target_lv="/dev/one_click_vg/one_click_repo"
+  local disk_archive="${remote_host_dir}/${target_vm}_${backup_name}.qcow2.gz"
+  local target_disk="/var/lib/libvirt/images/${target_vm}.qcow2"
   case "$action" in
     create)
       info "Initiating backup for $target_vm on [$target_host]."
       ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsfreeze $target_vm 2>/dev/null" &>/dev/null || true
-      local raw_lv_bytes
-      raw_lv_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo lvs --units b --noheadings -o lv_size $target_lv" 2>/dev/null | tr -d '[:space:]B')
-      if [[ -z "$raw_lv_bytes" || ! "$raw_lv_bytes" =~ ^[0-9]+$ ]]; then
-        raw_lv_bytes=""
+      if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -s '$target_disk'"; then
+        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsthaw $target_vm 2>/dev/null" &>/dev/null || true
+        error "VM disk not found or empty on target hypervisor: $target_disk"
+        return 1
+      fi
+      local raw_disk_bytes
+      raw_disk_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo stat -c%s '$target_disk'" 2>/dev/null | tr -d '[:space:]')
+      if [[ -z "$raw_disk_bytes" || ! "$raw_disk_bytes" =~ ^[0-9]+$ ]]; then
+        raw_disk_bytes=""
       fi
       info "Compressing backup $backup_name."
-      if [[ -n "$raw_lv_bytes" ]]; then
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p $remote_host_dir && sudo dd if=$target_lv bs=1M status=none | pv -s $raw_lv_bytes | gzip -c | sudo tee $lvm_archive 2> /var/log/one-click/virt/error.log"
+      if [[ -n "$raw_disk_bytes" ]]; then
+        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p '$remote_host_dir' && sudo dd if='$target_disk' bs=1M status=none | pv -s '$raw_disk_bytes' | gzip -c | sudo tee '$disk_archive' 2> /var/log/one-click/virt/error.log"
       else
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p $remote_host_dir && sudo dd if=$target_lv bs=1M status=none | pv | gzip -c | sudo tee $lvm_archive 2> /var/log/one-click/virt/error.log"
+        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p '$remote_host_dir' && sudo dd if='$target_disk' bs=1M status=none | pv | gzip -c | sudo tee '$disk_archive' 2> /var/log/one-click/virt/error.log"
       fi
       local run_status=$?
       ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsthaw $target_vm 2>/dev/null" &>/dev/null || true
       local remote_file_check
-      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "[ -s \"$lvm_archive\" ] && echo 'OK' || echo 'FAIL'")
+      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -s '$disk_archive' && echo 'OK' || echo 'FAIL'")
       if [[ $run_status -eq 0 && "$remote_file_check" == "OK" ]]; then
-        success "The LVM backup has successfully been compressed and stored on [$target_host]."
+        success "The VM disk backup has successfully been compressed and stored on [$target_host]."
         local timestamp
         timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        jq ". += [{ \"name\": \"$backup_name\", \"vm\": \"$target_vm\", \"host\": \"$target_host\", \"file\": \"$lvm_archive\", \"created_at\": \"$timestamp\" }]" "$backup_ledger" > "${backup_ledger}.tmp" && mv "${backup_ledger}.tmp" "$backup_ledger"
+        jq ". += [{ \"name\": \"$backup_name\", \"vm\": \"$target_vm\", \"host\": \"$target_host\", \"file\": \"$disk_archive\", \"created_at\": \"$timestamp\" }]" "$backup_ledger" > "${backup_ledger}.tmp" && mv "${backup_ledger}.tmp" "$backup_ledger"
       else
-        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f $lvm_archive" &>/dev/null
+        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f '$disk_archive'" &>/dev/null
         error "Creation of hypervisor-local block archive backup $backup_name failed."
         return 1
       fi
@@ -6221,34 +6501,38 @@ fleet_vps_backup() {
     restore)
       warn "Restoring '$backup_name'."
       local remote_file_check
-      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "[ -f \"$lvm_archive\" ] && echo 'OK' || echo 'FAIL'")
+      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -f '$disk_archive' && echo 'OK' || echo 'FAIL'")
       if [[ "$remote_file_check" == "FAIL" ]]; then
-        error "Backup file not found on target hypervisor path: $lvm_archive"
+        error "Backup file not found on target hypervisor path: $disk_archive"
         return 1
       fi
       info "Stopping $target_vm for restoration activity."
       ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh destroy $target_vm 2>/dev/null" &>/dev/null || true
       local compressed_bytes
-      compressed_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo stat -c%s $lvm_archive" 2>/dev/null | tr -d '[:space:]')
-      info "Decompressing and unpacking block matrices natively on target hypervisor storage disk."
+      compressed_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo stat -c%s '$disk_archive'" 2>/dev/null | tr -d '[:space:]')
+      if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -f '$target_disk'"; then
+        error "Target VM disk is missing; refusing restore to an unexpected path: $target_disk"
+        return 1
+      fi
+      info "Decompressing and restoring the selected VM disk on target hypervisor storage."
       if [[ -n "$compressed_bytes" && "$compressed_bytes" =~ ^[0-9]+$ ]]; then
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat $lvm_archive | pv -s $compressed_bytes | gzip -dc | dd of=$target_lv bs=1M status=none'"
+        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat \"$disk_archive\" | pv -s \"$compressed_bytes\" | gzip -dc | dd of=\"$target_disk\" bs=1M status=none'"
       else
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat $lvm_archive | pv | gzip -dc | dd of=$target_lv bs=1M status=none'"
+        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat \"$disk_archive\" | pv | gzip -dc | dd of=\"$target_disk\" bs=1M status=none'"
       fi
       local restore_status=$?
       if [[ $restore_status -eq 0 ]]; then
         info "Restarting virtual machine."
         ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh start $target_vm" &>/dev/null
-        success "The local LVM volume $backup_name has successfully been restored on [$target_host]."
+        success "The VM disk backup $backup_name has successfully been restored on [$target_host]."
       else
-        error "Restoration of local LVM snapshot $backup_name has failed."
+        error "Restoration of VM disk backup $backup_name has failed."
         return 1
       fi
       ;;
     delete)
       warn "Deleting backup $backup_name from [$target_host]."
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f $lvm_archive" &>/dev/null
+      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f '$disk_archive'" &>/dev/null
       jq "del(.[] | select(.name == \"$backup_name\" and .vm == \"$target_vm\"))" "$backup_ledger" > "${backup_ledger}.tmp" && mv "${backup_ledger}.tmp" "$backup_ledger"
       success "Backup $backup_name has been deleted."
       ;;
@@ -6259,7 +6543,7 @@ fleet_vps_backup() {
   esac
   printf "$(tput setaf 152)[BACKUP]${reset} %s\n" \
     "${green}┌──────────────────────────────────────────────────────────┐${reset}" \
-    "  ${blue}Operation:${reset}     LVM Backup ${action^^}" \
+    "  ${blue}Operation:${reset}     VM Disk Backup ${action^^}" \
     "  ${blue}Target VM:${reset}     $target_vm" \
     "  ${blue}Backup Name:${reset}   $backup_name" \
     "  ${blue}Host Node:${reset}     $target_host" \
@@ -6307,14 +6591,17 @@ fleet_vps_power_control() {
     return 1
   fi
   local virsh_cmd
+  local already_marker="__ONECLICK_ALREADY__"
+  local state=""
+  local la=""
   if [[ "$action" == "start" ]]; then
-    virsh_cmd="virsh start $target_vm"
-	local state="${green}started${reset}"
-	local la=has
+    virsh_cmd="current_state=\$(virsh domstate '$target_vm' 2>/dev/null) || exit 1; if [[ \"\$current_state\" == \"running\" ]]; then echo '$already_marker'; exit 0; fi; virsh start '$target_vm'"
+    state="${green}started${reset}"
+    la=has
   elif [[ "$action" == "stop" ]]; then
-    virsh_cmd="virsh shutdown $target_vm"
-	local state="${red}stopped${reset}"
-	local la=is
+    virsh_cmd="current_state=\$(virsh domstate '$target_vm' 2>/dev/null) || exit 1; if [[ \"\$current_state\" == \"shut off\" ]]; then echo '$already_marker'; exit 0; fi; virsh shutdown '$target_vm'"
+    state="${red}stopped${reset}"
+    la=is
   else
     error "Internal Error: Invalid action wrapper parameters passed."
     return 1
@@ -6324,13 +6611,18 @@ fleet_vps_power_control() {
     ANSIBLE_SSH_TIMEOUT=3 \
     ANSIBLE_GATHERING=explicit \
     ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-	ansible "$target_host" \
+    ansible "$target_host" \
     -i /etc/one-click/fleet/inventory.yml \
     -u oneclick --become \
     -m shell -a "$virsh_cmd" 2>&1); then
-      printf "$(tput setaf 48)[POWER]${reset} %s\n" \
-	    "$target_vm $la already $state"
-      return
+      error "Power directive '$action' failed for $target_vm on hypervisor [$target_host]."
+      echo "$ansible_output"
+      return 1
+  fi
+  if [[ "$ansible_output" == *"$already_marker"* ]]; then
+    printf "$(tput setaf 48)[POWER]${reset} %s\n" \
+      "$target_vm $la already $state"
+    return 0
   fi
   printf "$(tput setaf 48)[POWER]${reset} %s\n" \
     "Power directive '$action' successfully completed for $target_vm."
@@ -6661,17 +6953,28 @@ REMOTE_HAPROXY
       return 1
     else
       info "Injecting public key into $target_vm"
-      if [[ -n "$cluster_ip" ]]; then
+      local ssh_target=""
+      if [[ -n "$cluster_ip" && "$cluster_ip" != "null" && "$cluster_ip" != "N/A" ]]; then
         ssh_target="oneclick@$cluster_ip"
+      elif [[ -n "$vps_internal_ip" && "$vps_internal_ip" != "null" && "$vps_internal_ip" != "N/A" ]]; then
+        ssh_target="oneclick@$vps_internal_ip"
+      else
+        error "Unable to resolve an SSH target address for $target_vm."
+        return 1
       fi
+      local key_added=0
       for key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
         [[ -e "$key" ]] || continue
-        ssh -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" \
-          "echo $public_key >> ~/.ssh/authorized_keys" 2> /dev/null || true
-        if [[ $? -eq 0 ]]; then
+        if ssh -i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 "$ssh_target" \
+          "echo $public_key >> ~/.ssh/authorized_keys" 2> /dev/null; then
+          key_added=1
           break
         fi
       done
+      if [[ "$key_added" -ne 1 ]]; then
+        error "Failed to add the supplied public key to $target_vm using the available Fleet identities."
+        return 1
+      fi
     fi
     success "Public Key Added to $target_vm."
     read -rp "Press Enter after you have added the key: "
@@ -6709,7 +7012,6 @@ REMOTE_HAPROXY
     return 1
   fi
 }
-
 fleet_validate_hypervisor_resources() {
   local target_host="$1"
   local req_ram_mb="$2"
@@ -6760,11 +7062,7 @@ EOF
   local target_ip="$target_host"
   if [ -f "/etc/one-click/fleet/inventory.yml" ]; then
     local inv_ip
-    if [[ "${sys_ip:-${sys_ipv6}}" == "$CONTROLLER_IP" ]]; then
-      inv_ip="$CONTROLLER_IP"
-    else
-      inv_ip="$(grep -A 5 "$target_host" /etc/one-click/fleet/inventory.yml | grep ansible_host | head -n 1 | awk '{print $2}')"
-    fi
+    inv_ip="$(grep -A 5 "$target_host" /etc/one-click/fleet/inventory.yml | grep ansible_host | head -n 1 | awk '{print $2}')"
     if [ -n "$inv_ip" ]; then
       target_ip="$inv_ip"
     fi
@@ -6855,6 +7153,7 @@ EOF
 }
 cleanup_poisoned_session() {
   local exit_code=$?
+  trap - EXIT INT TERM ERR
   [[ "$exit_code" -eq 0 ]] && exit 0
   local clean_vps_name="${vps_name:-}"
   clean_vps_name="${clean_vps_name//_win_path/}"
@@ -6971,7 +7270,7 @@ if os.path.exists(p):
     fi
   fi
   echo "${lime}[CLEANUP]${green} Sanitization complete. Hypervisor and fleet footprints cleaned.${reset}"
-  exit 0
+  exit "$exit_code"
 }
 fleet_vps_provision() {
   build_vars
@@ -7002,9 +7301,14 @@ fleet_vps_provision() {
   port_state_file="/etc/one-click/virtualization/allocated_ports.db"
   local name_exists
   name_exists=$(jq --arg name "$vps_name" 'any(.[] ; .name == $name)' "$inventory_file" 2>/dev/null || true)
-  fleet_validate_hypervisor_resources "$target_host" "$vps_ram" "$vps_cpu" "$disk_size"
+  if [[ "$name_exists" == "true" ]]; then
+    error "VPS '$vps_name' already exists in the virtualization inventory. Duplicate deployment refused."
+    return 1
+  fi
+  if ! fleet_validate_hypervisor_resources "$target_host" "$vps_ram" "$vps_cpu" "$disk_size"; then
+    return 1
+  fi
   warn "VPS Deployment initializing."
-  local name_exists
   trap cleanup_poisoned_session EXIT INT TERM ERR
   if ! command -v wg > /dev/null; then
     $pkg_mgr install -y wireguard-tools
@@ -7134,42 +7438,77 @@ EOF
       fi
     fi
   else
-    iface=$(ip link show | awk '$2 ~ /^e/ {sub(":","",$2);print $2}' | head -1)
-	gateway=$(python3 -c "import ipaddress; net = ipaddress.ip_network('$public_ip', strict=False); print(list(net.hosts())[0])" 2>/dev/null)
     info "Allocating Public Node IP: $public_ip to $vps_name"
-	if [[ "$target_host" == "$(hostname -s)" || "$target_host" == "127.0.0.1" ]]; then
+
+    if [[ -z "$public_ip" || "$public_ip" != */* ]]; then
+      error "Public mode requires an IPv4 address with CIDR prefix (for example 203.0.113.10/24)."
+      return 1
+    fi
+    if ! python3 - "$public_ip" <<'PY' >/dev/null 2>&1
+import ipaddress
+import sys
+iface = ipaddress.ip_interface(sys.argv[1])
+if iface.version != 4:
+    raise SystemExit(1)
+PY
+    then
+      error "Invalid public IPv4/CIDR address: $public_ip"
+      return 1
+    fi
+
+    local host_public_ip=""
+    local public_gateway=""
+    if [[ "$target_host" == "$(hostname -s)" || "$target_host" == "$CONTROLLER_NAME" || "$target_host" == "127.0.0.1" || "$target_host" == "localhost" ]]; then
       local mode=hypervisor
       host_public_ip="127.0.0.1"
+
+      if ! ip link show dev br0 &>/dev/null; then
+        error "Public bridge br0 is not initialized on [$target_host]. Run VPS hypervisor initialization before public provisioning."
+        return 1
+      fi
+      sudo ip link set dev br0 up || {
+        error "Public bridge br0 exists but could not be brought online."
+        return 1
+      }
+      public_gateway=$(ip route show default | awk '/^default/ {print $3; exit}')
     else
       local mode=vps
-      host_public_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --list | jq -r "._meta.hostvars.\"${target_host}\".ansible_host // empty")
+      host_public_ip=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --list |
+        jq -r "._meta.hostvars.\"${target_host}\".ansible_host // empty")
       if [[ -z "$host_public_ip" || "$host_public_ip" == "null" ]]; then
         error "Hypervisor target '$target_host' not found inside inventory registry."
         return 1
       fi
-    fi
-    if ip link show dev br0 &>/dev/null; then
-      info "'br0' bridge interface is operational."
-    else
-      info "Bringing up bridge br0."
-      if ! ip link show dev "$iface" master br0 &>/dev/null; then
-        sudo ip link set dev "$iface" master br0 || {
-          error "Failed to attach $iface to br0"
-          return 1
-        }
-      fi
-      sudo ip addr flush dev "$iface" &>/dev/null || true
-      sudo ip addr replace "$public_ip" dev br0 || {
-        error "Failed to assign public IP $public_ip to br0"
+
+      if ! ANSIBLE_HOST_KEY_CHECKING=False \
+        ANSIBLE_SSH_TIMEOUT=3 \
+        ANSIBLE_GATHERING=explicit \
+        ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+        ansible "$target_host" \
+          -i /etc/one-click/fleet/inventory.yml \
+          -u oneclick --become \
+          -m shell -a "ip link show dev br0 >/dev/null 2>&1 && ip link set dev br0 up" &>/dev/null; then
+        error "Public bridge br0 is not initialized or cannot be activated on [$target_host]."
         return 1
-      }
-      sudo ip link set dev "$iface" up
-      sudo ip link set dev br0 up
-      if [ -n "$gateway" ]; then
-        sudo ip route replace default via "$gateway" dev br0
       fi
-      success "Public bridge interface (br0) successfully configured and online."
+
+      public_gateway=$(ANSIBLE_HOST_KEY_CHECKING=False \
+        ANSIBLE_SSH_TIMEOUT=3 \
+        ANSIBLE_GATHERING=explicit \
+        ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+        ansible "$target_host" \
+          -i /etc/one-click/fleet/inventory.yml \
+          -u oneclick --become \
+          -m shell -a "ip route show default | awk '/^default/ {print \$3; exit}'" 2>/dev/null |
+        tail -n 1 | tr -d '[:space:]')
     fi
+
+    if [[ -z "$public_gateway" ]]; then
+      error "Could not determine the existing default gateway on public hypervisor [$target_host]."
+      return 1
+    fi
+
+    success "Using existing public bridge br0 on [$target_host]; host addressing and default routes were left unchanged."
   fi
   info "Creating directory paths"
   local stage_dir="/etc/one-click/virtualization/staging/${vps_name}"
@@ -7952,22 +8291,25 @@ EOF
   esac
   cp "$user_data_file" "$archive_user_data"
   info "Configuring peer VPS networking"
+  local host_gateway=""
   if [[ "$is_windows" -eq 1 ]]; then
     local win_mac=$(echo "$vps_name" | md5sum | sed -E 's/^(..)(..)(..).*$/52:54:00:\1:\2:\3/')
     local net_flag="--network network=oneclick-nat,model=virtio --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9 --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0"
-    host_gateway=$(ip route show default | awk '{print $3; exit}')
+    if [[ "$network_mode" == "public" ]]; then
+      host_gateway="$public_gateway"
+    else
+      host_gateway=$(ip route show default | awk '{print $3; exit}')
+    fi
   else
     local net_flag="--network network=oneclick-nat,model=virtio"
   fi
   local cloud_init_net_argument="--cloud-init user-data=$user_data_file"
   if [[ "$network_mode" == "public" ]]; then
     local net_mac_block=""
-	local host_gateway
-    host_gateway=$(ip route show default | awk '{print $3}')
+    host_gateway="${host_gateway:-$public_gateway}"
     if [[ -n "$virtual_mac" ]]; then
       if [[ "$is_windows" -eq 1 ]]; then
         net_flag="--network bridge=br0,model=e1000e,mac=$virtual_mac --boot uefi --clock offset=localtime,hypervclock_present=yes,rtc_tickpolicy=catchup,pit_tickpolicy=delay,hpet_present=no --features hyperv.relaxed.state=on,hyperv.vapic.state=on,hyperv.spinlocks.state=on,hyperv.spinlocks.retries=8191,hyperv.synic.state=on,hyperv.stimer.state=on,hyperv.reset.state=on,hyperv.frequencies.state=on --sound model=ich9 --channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0"
-        host_gateway=$(ip route show default | awk '{print $3; exit}')
       else
         net_flag="--network bridge=br0,mac=${virtual_mac},model=virtio"
         net_mac_block="match:\n macaddress: \"${virtual_mac}\""
@@ -8059,13 +8401,9 @@ EOF
 	v6_int=$(ip -6 route show default | awk '/default/ {print $5; exit}')
 	local private_subnet="192.168.250.0/24"
 	local ipv6_private_subnet=fd00:99aa::/64
-	if [[ "$network_mode" == "public" ]]; then
-	  local sub="${public_ip}/24"
-	else
-	  local sub="${private_subnet}/24"
-	fi
+	local sub="$private_subnet"
     qemu-img resize "$disk_path" "${disk_size}" &>/dev/null || true
-	if ! ip rule show | grep -q "from $sub lookup 200"; then
+	if [[ "$network_mode" != "public" ]] && ! ip rule show | grep -q "from $sub lookup 200"; then
       ip route add "$sub" dev ocbr0 proto kernel scope link table 200 2>/dev/null || true
       if [[ -n "${ipv6_private_subnet:-}" ]]; then
         ip -6 route add "$ipv6_private_subnet" dev ocbr0 proto kernel scope link table 200 2>/dev/null || true
@@ -8283,11 +8621,7 @@ EOF
     info "Deploying server with cloud-init on $target_host hypervisor"
 	local private_subnet="192.168.250.0/24"
 	local ipv6_private_subnet=fd00:99aa::/64
-	if [[ "$network_mode" == "public" ]]; then
-	  local sub="${public_ip}/24"
-	else
-	  local sub="${private_subnet}/24"
-	fi
+	local sub="$private_subnet"
 	mkdir -p /var/log/one-click/virt-engine/
     ANSIBLE_HOST_KEY_CHECKING=False \
 	  ANSIBLE_SSH_TIMEOUT=3 \
@@ -8298,7 +8632,7 @@ EOF
       -u oneclick --become \
       -m shell -a "
         qemu-img resize \"$disk_path\" \"${disk_size}\" 2>/dev/null
-        if ! ip rule show | grep -q \"$sub table 200\"; then
+        if [[ "${network_mode}" != "public" ]] && ! ip rule show | grep -q \"$sub table 200\"; then
           ip route add \"$sub\" dev ocbr0 proto kernel scope link table 200 2>/dev/null || true
           if [[ -n \"${ipv6_private_subnet:-}\" ]]; then
             ip -6 route add "$ipv6_private_subnet" dev ocbr0 proto kernel scope link table 200 2>/dev/null || true
@@ -8710,7 +9044,6 @@ echo "$(cat $fleet_root/keys/id_ed25519.pub)" >> /home/oneclick/.ssh/authorized_
 sudo systemctl enable --now qemu-guest-agent 2>/dev/null || true
 sudo systemctl enable --now wg-quick@one-click 2>/dev/null || true
 EOC
-
       success "Local Linux KVM node ${vps_name} deployed successfully!"
     fi
   else
@@ -8871,6 +9204,7 @@ EOC
     success "Windows Virtual Private Server $vps_name successfully spawned on target host: $target_host!"
     info "" "Preparing visual finalization of $vps_name installation."
     fleet_vps_web_console "$vps_name" "$target_host"
+    trap - EXIT INT TERM ERR
     return 0
   else
     info "Ensuring One-Click Binaries on $vps_name"
@@ -8902,9 +9236,10 @@ EOC
       "${cyan}Resource Profile:${reset}  $vps_cpu Cores / $vps_ram MB RAM / $disk_size Disk" \
       "${cyan}User Account:${reset}      oneclick" \
       "${cyan}Access Password:${reset}   $raw_password" \
-	  "${lime}Use${blue} one-click --ssh $vps_private_ip${lime} to connect to your peer" \
+	  "${lime}Use${blue} one-click --ssh $vps_name${lime} to connect to your peer" \
       "================================================================="
     success "Virtual private server $vps_name successfully spawned on target host: $target_host!"
+    trap - EXIT INT TERM ERR
     exit 0
   fi
   rm -f "/tmp/build_${clean_vps_name}" 2>/dev/null || true
@@ -9906,6 +10241,64 @@ fleet_vps_web_console() {
   fi
   local session_timeout="${VNC_WEB_TIMEOUT}"
   local inventory_file=/etc/one-click/fleet/inventory.yml
+
+  cleanup_vnc_firewall() {
+    local port="$1"
+    [[ -z "$port" ]] && return 0
+
+    local fw rule handle
+    for fw in iptables ip6tables; do
+      command -v "$fw" &>/dev/null || continue
+      while :; do
+        rule=$("$fw" -S INPUT 2>/dev/null | awk -v p="$port" '
+          index($0, "--dport " p) { print; exit }
+        ')
+        [[ -n "$rule" ]] || break
+        rule="${rule/-A INPUT/-D INPUT}"
+        $fw $rule 2>/dev/null || break
+      done
+    done
+
+    if command -v nft &>/dev/null; then
+      while :; do
+        handle=$(nft -a list chain inet filter input 2>/dev/null | awk -v p="$port" '
+          index($0, "tcp dport " p) && / handle / { print $NF; exit }
+        ')
+        [[ -n "$handle" ]] || break
+        nft delete rule inet filter input handle "$handle" 2>/dev/null || break
+      done
+    fi
+
+    if command -v firewall-cmd &>/dev/null; then
+      firewall-cmd --zone=public --remove-port="${port}/tcp" &>/dev/null || true
+      while IFS= read -r rich_rule; do
+        [[ -n "$rich_rule" ]] || continue
+        firewall-cmd --zone=public --remove-rich-rule="$rich_rule" &>/dev/null || true
+      done < <(
+        firewall-cmd --zone=public --list-rich-rules 2>/dev/null |
+          awk -v p="$port" 'index($0, "port=\"" p "\"")'
+      )
+      firewall-cmd --reload &>/dev/null || true
+    fi
+
+    if command -v ufw &>/dev/null; then
+      local rule_num
+      while IFS= read -r rule_num; do
+        [[ -n "$rule_num" ]] || continue
+        yes | ufw delete "$rule_num" &>/dev/null || true
+      done < <(
+        ufw status numbered 2>/dev/null |
+          awk -v p="$port" '
+            index($0, p "/tcp") && match($0, /\[[[:space:]]*[0-9]+\]/) {
+              n=substr($0, RSTART+1, RLENGTH-2)
+              gsub(/[[:space:]]/, "", n)
+              print n
+            }
+          ' | sort -rn
+      )
+    fi
+  }
+
   info "Initializing ephemeral Web VNC console for $vps_name on $target_host."
   if ! command -v websockify &> /dev/null; then
     info "Installing Websockify."
@@ -9980,7 +10373,7 @@ fleet_vps_web_console() {
     cleanup_session_port "${proxy_port:-}"
     cleanup_session_port "${tunnel_port:-}"
     [[ -n "${token:-}" ]] && rm -f "${token_dir}/${token}.tokens"
-    [[ -n "${proxy_port:-}" ]] && cleanup_firewall_rules "$proxy_port"
+    [[ -n "${proxy_port:-}" ]] && cleanup_vnc_firewall "$proxy_port"
   }
   trap cleanup_vnc ERR INT TERM
   (
@@ -9989,7 +10382,7 @@ fleet_vps_web_console() {
     cleanup_session_port "$proxy_port"
     cleanup_session_port "$tunnel_port"
     rm -f "${token_dir}/${token}.tokens"
-    cleanup_firewall_rules "$proxy_port"
+    cleanup_vnc_firewall "$proxy_port"
   ) &>/dev/null & disown
   local controller_ip=$CONTROLLER_IP
   read -rp "${cyan}[USER] ${orange}WOULD YOU LIKE TO LOCK DOWN THE VNC SESSION TO A SPECIFIC IP:${reset} " lock_vnc
@@ -10079,11 +10472,11 @@ fleet_vps_reinstall() {
   local clean_os=""
   local os_version_raw=""
   local parsed_string="${target_image,,}"
-  local keys=$(sed -En '/ssh_authorized_keys:/{:a;n;/ssh-/{s/[ \t]+- //p};ba}' /etc/one-click/virtualization/deployments/${vps_name}/user_data.yml)
-  local archive_dir="/etc/one-click/virtualization/deployments/${vps_name}"
   local archive_dir="/etc/one-click/virtualization/deployments/${vps_name}"
   local local_wg_src="${archive_dir}/one-click.conf"
   local inventory_json="/etc/one-click/virtualization/inventory.json"
+  local keys=""
+  local mode="vps"
   parsed_string="${parsed_string#netboot_}"
   build_vars
   . "/etc/one-click/fleet/controller.env"
@@ -10096,6 +10489,7 @@ fleet_vps_reinstall() {
     error "Staged template file missing: ${archive_dir}/user_data.yml"
     return 1
   fi
+  keys=$(sed -En '/ssh_authorized_keys:/{:a;n;/ssh-/{s/[ \t]+- //p};ba}' "${archive_dir}/user_data.yml")
   if [[ "$parsed_string" =~ ^(windows|win)([0-9]+)$ ]]; then
     clean_os="windows"
     os_version_raw="${BASH_REMATCH[2]}"
@@ -10191,12 +10585,43 @@ fleet_vps_reinstall() {
     error "WireGuard configuration profile missing at $local_wg_src. Cannot proceed."
     return 1
   fi
+
+  local pass="$target_vps_ip"
+  if [[ -z "$pass" ]]; then
+    pass=$(awk -v target="$vps_name" '
+      $0 ~ "^[[:space:]]*" target ":" {found=1; next}
+      found && /^[[:space:]]*ansible_host:/ {print $2; exit}
+      found && /^[[:space:]]*[A-Za-z0-9_-]+:/ && !/ansible_/ {found=0}
+    ' "$inventory" | tr -d ' "\027')
+  fi
+  if [[ -z "$pass" ]]; then
+    error "Could not resolve operational IP address tracking context for ${vps_name}."
+    return 1
+  fi
+
+  if [[ -f "$inventory_json" ]] && command -v jq &>/dev/null; then
+    local is_vm
+    is_vm=$(jq -r --arg target "$vps_name" '
+      any(.[];
+        (.name == $target or .primary_ip == $target or .cluster_private_ip == $target or .nat_ip == $target)
+        and (.host != null and .host != "")
+      )
+    ' "$inventory_json" 2>/dev/null)
+    if [[ "$is_vm" != "true" ]]; then
+      mode="hypervisor"
+    fi
+  fi
+
   local install_cmd=""
   info "Packaging WireGuard profile for Linux target [$vps_name]."
-    scp -i /etc/one-click/fleet/keys/id_ed25519 \
+  if ! scp -i /etc/one-click/fleet/keys/id_ed25519 \
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
-      "$local_wg_src" "oneclick@$target_vps_ip:/tmp/one-click.conf"
+      "$local_wg_src" "oneclick@${pass//[][]}:/tmp/one-click.conf"; then
+    error "Failed to stage WireGuard profile on ${vps_name} [${pass}]."
+    return 1
+  fi
+
   if [[ "$clean_os" == "netboot.xyz" || -z "$os_version" ]]; then
     install_cmd="sudo bash reinstall.sh ${clean_os} \"/tmp/one-click.conf\""
   elif [[ "$is_windows" -eq 1 ]]; then
@@ -10210,32 +10635,6 @@ fleet_vps_reinstall() {
     install_cmd="sudo bash reinstall.sh ${clean_os} ${os_version} --ssh-key \"${keys}\" \"/tmp/one-click.conf\""
   fi
   info "Resolved Targeting Parameter Context: [${clean_os} ${os_version}]"
-  local pass="$target_vps_ip"
-  if [[ -z "$pass" ]]; then
-    pass=$(awk -v target="$vps_name" '
-      $0 ~ "^[[:space:]]*" target ":" {found=1; next}
-      found && /^[[:space:]]*ansible_host:/ {print $2; exit}
-      found && /^[[:space:]]*[A-Za-z0-9_-]+:/ && !/ansible_/ {found=0}
-    ' "$inventory" | tr -d ' "\027')
-  fi
-  if [[ -z "$pass" ]]; then
-    error "Could not resolve operational IP address tracking context for ${vps_name}."
-    return 1
-  fi
-  if [[ -f "$inventory_json" ]] && command -v jq &>/dev/null; then
-    local is_vm
-    is_vm=$(jq -r --arg target "$vps_name" '
-      any(.[];
-        (.name == $target or .primary_ip == $target or .cluster_private_ip == $target or .nat_ip == $target)
-        and (.host != null and .host != "")
-      )
-    ' "$inventory_json" 2>/dev/null)
-    if [[ "$is_vm" == "true" ]]; then
-      local mode=vps
-    else
-      local mode=hypervisor
-    fi
-  fi
   info "Triggering unattended target re-image sequence on ${vps_name} [${pass}]."
   local ssh_opts=(
     -i /etc/one-click/fleet/keys/id_ed25519
@@ -10277,7 +10676,7 @@ EOF
   fleet_console "$vps_name"
   if [[ "$is_windows" -eq 0 ]]; then
     info "Reconfiguring $vps_name to add back to the fleet"
-    while ! nc -z -w2 "$target_vps_ip" 22 &> /dev/null; do
+    while ! nc -z -w2 "${pass//[][]}" 22 &> /dev/null; do
       sleep 2
     done
     info "SSH connection established."
@@ -10311,6 +10710,37 @@ fleet_vps_peer_reconfigure() {
     error "Logic Breach: A valid runtime password must be passed to authenticate post-reinstall."
     return 1
   fi
+  local vps_private_ip
+  local target_host_ip
+  local target_vps_nat_ip
+  local target_vps_public_ip
+  local target_vps_primary_ip
+  local target_host_name
+  local network_mode
+  local target_vps_ip
+
+  vps_private_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .cluster_private_ip // empty" "$ledger_file")
+  target_host_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .host_ip // empty" "$ledger_file")
+  target_vps_nat_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .nat_ip // empty" "$ledger_file")
+  target_vps_public_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .public_ip // empty" "$ledger_file")
+  target_vps_primary_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .primary_ip // empty" "$ledger_file")
+  target_host_name=$(jq -r ".[] | select(.name == \"$vps_name\") | .host // empty" "$ledger_file")
+  network_mode=$(jq -r ".[] | select(.name == \"$vps_name\") | .mode // empty" "$ledger_file")
+
+  if [[ "$network_mode" == "public" ]]; then
+    target_vps_ip="${target_vps_public_ip:-$target_vps_primary_ip}"
+  else
+    target_vps_ip="${target_vps_nat_ip:-$target_vps_primary_ip}"
+  fi
+
+  if [[ -z "$target_host_name" || -z "$target_vps_ip" ]]; then
+    error "Unable to resolve reconfiguration routing for '$vps_name' from virtualization inventory."
+    return 1
+  fi
+  if [[ "${mode,,}" == "vps" && -z "$vps_private_ip" ]]; then
+    error "Fleet mesh address is missing for '$vps_name'. Rejoin aborted."
+    return 1
+  fi
   if [[ "$is_windows" -eq 1 ]]; then
     info "Target OS is Windows. Waiting for RDP / WinRM port 3389 to initialize."
     ANSIBLE_HOST_KEY_CHECKING=False \
@@ -10321,7 +10751,7 @@ fleet_vps_peer_reconfigure() {
         until virsh domstate $vps_name | grep -q 'running'; do
           sleep 2
         done
-        while ! nc -z $target_vps_nat_ip 3389; do
+        while ! nc -z $target_vps_ip 3389; do
           sleep 5
         done
         sudo virsh autostart $vps_name &> /dev/null || true
@@ -10330,17 +10760,13 @@ fleet_vps_peer_reconfigure() {
   else
   # -----------------------------
   info "Harvesting operational metrics and WireGuard configurations."
-  local vps_private_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .cluster_private_ip // empty" "$ledger_file")
-  local target_host_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .host_ip // empty" "$ledger_file")
-  local target_vps_nat_ip=$(jq -r ".[] | select(.name == \"$vps_name\") | .nat_ip // empty" "$ledger_file")
-  local target_host_name=$(jq -r ".[] | select(.name == \"$vps_name\") | .host // empty" "$ledger_file")
   if [[ ! -f "$local_wg_src" ]]; then
     error "WireGuard configuration profile missing at $local_wg_src. Restoration aborted."
     return 1
   fi
   local controller_pub_key=""
   [[ -f "/etc/one-click/fleet/keys/id_ed25519.pub" ]] && controller_pub_key=$(cat /etc/one-click/fleet/keys/id_ed25519.pub)
-  local fleet_target_ip="$target_vps_nat_ip"
+  local fleet_target_ip="$target_vps_ip"
   [[ "${mode^^}" == "HYPERVISOR" ]] && fleet_target_ip="$target_host_ip"
   if [[ "${mode,,}" == "vps" ]]; then
     info "Targeting remote hypervisor peer [${target_host_ip}] to coordinate trusted key injection."
@@ -10358,7 +10784,7 @@ fleet_vps_peer_reconfigure() {
           echo -n '.'
           sleep 2
         done
-        while ! nc -z $target_vps_nat_ip 22; do
+        while ! nc -z $target_vps_ip 22; do
           sleep 2
         done
 		sudo virsh autostart $vps_name &> /dev/null || true
@@ -10367,7 +10793,7 @@ fleet_vps_peer_reconfigure() {
           sleep 20
           ssh_ready=0
         else
-          if ! ping -c1 $remote_vps_ip &> /dev/null; then
+          if ! ping -c1 $target_vps_ip &> /dev/null; then
             echo \"[ERROR] $vps_name is down\"
           fi
         fi
@@ -10379,7 +10805,7 @@ fleet_vps_peer_reconfigure() {
 		  install_dep "sshpass" "command -v sshpass" "sshpass" "$pkg_mgr"
         fi
         local_hypervisor_pub_key=\$(cat /home/oneclick/.ssh/id_ed25519.pub 2>/dev/null)
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@$target_vps_nat_ip << 'EOF'
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@$target_vps_ip << 'EOF'
           mkdir -p /home/oneclick/.ssh /etc/wireguard
           echo 'nameserver 1.1.1.1' > /etc/resolv.conf
           if ! id oneclick &>/dev/null; then
@@ -10425,7 +10851,7 @@ EOF
   fi
   success "Deployment complete."
   info "Adding back to fleet"
-  fleet_add "$fleet_target_ip" "$vps_name" 22 "" "$vps_nat_ip" no "vps-peer"
+  fleet_add "$fleet_target_ip" "$vps_name" 22 "" "$vps_private_ip" no "vps-peer"
   info "Synchronizing target configuration definitions in database ledger."
   #------------------
   fi
@@ -10453,12 +10879,12 @@ EOF
     "${cyan}Instance Name:${reset}     $vps_name" \
     "${cyan}Operating System${reset}   $new_image_name"
   if [[ "$network_mode" == "public" ]]; then
-    echo -e "$(tput setaf 197)[VPS] ${cyan}Public Static IP:${reset}  $public_ip"
+    echo -e "$(tput setaf 197)[VPS] ${cyan}Public Static IP:${reset}  $target_vps_ip"
   else
     echo -e "$(tput setaf 197)[VPS] ${cyan}NAT Internal IP:${reset}   $vps_private_ip"
   fi
   printf "$(tput setaf 197)[VPS] ${blue}%s${reset}\n" \
-    "${cyan}Cluster Mesh IP:${reset}   $vps_nat_ip" \
+    "${cyan}Cluster Mesh IP:${reset}   $vps_private_ip" \
     "${cyan}Mesh Routing GW:${reset}   10.10.0.1" \
     "${cyan}User Account:${reset}      oneclick" \
     "${cyan}Access Password:${reset}   $fresh_install_pass" \
@@ -10679,20 +11105,37 @@ fleet_vps_destroy() {
       return 1
     fi
   fi
-  fleet_purge_hypervisor "$clean_vps_name" "$target_host"
-  local vps_ip
-  vps_ip=$(awk -v name="$clean_vps_name" '/# ==== Peer Node: '"$clean_vps_name"' ====/ {flag=1; next} flag && /AllowedIPs/ {print $3; flag=0}' /etc/wireguard/one-click.conf | cut -d/ -f1)
-  if [[ -z "$vps_ip" ]]; then
-    vps_ip=$(grep -B 2 -A 2 "$clean_vps_name" /etc/wireguard/one-click.conf 2>/dev/null | grep "AllowedIPs" | awk '{print $3}' | cut -d/ -f1 || true)
+  if ! fleet_purge_hypervisor "$clean_vps_name" "$target_host"; then
+    error "VPS destruction stopped because hypervisor cleanup could not be confirmed. Controller-side fleet and ledger state have been preserved."
+    return 1
   fi
-  if [[ -n "$vps_ip" ]]; then
-    local peer_key
-    peer_key=$(wg show one-click peers 2>/dev/null | grep -B 1 "$vps_ip" | head -n 1 || true)
-    if [[ -n "$peer_key" ]]; then
+  local wg_config="/etc/wireguard/one-click.conf"
+  local vps_ip=""
+  local peer_key=""
+
+  if [[ -f "$wg_config" ]]; then
+    vps_ip=$(awk -v name="$clean_vps_name" '
+      $0 == "# ==== Peer Node: " name " ====" {flag=1; next}
+      flag && /^AllowedIPs[[:space:]]*=/ {print $3; exit}
+    ' "$wg_config" | cut -d/ -f1)
+
+    peer_key=$(awk -v name="$clean_vps_name" '
+      $0 == "# ==== Peer Node: " name " ====" {flag=1; next}
+      flag && /^PublicKey[[:space:]]*=/ {print $3; exit}
+    ' "$wg_config")
+
+    if [[ -n "$peer_key" ]] && ip link show dev one-click &>/dev/null; then
       wg set one-click peer "$peer_key" remove 2>/dev/null || true
     fi
-    sed -i "/# ==== Peer Node: ${clean_vps_name} ====/,+7d" /etc/wireguard/one-click.conf 2>/dev/null || true
-    wg syncconf one-click <(wg-quick strip one-click 2>/dev/null) &>/dev/null || true
+
+    sed -i "/# ==== Peer Node: ${clean_vps_name} ====/,+7d" "$wg_config" 2>/dev/null || true
+
+    if ip link show dev one-click &>/dev/null; then
+      wg syncconf one-click <(wg-quick strip one-click 2>/dev/null) &>/dev/null || true
+    fi
+  fi
+
+  if [[ -n "$vps_ip" ]]; then
     sed -i "/^${vps_ip}$/d" "${FLEET_USED_IPS_FILE:-/dev/null}" 2>/dev/null || true
     if [[ -f "${FLEET_AVAILABLE_IPS_FILE:-}" ]] && ! grep -q "^${vps_ip}$" "$FLEET_AVAILABLE_IPS_FILE"; then
       echo "$vps_ip" >> "$FLEET_AVAILABLE_IPS_FILE"
@@ -10854,15 +11297,58 @@ fleet_vps_modify() {
     fi
   else
     info "Relaying configuration payload to remote node [$target_host]."
-    ANSIBLE_HOST_KEY_CHECKING=False \
-    ANSIBLE_SSH_TIMEOUT=5 \
-    ANSIBLE_GATHERING=explicit \
-    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
-      ansible "$target_host" \
-      -i /etc/one-click/fleet/inventory.yml \
-      -u oneclick --become \
-      -m shell -a "${libvirt_cmds}" &>/dev/null
-    success "Configuration adjustments sent successfully to compute target host node [$target_host]."
+    libvirt_cmds=$(cat <<EOF
+set -e
+if ! virsh dominfo "$vps_name" &>/dev/null; then
+  echo "VM '$vps_name' is not registered on this hypervisor." >&2
+  exit 1
+fi
+
+if [[ -n "$new_ram" ]]; then
+  ram_kb=$((new_ram * 1024))
+  virsh setmaxmem "$vps_name" "\$ram_kb" --config
+  virsh setmem "$vps_name" "\$ram_kb" --config
+fi
+
+if [[ -n "$new_cpu" ]]; then
+  virsh setvcpus "$vps_name" "$new_cpu" --config --maximum
+  virsh setvcpus "$vps_name" "$new_cpu" --config
+fi
+
+if [[ -n "$expand_disk" ]]; then
+  target_disk_path="/var/lib/libvirt/images/${vps_name}.qcow2"
+  if [[ ! -f "\$target_disk_path" ]]; then
+    echo "VM disk not found: \$target_disk_path" >&2
+    exit 1
+  fi
+  current_virtual_bytes=\$(qemu-img info --output=json "\$target_disk_path" | jq -r '."virtual-size"')
+  requested_bytes=\$(numfmt --from=iec "$expand_disk" 2>/dev/null || true)
+  if [[ -z "\$requested_bytes" ]]; then
+    echo "Invalid storage formatting suffix token: $expand_disk" >&2
+    exit 1
+  fi
+  if [[ "\$requested_bytes" -le "\$current_virtual_bytes" ]]; then
+    echo "Storage shrinking is blocked. Requested size must be larger than the current virtual disk." >&2
+    exit 1
+  fi
+  qemu-img resize "\$target_disk_path" "$expand_disk"
+  virsh blockresize "$vps_name" "\$target_disk_path" "$expand_disk"
+fi
+EOF
+)
+    if ! ANSIBLE_HOST_KEY_CHECKING=False \
+      ANSIBLE_SSH_TIMEOUT=5 \
+      ANSIBLE_GATHERING=explicit \
+      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+        ansible "$target_host" \
+        -i /etc/one-click/fleet/inventory.yml \
+        -u oneclick --become \
+        -m shell -a "${libvirt_cmds}" &>/dev/null; then
+      error "Remote configuration adjustment failed on compute target host [$target_host]."
+      return 1
+    fi
+    success "Configuration adjustments applied successfully to compute target host node [$target_host]."
+    warn "Hardware modifications written to remote XML/storage. Please power cycle the VM to apply configuration changes."
   fi
 }
 fleet_vps_list() {
@@ -11132,6 +11618,9 @@ fleet_wg_add_user() {
   done
   local controller_pubkey
   controller_pubkey=$(wg show one-click public-key 2>/dev/null)
+  if [[ -z "$controller_pubkey" && -f "/etc/wireguard/oc_public.key" ]]; then
+    controller_pubkey=$(cat /etc/wireguard/oc_public.key)
+  fi
   if [[ -z "$controller_pubkey" && -f "/etc/wireguard/public.key" ]]; then
     controller_pubkey=$(cat /etc/wireguard/public.key)
   fi
@@ -11189,7 +11678,6 @@ EOF
 [Interface]
 PrivateKey = <User or client generated local private key match>
 Address = ${allocated_ip}/16
-ListenPort = ${wg_peer_port}
 MTU = 1412
 ${dns_guard:-}
 
@@ -11253,6 +11741,7 @@ fleet_wg_add() {
   fi
   info "Connecting to remote fleet member ($member_target) to check environment."
   local remote_pubkey
+  local remote_privkey=""
   remote_pubkey=$(ssh -i "$key_file" "oneclick@$member_target" "sudo wg show one-click public-key 2>/dev/null || sudo cat /etc/wireguard/oneclick-public.key 2>/dev/null" || true)
   if [[ -z "$remote_pubkey" ]]; then
     info "WireGuard not configured on remote host. Running setup."
@@ -11313,6 +11802,27 @@ fleet_wg_add() {
 	REMOTE_PRIVATE_KEY="$remote_privkey" \
 	IPS_ALLOWED="$ips_allowed" 'bash -s' << 'EOF'
 
+    if [[ -z "${REMOTE_PRIVATE_KEY:-}" ]]; then
+      REMOTE_PRIVATE_KEY=$(sudo awk -F= '
+        /^[[:space:]]*PrivateKey[[:space:]]*=/ {
+          sub(/^[^=]*=[[:space:]]*/, "")
+          gsub(/[[:space:]]/, "")
+          print
+          exit
+        }
+      ' "$WG_INTERFACE_CFG" 2>/dev/null || true)
+    fi
+    if [[ -z "${REMOTE_PRIVATE_KEY:-}" ]]; then
+      REMOTE_PRIVATE_KEY=$(sudo cat /etc/wireguard/oneclick-private.key 2>/dev/null || true)
+    fi
+    if [[ -z "${REMOTE_PRIVATE_KEY:-}" || "$REMOTE_PRIVATE_KEY" == "(none)" ]]; then
+      REMOTE_PRIVATE_KEY=$(sudo wg show one-click private-key 2>/dev/null || true)
+    fi
+    if [[ -z "${REMOTE_PRIVATE_KEY:-}" || "$REMOTE_PRIVATE_KEY" == "(none)" ]]; then
+      echo "Unable to preserve existing WireGuard private key on remote node." >&2
+      exit 1
+    fi
+
       wg_content=$(cat <<_CONTENT_
 [Interface]
 PrivateKey = ${REMOTE_PRIVATE_KEY}
@@ -11369,7 +11879,6 @@ EOF
 Host: $user_name
 Peer WG Mesh IP: $allocated_ip
 EOF
-
   echo -e "\n${green}────────────────────────────────────────────────────────────────────────────────${reset}"
   sleep 10
   return 0
@@ -11394,7 +11903,7 @@ fleet_wg_list_users() {
 }
 fleet_wg_remove_user() {
   local user_json="/etc/one-click/fleet/wg_user_ledger.json"
-  local wg_interface_cfg="/etc/wireguard/wg0.conf"
+  local wg_interface_cfg="/etc/wireguard/one-click.conf"
   if [[ ! -f "/etc/one-click/fleet/controller.env" ]]; then
     error "Please run ${orange}one-click fleet init${reset} first"
 	return 1
@@ -11424,7 +11933,7 @@ fleet_wg_remove_user() {
   [[ ! "$confirm" =~ ^[Yy]$ ]] && { info "De-allocation aborted."; return 0; }
   if command -v wg &>/dev/null; then
     info "Live-purging cryptographic credentials from running network interface."
-    wg set wg0 peer "$user_pubkey" remove 2>/dev/null || true
+    wg set one-click peer "$user_pubkey" remove 2>/dev/null || true
   fi
   if [[ -f "$wg_interface_cfg" ]]; then
     info "Excising configuration block records from static filesystem."
