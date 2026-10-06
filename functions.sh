@@ -1329,6 +1329,9 @@ ROLE_TYPE="controller"
 IS_MASTER="true"
 EOF
     . "$fleet_root/controller.env"
+  else
+    # ==== I am a peer member ====
+	ROLE_TYPE="peer"
   fi
   mkdir -p $(dirname "$inventory_json")
   if ! command -v ansible >/dev/null 2>&1; then
@@ -1436,9 +1439,9 @@ inventory="/etc/one-click/fleet/inventory.yml"
 if [[ -f "$fleet_static_root/controller.env" ]]; then
   source "$fleet_static_root/controller.env"
 fi
-nic=$(ip route show default | awk '{print $5}')
+nic=$(ip route show default | awk '{print $5}'|head -1)
 if [[ -z "$nic" ]]; then
-  nic=$(awk '{print $5}' <(ip -6 r s default))
+  nic=$(awk '{print $5}' <(ip -6 r s default)|head -1)
 fi
 if ip link show br0 &> /dev/null; then
   if ! grep -q 'DOWN' <(ip link show br0); then
@@ -6374,127 +6377,277 @@ fleet_proxy_provision() {
       return 1
     fi
   fi
-  local haproxy_payload=""
+  local proxy_mode public_port backend_port
   if [[ -n "$website" ]]; then
-    # ==== Shared web ports ====
-    info "Compiling HTTP/HTTPS reverse proxy block for $website -> $target_vm ($vps_internal_ip)."
-    local backend_name="be_${target_vm}_${website//./_}"
-    haproxy_payload="
-      mkdir -p /etc/haproxy/errors
-      if ! grep -q 'frontend http_front' /etc/haproxy/haproxy.cfg; then
-        cat >> /etc/haproxy/haproxy.cfg <<EOF
+    proto="${proto:-http}"
 
-frontend http_front
-    bind *:80
-    mode http
-EOF
-      fi
-      if ! grep -q 'backend $backend_name' /etc/haproxy/haproxy.cfg; then
-        sed -i '/frontend http_front/a \    use_backend $backend_name if { hdr(host) -i $website }' /etc/haproxy/haproxy.cfg
-        cat >> /etc/haproxy/haproxy.cfg <<EOF
+    if [[ ! "$website" =~ ^[A-Za-z0-9.-]+$ ]]; then
+      error "Invalid website '$website'. Only DNS hostnames are accepted."
+      return 1
+    fi
 
-backend $backend_name
-    mode http
-    balance roundrobin
-    server $target_vm ${vps_internal_ip}:${src_port:-80} check
-EOF
-      fi
-    "
+    case "$proto" in
+      http)
+        public_port=80
+        backend_port="${src_port:-80}"
+        ;;
+      https)
+        public_port=443
+        backend_port="${src_port:-443}"
+        ;;
+      *)
+        error "Invalid protocol '$proto'. Use --proto http or --proto https."
+        return 1
+        ;;
+    esac
+
+    if [[ ! "$backend_port" =~ ^[0-9]+$ ]] || (( backend_port < 1 || backend_port > 65535 )); then
+      error "Invalid backend port '$backend_port'."
+      return 1
+    fi
+
+    src_port="$backend_port"
+    proxy_mode="web"
+    info "Compiling ${proto^^} proxy for $website:$public_port -> $target_vm ($vps_internal_ip:$backend_port)."
   elif [[ -n "$src_port" && -n "$dest_port" ]]; then
+    if [[ ! "$src_port" =~ ^[0-9]+$ || ! "$dest_port" =~ ^[0-9]+$ ]] || \
+       (( src_port < 1 || src_port > 65535 || dest_port < 1 || dest_port > 65535 )); then
+      error "Invalid TCP port mapping '$dest_port -> $src_port'."
+      return 1
+    fi
+    proxy_mode="tcp"
+    public_port="$dest_port"
     info "Compiling TCP proxy map for custom port: $target_host:$dest_port -> $target_vm:$src_port."
-    local stream_name="tcp_stream_${target_vm}_${dest_port}"
-    haproxy_payload="
-listen $stream_name
-    bind *:${dest_port}
-    mode tcp
-    balance roundrobin
-    server $target_vm ${vps_internal_ip}:${src_port} check
-    "
   else
-    error "Invalid parameters. Specify either a --website config string or a --source/--port mapping."
+    error "Invalid parameters. Specify either a --website/--proto mapping or a --source/--port mapping."
     return 1
   fi
+
+  if [[ ! "$target_vm" =~ ^[A-Za-z0-9._-]+$ || ! "$vps_internal_ip" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+    error "Unsafe target name or address in proxy mapping."
+    return 1
+  fi
+
   info "Connecting to Hypervisor Node [$target_host] to apply proxy."
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
   if [[ ! -f "$private_key" ]]; then
     private_key="/home/oneclick/.ssh/id_ed25519"
   fi
+
   local target_ip
   target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "${target_host:-$CONTROLLER_NAME}" 2>/dev/null | jq -r '.ansible_host // empty')
   if [[ -z "$target_ip" ]]; then
     error "Network Routing Fault: Could not map host '$target_host' to an active IP matrix."
     return 1
   fi
+
   info "Orchestrating network proxy configurations on [$target_host] ($target_ip)."
-  local local_tmp_payload="/tmp/haproxy_payload_${target_vm}.tmp"
-  echo "$haproxy_payload" > "$local_tmp_payload"
-  cat "$local_tmp_payload" | ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" \
-    "TARGET_PORT='$dest_port' WEBSITE_FLAG='$website' sudo -E bash -c '
-    cat > /tmp/haproxy_append.cfg
-    if ! command -v haproxy &>/dev/null; then
-      if command -v apt-get &>/dev/null; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update && apt-get install -y haproxy
-      elif command -v dnf &>/dev/null; then
-        dnf install -y haproxy
-      elif command -v yum &>/dev/null; then
-        yum install -y haproxy
-      else
-        echo \"CRITICAL: Operational package manager not found on target host subsystem.\" >&2
-        exit 1
-      fi
-      systemctl enable haproxy
-    fi
-    if [ -f /tmp/haproxy_append.cfg ] && [ -s /tmp/haproxy_append.cfg ]; then
-      cat /tmp/haproxy_append.cfg >> /etc/haproxy/haproxy.cfg
-      rm -f /tmp/haproxy_append.cfg
-    else
-      echo \"CRITICAL: Proxy configuration stream data arrived empty on target node.\" >&2
-      exit 1
-    fi
-    apply_firewall_rule() {
-      local port=\"\$1\"
-	  source /etc/os-release
-      if ! iptables -I ONE-CLICK-FLEET -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT -c 0 0 2>/dev/null; then
-        echo \">>> \$PRETTY_NAME Detected: Executing native nftables check-and-insert sequence.\"
-        nft add table ip filter 2>/dev/null || true
-        nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
-        if ! nft list chain ip filter ONE-CLICK-FLEET | grep -q \"tcp dport \$port accept\"; then
-          nft insert rule ip filter ONE-CLICK-FLEET tcp dport \"\$port\" accept 2>/dev/null
-        fi
-      else
-        echo \">>> Standard iptables environment active. Executing legacy sequence.\"
-        iptables -N ONE-CLICK-FLEET 2>/dev/null || true
-        iptables -C ONE-CLICK-FLEET -p tcp --dport \"\$port\" -j ACCEPT 2>/dev/null || \
-        iptables -I ONE-CLICK-FLEET 1 -p tcp --dport \"\$port\" -j ACCEPT 2>/dev/null
-      fi
-      if command -v firewall-cmd &>/dev/null; then
-        if ! firewall-cmd --zone=public --query-port=\"\${port}\"/tcp --permanent &>/dev/null; then
-          firewall-cmd --zone=public --add-port=\"\${port}\"/tcp --permanent &>/dev/null && firewall-cmd --reload &>/dev/null || true
-        fi
-      fi
+
+  # The values below are restricted to safe hostname/name/IP/port characters above,
+  # so they can be passed as positional parameters without embedding a shell payload
+  # into haproxy.cfg.
+  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" \
+    "sudo bash -s -- '$proxy_mode' '$target_vm' '$vps_internal_ip' '$website' '$proto' '$src_port' '$dest_port' '$public_port'" <<'REMOTE_HAPROXY'
+set -euo pipefail
+
+proxy_mode="$1"
+target_vm="$2"
+vps_internal_ip="$3"
+website="$4"
+proto="$5"
+src_port="$6"
+dest_port="$7"
+public_port="$8"
+
+if ! command -v haproxy >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y haproxy
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y haproxy
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y haproxy
+  else
+    echo "CRITICAL: Operational package manager not found on target host subsystem." >&2
+    exit 1
+  fi
+  systemctl enable haproxy
+fi
+
+cfg=/etc/haproxy/haproxy.cfg
+mkdir -p /etc/haproxy/errors
+backup=$(mktemp /tmp/haproxy.cfg.backup.XXXXXX)
+work=$(mktemp /tmp/haproxy.cfg.work.XXXXXX)
+cp -a "$cfg" "$backup"
+commit=0
+
+restore_on_error() {
+  rc=$?
+  if (( commit == 0 )); then
+    cp -a "$backup" "$cfg"
+  fi
+  rm -f "$backup" "$work"
+  exit "$rc"
+}
+trap restore_on_error EXIT
+
+remove_section() {
+  section_type="$1"
+  section_name="$2"
+  awk -v st="$section_type" -v sn="$section_name" '
+    BEGIN { skipping=0 }
+    {
+      if (!skipping && $1 == st && $2 == sn) {
+        skipping=1
+        next
+      }
+      if (skipping) {
+        if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#/) {
+          next
+        }
+        if ($0 !~ /^[[:space:]]/) {
+          skipping=0
+        } else {
+          next
+        }
+      }
+      if (!skipping) print
     }
-    if [ -n \"\$TARGET_PORT\" ]; then
-      apply_firewall_rule \"\$TARGET_PORT\"
-    elif [ -z \"\$WEBSITE_FLAG\" ]; then
-      for p in 80 443; do
-        apply_firewall_rule \"\$p\"
-      done
+  ' "$cfg" > "$work"
+  cat "$work" > "$cfg"
+}
+
+ensure_http_frontend() {
+  if ! grep -Eq '^frontend[[:space:]]+http_front([[:space:]]|$)' "$cfg"; then
+    cat >> "$cfg" <<'EOF_HTTP_FRONT'
+
+frontend http_front
+    bind *:80
+    mode http
+EOF_HTTP_FRONT
+  fi
+}
+
+ensure_https_frontend() {
+  if ! grep -Eq '^frontend[[:space:]]+https_front([[:space:]]|$)' "$cfg"; then
+    cat >> "$cfg" <<'EOF_HTTPS_FRONT'
+
+frontend https_front
+    bind *:443
+    mode tcp
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+EOF_HTTPS_FRONT
+  fi
+}
+
+insert_frontend_rule() {
+  frontend="$1"
+  rule="$2"
+  if ! grep -Fqx "$rule" "$cfg"; then
+    sed -i "/^frontend[[:space:]]\+${frontend}[[:space:]]*$/a\\${rule}" "$cfg"
+  fi
+}
+
+remove_domain_rule() {
+  frontend="$1"
+  match_text="$2"
+  awk -v frontend="$frontend" -v needle="$match_text" '
+    BEGIN { in_frontend=0 }
+    /^[^[:space:]#]/ {
+      if ($1 == "frontend" && $2 == frontend) in_frontend=1
+      else in_frontend=0
+    }
+    {
+      if (in_frontend && index($0, needle) > 0) next
+      print
+    }
+  ' "$cfg" > "$work"
+  cat "$work" > "$cfg"
+}
+
+safe_vm=${target_vm//[^A-Za-z0-9_]/_}
+safe_site=${website//[^A-Za-z0-9_]/_}
+
+if [[ "$proxy_mode" == "web" ]]; then
+  backend_name="oneclick_${proto}_${safe_vm}_${safe_site}"
+  remove_section backend "$backend_name"
+
+  if [[ "$proto" == "http" ]]; then
+    ensure_http_frontend
+    remove_domain_rule http_front "{ hdr(host) -i ${website} }"
+    insert_frontend_rule http_front "    use_backend ${backend_name} if { hdr(host) -i ${website} }"
+    cat >> "$cfg" <<EOF_HTTP_BACKEND
+
+backend ${backend_name}
+    mode http
+    balance roundrobin
+    server ${target_vm} ${vps_internal_ip}:${src_port} check
+EOF_HTTP_BACKEND
+  else
+    ensure_https_frontend
+    remove_domain_rule https_front "{ req.ssl_sni -i ${website} }"
+    insert_frontend_rule https_front "    use_backend ${backend_name} if { req.ssl_sni -i ${website} }"
+    cat >> "$cfg" <<EOF_HTTPS_BACKEND
+
+backend ${backend_name}
+    mode tcp
+    balance roundrobin
+    server ${target_vm} ${vps_internal_ip}:${src_port} check
+EOF_HTTPS_BACKEND
+  fi
+else
+  stream_name="tcp_stream_${safe_vm}_${dest_port}"
+  remove_section listen "$stream_name"
+  cat >> "$cfg" <<EOF_TCP_STREAM
+
+listen ${stream_name}
+    bind *:${dest_port}
+    mode tcp
+    balance roundrobin
+    server ${target_vm} ${vps_internal_ip}:${src_port} check
+EOF_TCP_STREAM
+fi
+apply_firewall_rule() {
+  port="$1"
+  source /etc/os-release 2>/dev/null || true
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -N ONE-CLICK-FLEET 2>/dev/null || true
+    iptables -C ONE-CLICK-FLEET -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
+      iptables -I ONE-CLICK-FLEET 1 -p tcp --dport "$port" -j ACCEPT
+  elif command -v nft >/dev/null 2>&1; then
+    nft add table ip filter 2>/dev/null || true
+    nft add chain ip filter ONE-CLICK-FLEET 2>/dev/null || true
+    if ! nft list chain ip filter ONE-CLICK-FLEET 2>/dev/null | grep -Fq "tcp dport $port accept"; then
+      nft insert rule ip filter ONE-CLICK-FLEET tcp dport "$port" accept
     fi
-    if haproxy -c -f /etc/haproxy/haproxy.cfg &>/dev/null; then
-      systemctl reload haproxy || systemctl restart haproxy
-    else
-      echo \"CRITICAL: HAProxy configuration syntax validation failure.\" >&2
-      exit 1
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1; then
+    if ! firewall-cmd --zone=public --query-port="${port}/tcp" --permanent >/dev/null 2>&1; then
+      firewall-cmd --zone=public --add-port="${port}/tcp" --permanent >/dev/null
+      firewall-cmd --reload >/dev/null || true
     fi
-  '"
+  fi
+}
+apply_firewall_rule "$public_port"
+if ! haproxy -c -f "$cfg"; then
+  echo "CRITICAL: HAProxy configuration syntax validation failure. Original configuration restored." >&2
+  exit 1
+fi
+if ! systemctl reload haproxy; then
+  systemctl restart haproxy
+fi
+commit=1
+rm -f "$backup" "$work"
+trap - EXIT
+REMOTE_HAPROXY
   local run_status=$?
-  rm -f "$local_tmp_payload"
   if [[ $run_status -ne 0 ]]; then
     error "Failed to successfully orchestrate proxy services on [$target_host]."
     return 1
   fi
-  if [[ "$src_port" -ne 3389 ]]; then
+  if [[ "$proxy_mode" == "tcp" && "$src_port" -ne 3389 ]]; then
     printf "$(tput setaf 173)[KEY] $(tput setaf 208)%s\n" \
       "┌─── SECURITY GATEWAY: TARGET TARGET ACCESS VERIFICATION ──────────┐" \
       "│$(tput sgr0) To bridge access, please create a key-pair on your endpoint using$(tput setaf 208)│" \
@@ -6536,10 +6689,9 @@ listen $stream_name
       "  $(tput setaf 11)──────────────────────────────────────────────────────────${reset}"
     if [[ -n "$website" ]]; then
       printf "$(tput setaf 103)[PROXY]${reset}%s\n" \
-	    "  ${orange}Proxy Type:${reset}             HTTP/HTTPS Reverse Proxy" \
-        "  ${orange}HTTP Public Domain:${reset}     ${cyan}http://$website${reset}  -> Port 80" \
-        "  ${orange}HTTPS Public Domain:${reset}    ${cyan}https://$website${reset} -> Port 443" \
-        "  ${orange}Forward Path:${reset}           $vps_internal_ip:${src_port:-80}"
+        "  ${orange}Proxy Type:${reset}             ${proto^^} Web Proxy" \
+        "  ${orange}Public Domain:${reset}          ${cyan}${proto}://$website${reset} -> Port $public_port" \
+        "  ${orange}Forward Path:${reset}           $vps_internal_ip:$src_port"
     else
       printf "$(tput setaf 103)[PROXY]${reset}%s\n" \
 	    "  ${orange}Proxy Type:${reset}      Raw TCP Stream Layer 4" \
@@ -6547,7 +6699,9 @@ listen $stream_name
         "  ${orange}Forward Path:${reset}    $vps_internal_ip -p $src_port"
     fi
 	echo -e "$(tput setaf 103)[PROXY]${reset}  $(tput setaf 11)──────────────────────────────────────────────────────────${reset}"
-	echo -e "$(tput setaf 103)[PROXY]${reset}  ${magenta}Access cmd:${reset}     ${cyan} ssh oneclick@$host_ip:$dest_port${reset}"
+    if [[ -z "$website" ]]; then
+      echo -e "$(tput setaf 103)[PROXY]${reset}  ${magenta}Access cmd:${reset}     ${cyan}ssh -p $dest_port oneclick@$host_ip${reset}"
+    fi
     echo -e "$(tput setaf 103)[PROXY]${reset}  ${green}──────────────────────────────────────────────────────────${reset}"
     success "Edge proxy configurations successfully synchronized on $target_host for $target_vm."
   else
@@ -6555,6 +6709,7 @@ listen $stream_name
     return 1
   fi
 }
+
 fleet_validate_hypervisor_resources() {
   local target_host="$1"
   local req_ram_mb="$2"
@@ -8747,6 +8902,7 @@ EOC
       "${cyan}Resource Profile:${reset}  $vps_cpu Cores / $vps_ram MB RAM / $disk_size Disk" \
       "${cyan}User Account:${reset}      oneclick" \
       "${cyan}Access Password:${reset}   $raw_password" \
+	  "${lime}Use${blue} one-click --ssh $vps_private_ip${lime} to connect to your peer" \
       "================================================================="
     success "Virtual private server $vps_name successfully spawned on target host: $target_host!"
     exit 0
@@ -10606,7 +10762,7 @@ fleet_vps_image_fetch() {
   local custom_name="${2:-}"
   local is_windows="${3:-}"
   local host="${4:-}"
-  local password="$5"
+  local password="${5:-}"
   local storage_dir="/etc/one-click/virtualization/images"
   mkdir -p "$storage_dir"
   local file_name
@@ -11600,7 +11756,7 @@ fleet_rule_engine_init() {
   for file in "$fleet_root"/state/*.conf; do
     [[ ! -f "$file" ]] && continue
     local peer_ip
-    peer_ip=$(grep '^IP=' "$file" | cut -d= -f2-)
+    peer_ip=$((grep '^IP=' "$file" | cut -d= -f2-) || true)
     [[ -n "$peer_ip" ]] && authorized_ips+=("$peer_ip")
   done
   [[ ${#authorized_ips[@]} -eq 0 ]] && authorized_ips+=("$CONTROLLER_IP")
