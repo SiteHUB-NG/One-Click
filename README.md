@@ -11,7 +11,7 @@ By abstracting complex Linux primitives into predictable, guided workflows, One-
 One-Click delivers streamlined workflows for essential system administration tasks:
 
 - **OS Reinstallation**
-- **Disk Migration**
+- **VPS Migration & Portability**
 - **Backup & Restore**
 - **Boot Recovery**
 - **Network Repair**
@@ -123,7 +123,6 @@ one-click [COMMAND]
 |--------------|-------------|
 | reinstall    | OS reinstallation module |
 | backup       | Backup and restore tool using rsync with optional rclone support |
-| migrator     | System migration tool supporting both rsync and dd modes |
 | recovery     | Boot partition backup and recovery tool (BIOS, UEFI, GRUB) |
 | repair       | Network repair module including configuration snapshot and restore |
 | bench        | One-Click Bench (OCB) performance benchmark suite |
@@ -162,10 +161,6 @@ one-click backup
 **Run OS reinstall module:**
 ```
 one-click reinstall
-```
-**Run migration tool:**
-```
-one-click migrator
 ```
 **Run recovery tool:**
 ```
@@ -222,6 +217,7 @@ Fleet operations include:
 - Remote file transfers
 - Site cloning and restoration
 - Fleet-wide updates
+- Fleet-to-Fleet VPS migration orchestration
 - Centralized firewall management
 
 ## Core Commands
@@ -266,7 +262,7 @@ Virtual machines can be provisioned locally or on remote hypervisors and immedia
 - Public IP deployments
 - Snapshot management
 - Backup management
-- Live migration
+- Safeguarded Fleet-to-Fleet VPS migration
 - Operating system reinstall
 - Patch management
 - Automatic fleet integration
@@ -275,7 +271,9 @@ Virtual machines can be provisioned locally or on remote hypervisors and immedia
 ```
 one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 2 --ram 4G --disk 40G --mode nat
 one-click --vps snapshot create --target web1 --name backup_v1
-one-click --vps migrate --target web1 --name <vm_name>
+one-click --vps migrate --target hypervisor2 --name <vm_name>
+one-click --vps import
+one-click --vps export --name <vm_name>
 one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>
 ```
 ## Available Operations
@@ -287,8 +285,128 @@ one-click --vps reinstall -n <name> -i <image> --password <password> -l <optiona
 - one-click --vps backup
 - one-click --vps patch
 - one-click --vps migrate
+- one-click --vps import
+- one-click --vps export --name <vm_name>
 - one-click --vps start
 - one-click --vps stop
+
+## VPS Migration & Portability
+
+One-Click now uses the VPS Engine for all supported migration workflows. There is no separate standalone migration tool.
+
+### Fleet-to-Fleet Migration
+
+```bash
+one-click --vps migrate --target <destination_hypervisor> --name <vm_name>
+```
+
+Fleet-to-Fleet migration moves the actual KVM virtual machine between trusted One-Click hypervisors.
+
+The workflow operates at the hypervisor layer rather than inside the guest operating system.
+
+Safeguards include:
+
+- Source and destination Fleet connectivity, sudo, libvirt, and rsync validation before any shutdown
+- Migration serialization to prevent overlapping Fleet VPS moves
+- Destination VM-name and storage-path collision checks before transfer
+- Discovery of the VM's real file-backed libvirt disks, attached media, and UEFI NVRAM
+- Refusal to silently migrate unsupported storage layouts or incomplete backing chains
+- Destination free-space validation before the source VM is stopped
+- Clean guest shutdown before disk synchronization
+- Destination-side staging instead of overwriting final VM paths during transfer
+- Transferred file-size validation before activation
+- Destination libvirt definition and boot validation before the virtualization inventory is changed
+- Fleet-key guest validation through the recorded cluster-private address when available
+- Automatic rollback before commit: incomplete destination assets are removed and the source VM is restarted with its previous autostart behavior restored
+- Inventory commit only after destination validation
+- The source VM is retained after success, shut down with autostart disabled, providing a rollback copy until the operator chooses to remove it
+
+Fleet-to-Fleet migration is the preferred path when both hypervisors are already trusted Fleet members and the goal is to move the existing VM itself.
+
+### Import an External VPS into Fleet
+
+```bash
+one-click --vps import
+```
+
+Import moves a complete supported Linux VPS into a newly provisioned One-Click Fleet VM.
+
+The source is inspected before the destination is built. One-Click records the source operating-system profile, architecture, hostname, CPU, memory, total disk size, and used capacity, then enters the normal VPS creation path to build a compatible replacement on the selected Fleet hypervisor.
+
+The replacement VM becomes the migration initiator and pulls the source over SSH.
+
+Import safeguards include:
+
+- Temporary bootstrap access used only to inspect and prepare the external source
+- Source inspection before replacement provisioning
+- Like-for-like operating-system/profile and architecture checks
+- Normal One-Click VPS create workflow for the replacement
+- Replacement-generated temporary pull identity
+- Permanent Fleet management keys mapped to source `oneclick` before transfer
+- Verification of replacement-to-source SSH, sudo, and rsync access
+- Removal of the temporary source bootstrap account before migration starts
+- Initial whole-system synchronization while the source remains online
+- Detected application and stateful services stopped only for the final synchronization
+- Destination boot, filesystem mount, network, SSH host, machine, WireGuard, Fleet, and virtualization identity preserved
+- Source users, groups, applications, services, and `oneclick` home migrated using numeric ownership without UID/GID remapping
+- `/etc/passwd`, `/etc/shadow`, `/etc/group`, and `/etc/gshadow` staged until final cutover
+- Final PAM synchronization before cutover
+- Staged account database swapped immediately before reboot rather than opening a new SSH session in a half-migrated userspace
+- Post-reboot Fleet-key validation
+- Source VPS retained for operator validation instead of being deleted automatically
+
+If migration fails after source application services have been stopped, One-Click attempts to restart those services automatically.
+
+After a successful import, source application services remain stopped to prevent split-brain until the replacement has been validated.
+
+Migration state is retained under:
+
+```text
+/etc/one-click/virtualization/migrations/<migration-id>/state.json
+```
+
+### Export a Fleet VPS to an External Replacement
+
+```bash
+one-click --vps export --name <vm_name>
+```
+
+Export is the reverse portability workflow. It moves a Fleet VPS into a fresh, compatible external Linux replacement while keeping the original Fleet VPS available for rollback and validation.
+
+The operator prepares the external replacement using the temporary bootstrap block generated by One-Click. The external replacement then pulls the Fleet source over SSH.
+
+Export safeguards include:
+
+- Fresh external replacement bootstrap using a temporary `ocmig_*` account
+- Like-for-like operating-system and architecture validation
+- External destination pulls the source rather than exposing a push-oriented source workflow
+- First whole-system synchronization while the Fleet source remains online
+- Application and stateful services stopped only for the final synchronization
+- External destination boot, network, SSH, and machine identity preserved
+- Source `oneclick` home and account ownership migrated naturally without UID/GID remapping
+- Source account database staged until cutover
+- Final PAM synchronization before account activation
+- Atomic staged account swap followed immediately by destination reboot
+- Post-reboot validation using the migrated source `oneclick` account
+- Permanent Fleet controller key validation before the temporary export key is removed
+- Temporary export key retained if the permanent key does not authenticate, preventing loss of the last known-good access path
+- Original Fleet VPS retained after success
+- Original application services left stopped after successful cutover to prevent split-brain
+
+The original Fleet VPS is not deleted automatically. Validate the external replacement first, then remove the old VPS through the normal Fleet VPS deletion workflow when ready.
+
+### Choosing the Correct Migration Path
+
+| Requirement | Command | Migration Layer |
+| :--- | :--- | :--- |
+| Move an existing KVM VM between trusted Fleet hypervisors | `one-click --vps migrate` | Hypervisor / VM artifact |
+| Bring an external Linux VPS into Fleet | `one-click --vps import` | Guest filesystem into a new Fleet replacement |
+| Move a Fleet Linux VPS to an external provider or host | `one-click --vps export --name <vm_name>` | Guest filesystem into a fresh external replacement |
+
+Fleet-to-Fleet migration moves the original virtual machine artifact.
+
+Import and export move the operating-system userspace and workload into a replacement machine while intentionally preserving destination-specific infrastructure identity.
+
 
 # One-Click Edge Proxy
 
@@ -930,69 +1048,6 @@ Other netboot-compatible images
 
 Each OS may include multiple version mappings resolved at runtime.
 
-## Migration & Backup Modes
-
-One-Click Migrator enables safe, automated, and reproducible server migrations across physical machines, virtual machines, and cloud environments.
-
-It supports both full-disk cloning and incremental file synchronization, with built-in recovery tooling and automated post-migration repair workflows.
-
-The tool is designed for reliability in production environments where downtime, consistency, and recoverability are critical.
-
-- Block-level disk cloning using dd
-- Incremental file synchronization via rsync
-- Profile-driven configuration management
-- Safe execution with dry-run validation
-- Cloud storage support via rclone
-- Snapshot-aware migration workflows
-- Fully automated non-interactive mode
-
-### Core Features
-#### Migration Modes:
-
-##### Block Level Cloning (dd)
-
-- Bit-for-bit disk replication
-- Preserves bootloader, partitions, and filesystem structure
-- Suitable for full system duplication
-
-##### File Level Synchronization (rsync)
-
-- Incremental, bandwidth-efficient transfers
-- Supports resume and partial sync
-- Ideal for live or staged migrations
-
-### Backup & Safety Mechanisms
-
-- Dry-run mode for validation before execution
-- Snapshot-aware workflows (where supported)
-- Pre-migration system state capture
-- Automatic backup of critical configuration files
-- Service state tracking and restoration
-
-### Recovery System
-
-- Embedded recovery environment generation
-- Custom initramfs-based rescue mode
-- Automated GRUB repair utilities
-- Post-migration filesystem repair scripts
-- Emergency SSH access via Dropbear in recovery mode
-
-### Designed For:
-
-- Hardware replacement
-- RAID rebuild workflows
-- VPS migrations
-- Provider transitions
-
-### Boot & Recovery Tooling
-
-- EFI remount automation
-- GRUB reinstall assistance
-- Boot partition backup
-- Recovery structure validation
-- Live-environment repair helpers
-
-Designed for systems that **fail to boot after disk or migration operations**.
 
 ## Network Repair Module
 
@@ -1526,8 +1581,8 @@ Users are strongly encouraged to:
 
 ### Operational Scope
 
-Certain modules (e.g., reinstall, migration, recovery) perform privileged
-operations including disk modification and bootloader changes.
+Certain modules (for example reinstall, VPS migration, and recovery) perform privileged
+operations including VM storage movement, disk modification, or bootloader changes.
 
 Security posture depends on:
 
@@ -1585,7 +1640,7 @@ One-Click is a modular toolkit.
 
 Not all modules perform low-level system operations.
 
-Certain tools — such as OS reinstallation, disk migration, or boot recovery — may perform operations including:
+Certain tools — such as OS reinstallation, VPS migration, or boot recovery — may perform operations including:
 
 - Disk manipulation
 - Bootloader modification
