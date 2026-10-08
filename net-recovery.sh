@@ -10,683 +10,511 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ========================== #================================================ #
-# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: Oct 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Network Repair ====
-network_select_option() {
-  mkdir -p "$backup_dir"
-  printf "${magenta}[NET REPAIR]${reset} %s\n" \
-    "Network repair is a tool that will attempt to fix and resolve network connectivity issues" \
-    "If it has had the opportunity to assess your environment before disaster, it will create snapshots and backups of your current configuration." \
-    " " "Outside of snapshots, it can only make intelligent guesses to fix a connectivity issue." \
-    " " "This tool ${red}DOES NOT${reset} guarantee that it will be able to fix your issue." " "
-  printf "${yellow}[${green}ONE-CLICK${yellow}]${reset} %s\n" \
-    "[1]. Health Check|Repair Network" \
-    "[2]. Backup Network Configs" \
-    "[3]. Capture state snapshot" \
-    "[4]. Display Backup Contents" \
-    "[5]. Display Snapshot Contents" \
-    "[6]. Restore Network Configs" \
-    "[7]. Configure cron for snapshots" \
-    "[0]. Exit"
-  read -rp "${cyan}[USER]${reset} Please select an option to proceed with: " repair_select
-}
-timestamp() { date +%Y%m%d-%H%M%S; }
-primary_iface() {
-  ip -o link show up | awk -F': ' '$2 != "lo" {print $2; exit}'
-}
-have_net() {
-  if [[ -n "$sys_ip" ]]; then
-    ping -c1 -W2 1.1.1.1 &>/dev/null
-  else
-    ping -6 -c1 -W2 2606:4700:4700::1111 &> /dev/null
-  fi
-}
-have_dns() {
-  getent hosts google.com &>/dev/null
-}
-backup_file() {
-  local file
-  file="${1:-}"
-  [[ -e "$file" ]] || return 0
-  mkdir -p ${backup_dir}/$(dirname "${file}")
-  if [[ -d "$file" ]]; then
-    rsync -aH --delete "$file/" "${backup_dir}/${file}/"
-  else
-    rsync -aH "$file" "${backup_dir}/${file}.bak.$(timestamp)"
-  fi
-}
-backup_all_configs() {
-  local error
-  error=()
-  non_interactive=${non_interactive:-0}
-  if ! have_net; then
-    die "Backup cannot be taken of a network that is not functional"
-  fi
-  if [[ -d "${backup_dir}.old/" ]]; then
-    rm -rf "${backup_dir}.old"/*
-  fi
-  if [[ -d "$backup_dir" ]]; then
-    info "Cleaning old backups in $backup_dir"
-    mkdir -p "${backup_dir}.old"
-    rsync -aH "$backup_dir/" "${backup_dir}.old/"
-    rm -rf "$backup_dir"/*
-  fi
-  if [[ ! -d "$backup_dir" ]]; then
-    mkdir -p "$backup_dir"
-  fi
-  ip a s > "$config_dir/ip_add_show.txt" || ip -6 a s > "$config_dir/ip6_add_show.txt"
-  ip r s > "$config_dir/ip_route_show.txt" || ip -6 r s > "$config_dir/ip6_route_show.txt"
-  ip rule show > "$config_dir/ip_rule_show.txt" || ip -6 rule s > "$config_dir/ip6_rule_show.txt"
-  if command -v resolvconf >/dev/null 2>&1; then
-    if resolvconf -l > "$config_dir/resolvconf_status.txt" &> /dev/null ; then
-      success "resolvconf status state successfully saved"
-    else
-      error "resolvconf status state could not be saved"
-      error+=(resolvconf)
-    fi
-  fi
-  if command -v resolvectl &> /dev/null; then
-    if type systemd-resolve; then
-      if resolvectl status > "$config_dir/resolvectl_status.txt" &> /dev/null; then
-        success "resolvectl status state successfully saved"
-      else
-        error "resolvectl status state could not be saved"
-        error+=(resolvctl)
-      fi
-    else
-      warn "systemd-resolve not available for resolvectl" "No config to back up"
-      error+=(systemd-resolve)
-    fi
-  else
-    warn "No resolvconf or resolvectl found."
-  fi
-  info "Backing up key configs..."
-  dirs=(
-    /etc/hosts
-    /etc/resolv.conf
-    /etc/hostname
-    /etc/sysctl.conf
-    /etc/sysctl.d/*.conf
-    "$config_dir/ip_add_show.txt"
-    "$config_dir/ip_route_show.txt"
-    "$config_dir/ip_rule_show.txt"
-    "$config_dir/resolvectl_status.txt"
-    /etc/NetworkManager/system-connections/
-    /etc/network/interfaces
-    /etc/netplan/*.yaml
-    /etc/sysconfig/network-scripts/ifcfg-\*
-    /etc/NetworkManager/NetworkManager.conf
-    /etc/iptables/rules.v4
-    /etc/systemd/resolved.conf
-  )
-  for dir in "${dirs[@]}"; do
-    backup_file "$dir" 2>/dev/null || true
-    if [[ -s "$dir" ]]; then
-      success "$dir has been backed up"
-    else
-      error+=("$dir")
+# One-Click Network Repair. This module is sourced by the existing parent script.
+# Intentional contract: menu cancellation/back => 0; a failed real operation => 1.
+# A failed health assessment communicates via skip_check / skip_reason and returns 0.
+net_repair_init() {
+  # The parent One-Click script also defines base_dir, config_dir, backup_dir.
+  # Never reuse them here: they belong to other hosting/migration modules.
+  net_repair_root="${net_repair_root:-/etc/one-click/network-repair}"
+  backup_dir="$net_repair_root/backups"
+  snaps_dir="$net_repair_root/snapshots"
+  config_dir="$net_repair_root/config"
+  service_restore="$snaps_dir/service-restore.txt"
+  local p
+  for p in "$net_repair_root" "$backup_dir" "$snaps_dir" "$config_dir"; do
+    if [[ "$p" != /* || "$p" == / || "/$p/" == *'/../'* || "$p" == /etc || "$p" == /var || "$p" == /usr ]]; then
+      printf '[ERROR] Unsafe network-repair storage path: %s\n' "$p" >&2
+      return 1
     fi
   done
-  echo
-  success "${yellow}[${reset}Backup has been successful${yellow}]${reset}"
-  if [[ "${#error[@]}" -gt 0 ]]; then
-    error "The following failed to backup or are not available: "
-    warn "${error[@]}"
-  fi
-  if (( ! non_interactive )); then
-    sleep 2
-    echo; echo
-  fi
+  mkdir -p -- "$net_repair_root" "$backup_dir/sets" "$snaps_dir/sets" "$config_dir" || return 1
+  chmod 700 "$backup_dir" "$backup_dir/sets" "$snaps_dir" "$snaps_dir/sets" "$config_dir" 2>/dev/null || return 1
 }
-snapshot_state() {
-  info "Creating snapshots"
-  > "$service_restore"
-  if systemctl is-active firewalld &>/dev/null; then
-    snap_firewalld="$snaps_dir/firewalld-state-$(timestamp).tar.gz"
-    firewall-cmd --runtime-to-permanent
-    state_snap=(
-      /etc/firewalld/firewalld.conf
-      /etc/firewalld
-      /etc/firewalld/firewalld.conf
-      /etc/firewalld/zones/*.xml
-      /etc/firewalld/services/*.xml
-      /etc/firewalld/direct.xml
-    )
-    success "Firewalld restore state added to $service_restore"
-    echo "firewalld $snap_firewalld" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_firewalld" "${existing[@]}" &>/dev/null
-  fi
-  if command -v nft &>/dev/null; then
-    nft list ruleset > "$snaps_dir"/nftables.state
-    snap_nft="$snaps_dir/nftables-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/nftables.conf
-      /etc/nftables.d/*.conf
-      /etc/sysconfig/nftables.conf
-      /etc/one-click/network-repair/snapshots/nftables.state
-    )
-    success "nf_tables restore state added to $service_restore"
-    echo "nft $snap_nft" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_nft" "${existing[@]}" &>/dev/null
-  fi
-  if command -v iptables &>/dev/null; then
-    iptables-save > "$snaps_dir"/iptables.state
-    snap_iptables="$snaps_dir/iptables-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/iptables/rules.v4
-      /etc/iptables/rules.v6
-      /etc/sysconfig/iptables
-      /etc/sysconfig/ip6tables
-      /etc/sysconfig/SuSEfirewall2
-      /etc/one-click/network-repair/snapshots/iptables.state
-    )
-    success "iptables restore state added to $service_restore"
-    echo "iptables $snap_iptables" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_iptables" "${existing[@]}" &>/dev/null
-  fi
-  if command -v ufw &>/dev/null && ufw status &>/dev/null; then
-    snap_ufw="$snaps_dir/ufw-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/ufw/ufw.conf
-      /etc/ufw/sysctl.conf
-      /etc/ufw/user.rules
-      /etc/ufw/user6.rules
-    )
-    success "ufw restore state added to $service_restore"
-    echo "ufw $snap_ufw" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_ufw" "${existing[@]}" &>/dev/null
-  fi
-  if command -v NetworkManager &>/dev/null; then
-    snap_NetworkManager="$snaps_dir/nm-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/NetworkManager/NetworkManager.conf
-      /etc/sysconfig/network
-      /etc/sysconfig/network-scripts/ifcfg-*
-      /etc/sysconfig/network-scripts/route-*
-      /etc/sysconfig/network-scripts/rule-*
-      /etc/NetworkManager/system-connections/*.nmconnection
-    )
-    success "NetworkManager restore state added to $service_restore"
-    echo "nm $snap_NetworkManager" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_NetworkManager" "${existing[@]}" &>/dev/null
-  fi
-  if command -v netplan &>/dev/null; then
-    snap_netplan="$snaps_dir/netplan-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/netplan/*.yaml
-    )
-    success "Netplan restore state added to $service_restore"
-    echo "netplan $snap_netplan" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_netplan" "${existing[@]}" &>/dev/null
-  fi
-  if command -v ifup &>/dev/null; then
-    snap_ifup="$snaps_dir/ifup-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/network/interfaces
-      /etc/network/interfaces.d/*.cfg
-    )
-    success "ifup restore state added to $service_restore"
-    echo "ifup $snap_ifup" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_ifup" "${existing[@]}" &>/dev/null
-  fi
-  if [[ -e "/etc/systemd/network/*.netdev" ]]; then
-    snap_networkd="$snaps_dir/networkd-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/systemd/network/*.network
-      /etc/systemd/network/*.netdev
-      /etc/systemd/network/*.link
-    )
-    success "netdev restore state added to $service_restore"
-    echo "netdev $snap_networkd" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_networkd" "${existing[@]}" &>/dev/null
-  fi
-  if [[ -e "/etc/sysconfig/network/" ]]; then
-    snap_wicked="$snaps_dir/rhel_network-state-$(timestamp).tar.gz"
-    state_snap=(
-      /etc/sysconfig/network/
-      /etc/sysconfig/network/ifcfg-*
-    )
-    success "rhel_network restore state added to $service_restore"
-    echo "suse $snap_wicked" >> "$service_restore"
-    existing=()
-    for snap in "${state_snap[@]}"; do
-      [[ -e "$snap" ]] && existing+=("$snap")
-    done
-    [[ ${#existing[@]} -gt 0 ]] && tar czf "$snap_wicked" "${existing[@]}" &>/dev/null
-  fi
-}
-restore_backup() {
-  if [[ "${recovery_restore:-}" -ne 0 ]]; then
-    warn "This will automatically restore known working network configurations"
-    read -rp "${cyan}[USER]${reset} Please confirm you are happy to proceed [y|n]: " confirm_restore
-    confirm_restore=${confirm_restore,,}
-    [[ "$confirm_restore" != "y" && "$confirm_restore" != "yes" ]] && {
-      info "You have chosen not to proceed with the restore"
-      return 0
-    }
-  fi
-  echo "${red}[${cyan}[USER]${red}]${reset} The following option will change your current network configuration!"
-  read -rp "${cyan}[USER]${reset} Please confirm you would like to proceed with restoring the last known working network configuration [y|n]: " conf_restore
-  if [[ "$conf_restore" != "y" && "$conf_restore" != "Y" ]]; then
-    error "Restore Cancelled"
-    return
-  fi
-  info "Restoring backup configs and snapshots."
-  local found_backups=0
-  while IFS= read -r f; do
-    [[ -e "$f" ]] || continue
-    found_backups=1
-    rel="${f#$backup_dir/}"
-    orig="/${rel%.bak.*}"
-    mkdir -p "$(dirname "$orig")"
-    cp -a "$f" "$orig"
-    success "Restored $orig from backup"
-  done < <(find "$backup_dir" -type f -name "*.bak.*" 2>/dev/null)
-  if [[ -f "$service_restore" ]]; then
-    info "Service mapping file found. Restoring service snapshots."
-    while read -r map service_tar; do
-      [[ -z "$map" || -z "$service_tar" ]] && continue
-      if [[ ! -f "$service_tar" ]]; then
-        warn "Snapshot tarball missing: $service_tar"
-        continue
-      fi
-      case "$map" in
-        ufw)
-          tar -xzf "$service_tar" -C / && ufw reload
-          ;;
-        iptables)
-          # Restore the state file first if it exists
-          [[ -f "$snaps_dir/iptables.state" ]] && iptables-restore < "$snaps_dir/iptables.state"
-          tar -xzf "$service_tar" -C /
-          ;;
-        nft)
-          [[ -f "$snaps_dir/nftables.state" ]] && nft -f "$snaps_dir/nftables.state"
-          tar -xzf "$service_tar" -C /
-          ;;
-        firewalld)
-          tar -xzf "$service_tar" -C / && systemctl restart firewalld
-          ;;
-        nm)
-          tar -xzf "$service_tar" -C / && systemctl restart NetworkManager
-          ;;
-        netplan)
-          tar -xzf "$service_tar" -C / && netplan generate && netplan apply
-          ;;
-        ifup)
-          tar -xzf "$service_tar" -C / && (systemctl restart networking || { ifdown -a; ifup -a; })
-          ;;
-        suse)
-          tar -xzf "$service_tar" -C / && systemctl restart wicked
-          ;;
-        netdev)
-          tar -xzf "$service_tar" -C / && systemctl restart systemd-networkd
-          ;;
-      esac
-      success "Service [$map] restored and reloaded"
-    done < "$service_restore"
-  else
-    warn "No service snapshot mapping file found at $service_restore"
-  fi
 
-  if [[ $found_backups -eq 0 && ! -f "$service_restore" ]]; then
-    error "No backups or snapshots available to restore."
+net_note() { printf '[INFO] %s\n' "$*"; }
+net_warn() { printf '[WARN] %s\n' "$*" >&2; }
+net_fail() { printf '[ERROR] %s\n' "$*" >&2; }
+net_yes() {
+  local answer
+  read -r -p "${1} [y/N]: " answer || return 1
+  case "${answer,,}" in y|yes) return 0;; *) return 1;; esac
+}
+# Extra opt-in, independent from the restore confirmation.
+net_console_authorized() {
+  local answer
+  net_warn 'This can interrupt SSH or change active network/firewall state.'
+  net_warn 'Use ONLY with verified out-of-band/console access and a recovery plan.'
+  read -r -p 'Type CONSOLE to confirm independent recovery access: ' answer || return 1
+  [[ "$answer" == CONSOLE ]]
+}
+net_id() { date -u +%Y%m%dT%H%M%S-%N; }
+
+timestamp() { date +%Y%m%d-%H%M%S; }
+network_select_option() {
+  printf '%s\n' \
+    'NETWORK REPAIR | Please verify backup and console access before restoring' \
+    '[1]. Health Check / Repair Network' \
+    '[2]. Backup Network Configs' \
+    '[3]. Capture State Snapshot' \
+    '[4]. Display Backup Contents' \
+    '[5]. Display Snapshot Contents' \
+    '[6]. Restore Network Configs' \
+    '[7]. Configure cron for snapshots' \
+    '[0]. Back'
+  read -r -p '[USER] Select an option: ' repair_select
+}
+primary_iface() {
+  local route
+  route="$(ip -4 route show default 2>/dev/null | head -n 1)"
+  if [[ " $route " =~ [[:space:]]dev[[:space:]]([^[:space:]]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {sub(/@.*/, "", $2);print $2;exit}'
+}
+have_dns() {
+  getent ahostsv4 cloudflare.com >/dev/null 2>&1 || getent hosts example.com >/dev/null 2>&1
+}
+net_ipv4_probe() {
+  ping -4 -c1 -W2 1.1.1.1 >/dev/null 2>&1 ||
+    { command -v curl >/dev/null 2>&1 && curl -4 -fsSI --connect-timeout 3 --max-time 5 https://1.1.1.1/ -o /dev/null >/dev/null 2>&1; }
+}
+net_ipv6_probe() {
+  ping -6 -c1 -W2 2606:4700:4700::1111 >/dev/null 2>&1
+}
+have_net() {
+  net_ipv4_probe || { ip -6 route show default 2>/dev/null | grep -q . && net_ipv6_probe; }
+}
+
+# Backup format: sets/<id>/{data,etc paths,manifest.tsv,SHA256SUMS,COMPLETE}.
+# Original directories (including NetworkManager connection profiles) remain directories.
+backup_file() {
+  local original="${1:-}" root="${net_backup_dest:-}" rel parent verify
+  [[ -n "$root" && "$original" == /etc/* ]] || return 1
+  [[ -e "$original" || -L "$original" ]] || return 0
+  rel="${original#/}"; parent="$(dirname -- "$rel")"
+  mkdir -p -- "$root/data/$parent" || return 1
+  rsync -aH -- "$original" "$root/data/$parent/" || return 1
+  verify="$(rsync -aHnci -- "$original" "$root/data/$parent/" 2>/dev/null)" || return 1
+  [[ -z "$verify" ]] || { net_fail "Verification differed: $original"; return 1; }
+  printf 'etc\t%s\n' "$rel" >> "$root/manifest.tsv"
+}
+net_hash_set() {
+  local set="$1"
+  ( cd "$set/data" || exit 1
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
+  ) > "$set/SHA256SUMS" || return 1
+  (cd "$set/data" || exit 1
+   find . -type l -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' link; do
+     printf '%q	%q
+' "$link" "$(readlink -- "$link")"
+   done
+  ) > "$set/SYMLINKS" || return 1
+  [[ -s "$set/manifest.tsv" && ( -s "$set/SHA256SUMS" || -s "$set/SYMLINKS" ) ]] || return 1
+}
+net_validate_set() {
+  local set="${1:-}" rel category count=0
+  [[ -d "$set/data/etc" && -f "$set/SHA256SUMS" && -f "$set/SYMLINKS" && -s "$set/manifest.tsv" && -f "$set/COMPLETE" ]] || return 1
+  [[ -s "$set/SHA256SUMS" || -s "$set/SYMLINKS" ]] || return 1
+  while IFS=$'\t' read -r category rel; do
+    [[ "$category" == etc && "$rel" == etc/* && "$rel" != *'..'* && "$rel" != /* ]] || return 1
+    [[ -e "$set/data/$rel" || -L "$set/data/$rel" ]] || return 1
+    count=$((count+1))
+  done < "$set/manifest.tsv"
+  (( count > 0 )) || return 1
+  if [[ -s "$set/SHA256SUMS" ]]; then
+    (cd "$set/data" && sha256sum -c --status ../SHA256SUMS) || return 1
+  fi
+  cmp -s -- "$set/SYMLINKS" <(
+    cd "$set/data" || exit 1
+    find . -type l -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' link; do
+      printf '%q	%q
+' "$link" "$(readlink -- "$link")"
+    done
+  ) || return 1
+}
+net_latest_set() {
+  local root="$1" target
+  [[ -L "$root/latest" ]] || return 1
+  target="$(readlink -f -- "$root/latest")" || return 1
+  [[ "$target" == "$root/sets/"* && -d "$target" ]] || return 1
+  printf '%s\n' "$target"
+}
+net_publish_set() {
+  local root="$1" set="$2" link="$root/.latest.$$"
+  ln -s -- "sets/$(basename -- "$set")" "$link" || return 1
+  mv -Tf -- "$link" "$root/latest" || { rm -f -- "$link"; return 1; }
+}
+backup_all_configs() (
+  umask 077
+  local new root id item copied=0 failed=0
+  local -a sources=(
+    /etc/hosts /etc/resolv.conf /etc/hostname
+    /etc/sysctl.conf /etc/sysctl.d
+    /etc/NetworkManager
+    /etc/network /etc/netplan /etc/sysconfig/network /etc/sysconfig/network-scripts
+    /etc/iptables /etc/nftables.conf /etc/nftables.d /etc/sysconfig/nftables.conf
+    /etc/systemd/resolved.conf /etc/systemd/network /etc/ufw /etc/firewalld
+  )
+  net_repair_init || return 1
+  root="$backup_dir"
+  id="$(net_id)-$$"
+  new="$root/sets/$id"
+  mkdir -m 700 -p -- "$new/data" || return 1
+  : > "$new/manifest.tsv" || return 1
+  net_backup_dest="$new"
+  for item in "${sources[@]}"; do
+    [[ -e "$item" || -L "$item" ]] || continue
+    if backup_file "$item"; then copied=$((copied+1)); else failed=$((failed+1)); net_fail "Backup failed: $item"; fi
+  done
+  unset net_backup_dest
+  if (( failed > 0 || copied == 0 )) || ! net_hash_set "$new"; then
+    net_fail "Incomplete backup kept for examination: $new (previous latest unchanged)"
+    return 1
+  fi
+  # Diagnostic commands do not alter network state and must not invalidate a good config set.
+  mkdir -p -- "$new/diagnostics"
+  ip -4 address show > "$new/diagnostics/ip4-address.txt" 2>/dev/null || true
+  ip -6 address show > "$new/diagnostics/ip6-address.txt" 2>/dev/null || true
+  ip -4 route show > "$new/diagnostics/ip4-route.txt" 2>/dev/null || true
+  ip -6 route show > "$new/diagnostics/ip6-route.txt" 2>/dev/null || true
+  ip rule show > "$new/diagnostics/ip-rule.txt" 2>/dev/null || true
+  command -v resolvconf >/dev/null 2>&1 && resolvconf -l > "$new/diagnostics/resolvconf.txt" 2>/dev/null || true
+  command -v resolvectl >/dev/null 2>&1 && resolvectl status > "$new/diagnostics/resolvectl.txt" 2>/dev/null || true
+  : > "$new/COMPLETE"
+  if ! net_validate_set "$new" || ! net_publish_set "$root" "$new"; then
+    net_fail "Backup verification/publish failed; previous latest is untouched: $new"
+    return 1
+  fi
+  net_note "Verified network backup: $new"
+  return 0
+)
+
+# Source-driven snapshot archives: never apply firewall rules while capturing.
+net_snap_component() {
+  local set="$1" component="$2"; shift 2
+  local src existing=() rel=() candidate archive
+  for candidate in "$@"; do
+    [[ -e "$candidate" || -L "$candidate" ]] && existing+=("$candidate")
+  done
+  (( ${#existing[@]} )) || return 0
+  for src in "${existing[@]}"; do
+    [[ "$src" == /etc/* ]] || return 1
+    rel+=("${src#/}")
+  done
+  archive="$set/archives/$component.tar.gz"
+  tar -C / -czf "$archive" -- "${rel[@]}" 2>/dev/null || return 1
+  tar -tzf "$archive" >/dev/null 2>&1 || return 1
+  sha256sum "$archive" | awk '{print $1}' > "$archive.sha256" || return 1
+  printf '%s\t%s\n' "$component" "archives/$component.tar.gz" >> "$set/manifest.tsv"
+}
+net_validate_archive() {
+  local archive="$1" entry hash
+  [[ -f "$archive" && -f "$archive.sha256" ]] || return 1
+  hash="$(sha256sum "$archive" | awk '{print $1}')" || return 1
+  [[ "$hash" == "$(cat "$archive.sha256")" ]] || return 1
+  while IFS= read -r entry; do
+    [[ "$entry" == etc/* && "$entry" != *'..'* && "$entry" != /* ]] || return 1
+  done < <(tar -tzf "$archive")
+  tar -tzf "$archive" >/dev/null 2>&1
+}
+net_validate_snapshot() {
+  local set="$1" component rel found=0
+  [[ -f "$set/COMPLETE" && -s "$set/manifest.tsv" ]] || return 1
+  while IFS=$'\t' read -r component rel; do
+    case "$component" in firewalld|nft|iptables|ufw|nm|netplan|ifup|networkd|suse) ;; *) return 1;; esac
+    [[ "$rel" == "archives/$component.tar.gz" ]] || return 1
+    net_validate_archive "$set/$rel" || return 1
+    found=$((found+1))
+  done < "$set/manifest.tsv"
+  (( found > 0 ))
+}
+snapshot_state() (
+  umask 077
+  local id set root failed=0
+  net_repair_init || return 1
+  root="$snaps_dir"; id="$(net_id)-$$"; set="$root/sets/$id"
+  mkdir -m 700 -p -- "$set/archives" "$set/state" || return 1
+  : > "$set/manifest.tsv"
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    net_snap_component "$set" firewalld /etc/firewalld || failed=1
+    command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --list-all-zones > "$set/state/firewalld-runtime.txt" 2>/dev/null || true
+  fi
+  if command -v nft >/dev/null 2>&1; then
+    net_snap_component "$set" nft /etc/nftables.conf /etc/nftables.d /etc/sysconfig/nftables.conf || failed=1
+    nft list ruleset > "$set/state/nftables.rules" 2>/dev/null || true
+  fi
+  if command -v iptables-save >/dev/null 2>&1; then
+    net_snap_component "$set" iptables /etc/iptables /etc/sysconfig/iptables /etc/sysconfig/ip6tables || failed=1
+    iptables-save > "$set/state/iptables.v4" 2>/dev/null || true
+    command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > "$set/state/iptables.v6" 2>/dev/null || true
+  fi
+  if command -v ufw >/dev/null 2>&1; then
+    net_snap_component "$set" ufw /etc/ufw || failed=1
+  fi
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    net_snap_component "$set" nm /etc/NetworkManager /etc/sysconfig/network-scripts || failed=1
+  fi
+  if command -v netplan >/dev/null 2>&1; then
+    net_snap_component "$set" netplan /etc/netplan || failed=1
+  fi
+  if command -v ifup >/dev/null 2>&1; then
+    net_snap_component "$set" ifup /etc/network || failed=1
+  fi
+  if systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+    net_snap_component "$set" networkd /etc/systemd/network || failed=1
+  fi
+  if systemctl is-active --quiet wicked 2>/dev/null; then
+    net_snap_component "$set" suse /etc/sysconfig/network || failed=1
+  fi
+  if (( failed > 0 )) || [[ ! -s "$set/manifest.tsv" ]]; then
+    net_fail "Snapshot incomplete (previous snapshot preserved): $set"
+    return 1
+  fi
+  : > "$set/COMPLETE"
+  net_validate_snapshot "$set" && net_publish_set "$root" "$set" || {
+    net_fail "Snapshot validation failed; previous latest is unchanged: $set"
+    return 1
+  }
+  net_note "Read-only network/firewall snapshot verified: $set"
+  return 0
+)
+
+# Restore only a validated set made by this module. Avoid --delete on destination.
+net_restore_copy_set() {
+  local set="$1" category rel saved failed=0
+  while IFS=$'\t' read -r category rel; do
+    [[ "$category" == etc && "$rel" == etc/* && "$rel" != *'..'* ]] || return 1
+    saved="$set/data/$rel"
+    mkdir -p -- "/$(dirname "$rel")" || { failed=1; continue; }
+    if [[ -d "$saved" && ! -L "$saved" ]]; then
+      mkdir -p -- "/$rel" || { failed=1; continue; }
+      rsync -aH -- "$saved/" "/$rel/" || failed=1
+    else
+      cp -a --remove-destination -- "$saved" "/$rel" || failed=1
+    fi
+  done < "$set/manifest.tsv"
+  (( failed == 0 ))
+}
+net_restore_snapfiles() {
+  local set="$1" component rel
+  while IFS=$'\t' read -r component rel; do
+    net_validate_archive "$set/$rel" || return 1
+    tar -xzf "$set/$rel" -C / || return 1
+  done < "$set/manifest.tsv"
+}
+net_apply_services() {
+  local manager choice
+  net_warn 'Configuration files restored. Active services have NOT been reloaded.'
+  printf '%s\n' 'Choose ONE manager only; leave the rest untouched:' \
+    '[0] Do not apply (recommended over SSH)' \
+    '[1] NetworkManager' '[2] systemd-networkd' '[3] netplan' \
+    '[4] ifupdown networking' '[5] wicked' '[6] firewalld'
+  read -r -p 'Manager to apply [0]: ' choice || return 0
+  [[ "$choice" == [1-6] ]] || return 0
+  net_console_authorized || { net_warn 'Active configuration left unchanged.'; return 0; }
+  net_yes "Apply selected manager $choice now?" || return 0
+  case "$choice" in
+    1) systemctl restart NetworkManager ;;
+    2) systemctl restart systemd-networkd ;;
+    3) netplan generate && netplan apply ;;
+    4) systemctl restart networking ;;
+    5) systemctl restart wicked ;;
+    6) systemctl restart firewalld ;;
+  esac
+}
+restore_backup() (
+  umask 077
+  local rollback_set="" source_kind source_set reply root idx i
+  local -a sets=()
+  net_repair_init || return 1
+  printf '%s\n' '[1] Restore a versioned configuration backup' '[2] Restore a versioned snapshot' '[0] Cancel'
+  read -r -p 'Choose recovery source: ' reply || return 0
+  case "$reply" in
+    0|'') return 0 ;;
+    1) source_kind=config; root="$backup_dir" ;;
+    2) source_kind=snapshot; root="$snaps_dir" ;;
+    *) net_warn 'Invalid restore selection'; return 0 ;;
+  esac
+  mapfile -t sets < <(find "$root/sets" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort -r)
+  (( ${#sets[@]} )) || { net_fail 'No versioned recovery sets exist'; return 1; }
+  printf '%s\n' 'Available recovery sets (newest first):'
+  for (( i=0; i<${#sets[@]}; i++ )); do printf '[%d] %s\n' "$((i+1))" "${sets[i]}"; done
+  printf '[0] Cancel\n'
+  read -r -p 'Choose recovery set: ' reply || return 0
+  [[ "$reply" =~ ^[0-9]+$ ]] || { net_warn 'Invalid set number'; return 0; }
+  idx=$((10#$reply))
+  (( idx > 0 )) || return 0
+  (( idx <= ${#sets[@]} )) || { net_warn 'Set number out of range'; return 0; }
+  source_set="$root/sets/${sets[idx-1]}"
+  if [[ "$source_kind" == config ]]; then net_validate_set "$source_set" || { net_fail 'Backup integrity check failed'; return 1; }
+  else net_validate_snapshot "$source_set" || { net_fail 'Snapshot integrity check failed'; return 1; }; fi
+  net_warn "Restoring $source_kind from $source_set writes to /etc. No services will restart automatically."
+  net_yes 'Restore these configuration files?' || return 0
+  # Independent safety copy, even when offline, before touching /etc.
+  backup_all_configs || { net_fail 'Safety backup failed; restore not started'; return 1; }
+  rollback_set="$(net_latest_set "$backup_dir")" || return 1
+  if [[ "$source_kind" == config ]]; then
+    if ! net_restore_copy_set "$source_set"; then
+      net_fail "Restore failed. Attempting local configuration rollback using $rollback_set"
+      net_restore_copy_set "$rollback_set" || net_fail 'Rollback incomplete. Console recovery may be required.'
+      return 1
+    fi
   else
-    success "${yellow}[${reset}Restore process complete${yellow}]${reset}"
+    if ! net_restore_snapfiles "$source_set"; then
+      net_fail "Snapshot restore failed. Attempting local configuration rollback using $rollback_set"
+      net_restore_copy_set "$rollback_set" || net_fail 'Rollback incomplete. Console recovery may be required.'
+      return 1
+    fi
+  fi
+  net_note "Restored configuration files. Safety backup: $rollback_set"
+  # Runtime firewall state deliberately NOT replayed. A snapshot is not a firewall activation plan.
+  net_warn 'Runtime firewall snapshots are diagnostic only; no live firewall changes were applied.'
+  if ! net_apply_services; then
+    net_fail 'Selected manager failed to apply. Restoring pre-operation config files.'
+    net_restore_copy_set "$rollback_set" || net_fail 'Rollback failed. Local console recovery required.'
+    net_warn 'Active daemon state might still differ from files on disk; no further restart attempted.'
+    return 1
+  fi
+  return 0
+)
+
+net_numeric_metric() {
+  local name="$1" value="$2"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%-16s %s\n' "$name:" "$value"
+  else
+    printf '%-16s %s\n' "$name:" 'Unavailable'
   fi
 }
 health_check() {
+  local iface route4 route6 address4 dns4=0 net4=0 net6=0 iface_ok=0
+  local counters rxerr txerr rxdrop txdrop gw4 gw6
+  local -a reasons=()
+  skip_reason=()
   skip_check=0
-  out=$(ip -s link show "$nic" 2> /dev/null)
-  if [[ -n "$sys_ip" ]]; then
-    isp=$(curl -s http://ip-api.com/line?fields=isp,org,as,query)
+  iface="$(primary_iface 2>/dev/null)"
+  if [[ -z "$iface" && -n "${nic:-}" ]] && ip link show "$nic" >/dev/null 2>&1; then iface="$nic"; fi
+  route4="$(ip -4 route show default 2>/dev/null | head -n 1)"
+  route6="$(ip -6 route show default 2>/dev/null | head -n 1)"
+  if [[ -n "$iface" ]] && ip -o link show "$iface" 2>/dev/null | grep -qw UP; then
+    iface_ok=1
   else
-    isp=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
-    isp2=$(jq -r '.network.autonomous_system.organization' <<< "$api_response")
-    isp3="AS$(jq -r '.network.autonomous_system.asn' <<< $api_response)"
-    isp4=$(jq -r '.network.cidr' <<< $api_response)
+    reasons+=('INTERFACE_DOWN_OR_MISSING')
   fi
-  dns_time=$(awk '/Query time/{print $4}' <(dig google.com))
-  if command -v netstat &> /dev/null; then
-    retrans=$(awk '/segments retransmitted/{print $1}' <(netstat -s))
-  elif command -v nstat &> /dev/null; then
-    retrans=$(awk 'NR==2 {print $2}' <(nstat -az TcpRetransSegs))
+  [[ -n "$route4" || -n "$route6" ]] || reasons+=('ROUTE')
+  if have_dns; then dns4=1; else reasons+=('DNS'); fi
+  if net_ipv4_probe; then net4=1; fi
+  if [[ -n "$route6" ]] && net_ipv6_probe; then net6=1; fi
+  if (( net4 == 0 && net6 == 0 )); then
+    # External failure can also be an ICMP/HTTPS policy. Never use it alone to justify disruption.
+    reasons+=('EXTERNAL_CONNECTIVITY_UNCONFIRMED')
   fi
-  gw=$(awk '/default/{print $3}' <(ip r))
-  dev=$(awk '/default/{print $5}' <(ip r))
-  gw6=$(awk '/default/{print $3}' <(ip -6 r))
-  dev6=$(awk '/default/{print $5}' <(ip -6 r))
-  next_6_hop=$(awk -v gw="$gw6" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev6") | head -n 1)
-  next_hop=$(awk -v gw="$gw" '$0 ~ gw {print $1 " [" $3 "]"}' <(ip neighbor show dev "$dev"))
-  rx_error=$(awk '/RX:/{getline; print $3}' <<< "$out")
-  rx_dropped=$(awk '/RX/{getline; print $4}' <<< "$out")
-  tx_dropped=$(awk '/TX/{getline; print $4}' <<< "$out")
-  tx_error=$(awk '/TX:/{getline; print $3}' <<< "$out")
-  if [[ -n "$sys_ip" ]]; then
-    int=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+  skip_reason=("${reasons[@]}")
+  if (( ${#reasons[@]} > 0 )); then skip_check=1; fi
+  printf '\n=== NETWORK HEALTH ASSESSMENT ===\n'
+  printf 'Interface: %s\n' "${iface:-not detected}"
+  printf 'Default IPv4 route: %s\nDefault IPv6 route: %s\n' "${route4:-none}" "${route6:-none}"
+  printf 'DNS resolution: %s\nExternal IPv4: %s\nExternal IPv6: %s\n' \
+    "$( (( dns4 )) && echo PASS || echo FAIL)" \
+    "$( (( net4 )) && echo REACHABLE || echo UNCONFIRMED)" \
+    "$( (( net6 )) && echo REACHABLE || echo 'UNAVAILABLE / NOT ROUTED')"
+  if (( iface_ok )); then
+    counters="$(ip -s link show "$iface" 2>/dev/null)"
+    rxerr="$(awk '$1=="RX:" {getline;print $3;exit}' <<< "$counters")"
+    rxdrop="$(awk '$1=="RX:" {getline;print $4;exit}' <<< "$counters")"
+    txerr="$(awk '$1=="TX:" {getline;print $3;exit}' <<< "$counters")"
+    txdrop="$(awk '$1=="TX:" {getline;print $4;exit}' <<< "$counters")"
+    net_numeric_metric RX-errors "$rxerr"
+    net_numeric_metric TX-errors "$txerr"
+    net_numeric_metric RX-dropped "$rxdrop"
+    net_numeric_metric TX-dropped "$txdrop"
+  fi
+  command -v ss >/dev/null 2>&1 && { printf '\nActive listening ports:\n'; ss -tulpn 2>/dev/null | head -n 16; }
+  printf '\nActive interfaces:\n'; ip -br link show 2>/dev/null || true
+  command -v wg >/dev/null 2>&1 && { printf '\nWireGuard interfaces:\n'; ip -br link show type wireguard 2>/dev/null || true; }
+  if (( skip_check )); then
+    net_warn "Assessment incomplete / problems detected: ${skip_reason[*]}"
   else
-    int=$(ip -6 route get 2001:4860:4860::8888 | awk '{print $5; exit}')
+    net_note 'External connectivity, route, interface and DNS checks passed.'
   fi
-  # ==== Detect WireGuard Interfaces ====
-  wg_ifaces=()
-  if command -v wg &>/dev/null; then
-    mapfile -t wg_ifaces < <(ip -br link show type wireguard 2>/dev/null | awk '{print $1}')
-  fi
-  # ==== Check & repair network ====
-  if ! have_dns; then
-    warn "Could not detect DNS"
-    info "DNS Failed. Trying alternate"
-    if getent hosts cloudflare.com &> /dev/null; then
-      success "DNS Detected"
-      skip_check=0
-    else
-      skip_check=1
-      skip_reason=( "DNS" )
-    fi
-  fi
-  if ! have_net; then
-    warn "Could not detect asymmetric connectivity"
-    info "Connectivity Failed. Trying alternate"
-    if have_dns; then
-      success "Connectivity Detected"
-      skip_check=0
-    else
-      skip_check=1
-      skip_reason+=( "NETWORK" )
-    fi
-  fi
-  warn \
-    "${yellow}╔════════════════════════════════════════════════════════════╗" \
-    "${yellow}║                    NETWORK HEALTH CHECK                    ║" \
-    "${yellow}╚════════════════════════════════════════════════════════════╝${reset}"
-
-  if [[ "${skip_check:-}" -eq 0 ]]; then
-    echo -e "\n● ${cyan}[INTERFACE: ${int}]${reset}"
-    echo -e "  ├─ Error Check: "
-    if [ "$rx_error" -gt 0 ]; then
-      echo -e "\e[31mFAIL\e[0m (RX: $rx_error errors)"
-    else
-      echo -e "\e[32mPASS\e[0m (RX: No errors)"
-    fi
-    if [ "$tx_error" -gt 0 ]; then
-      echo -e "\e[31mFAIL\e[0m (TX: $tx_error errors)"
-    else
-      echo -e "\e[32mPASS\e[0m (TX: No errors)"
-    fi
-    if [ "$rx_dropped" -gt 0 ]; then
-      echo -e "\e[31mFAIL\e[0m (RX: $rx_dropped drops)"
-    else
-      echo -e "\e[32mPASS\e[0m (RX No drops)"
-    fi
-    if [ "$tx_dropped" -gt 0 ]; then
-      echo -e "\e[31mFAIL\e[0m (TX: $tx_dropped drops)"
-    else
-      echo -e "\e[32mPASS\e[0m (TX: No drops)"
-    fi
-    echo -ne "  ├─ Path MTU (1500b): "
-    if ping -c 1 -M do -s 1472 8.8.8.8 &>/dev/null; then
-      echo -e "\e[32mOK\e[0m"
-    else
-      echo -e "\e[33mFRAGMENTED\e[0m (Standard MTU failing; check for 1450 or lower)"
-    fi
-    echo -ne "  ├─ DNS Response: "
-    if [ -z "$dns_time" ]; then
-      echo -e "\e[31mTIMEOUT\e[0m";
-    elif [ "$dns_time" -gt 100 ]; then
-      echo -e "\e[33mSLOW\e[0m (${dns_time}ms)";
-    else
-      echo -e "\e[32mFAST\e[0m (${dns_time}ms)";
-    fi
-    echo -ne "  └─ TCP Retransmit Rate: "
-    if [ "$retrans" -gt 5000 ]; then
-      echo -e "\e[33mHIGH\e[0m"
-    else
-      echo -e "\e[32mSTABLE\e[0m"
-    fi
-    echo -e "\n● ${cyan}[ACTIVE PORTS]${reset}"
-    awk '/LISTEN/{printf "  ├─ %-15s %s\n", $5, $7}' <(ss -tulpn) | sed '$s/├/└/'
-    echo -e "\n● ${cyan}[ACTIVE INTERFACES]${reset}"
-    awk '{printf "  ├─ %-10s %-10s %s\n", $1, $2, $3}' <(ip -br link show) | sed '$s/├/└/'
-    echo -e "\n● ${cyan}[GATEWAY & ROUTING]${reset}"
-    if [ -n "$gw" ]; then
-      echo "  ├─ Gateway:      $gw (via $dev)"
-      echo "  ├─ Next Hop/MAC: ${next_hop:-Local Gateway Reachable}"
-    fi
-    if [ -n "$gw6" ]; then
-      echo "  ├─ IPv6 Gateway: $gw6 (via $dev6)"
-      echo "  ├─ IPv6 NextHop: ${next_6_hop:-Local Gateway Reachable}"
-    else
-      echo "  ├─ IPv6 Gateway: Not Configured"
-    fi
-    if [[ ${#wg_ifaces[@]} -gt 0 ]]; then
-      echo "  ├─ WireGuard:    ${green}Active (${#wg_ifaces[@]} Interface(s))${reset}"
-      for wg_dev in "${wg_ifaces[@]}"; do
-        wg_ips=$(ip -br addr show dev "$wg_dev" 2>/dev/null | awk '{print $3}')
-        echo "  │  ├─ Interface: ${wg_dev} [IP: ${wg_ips:-N/A}]"
-      done
-    fi
-    echo "  └─ Routing Table: ${green}Active${reset}"
-    echo -e "\n● ${cyan}[ISP & PUBLIC IDENTITY]${reset}"
-    if [ $? -eq 0 ]; then
-      awk '
-        NR==1 {printf "  ├─ ISP:       %s\n", $0}
-        NR==2 {printf "  ├─ Org:       %s\n", $0}
-        NR==3 {printf "  ├─ AS Path:   %s\n", $0}
-        NR==4 {printf "  └─ PublicIP:  %s\n", $0}
-      ' <<< $(printf '%s\n' "$isp" "${isp2:-}" "${isp3:-}" "${isp4:-}")
-    else
-      echo "  └─ Error: Could not reach IP-API"
-    fi
-    echo -e "\n● ${cyan}[IPv6 CONNECTIVITY]${reset}"
-    if ping6 -c 1 google.com &>/dev/null; then
-      echo -e "  └─ Status: \e[32mONLINE\e[0m"
-    else
-      echo -e "  └─ Status: \e[31mOFFLINE/DISABLED\e[0m"
-    fi
-    echo
-    echo -e "\n● ${cyan}[NETWORK ASSESSMENT]${reset}"
-    success "${green}THE NETWORK IS HEALTHY${reset}"
-    echo
-    sleep 3
-    if [[ "${1:-}" == "menu" ]]; then
-      read -rp "${cyan}[USER]${reset} Press Enter to continue: "
-      return
-    fi
-    return 0
-  fi
-}
-repair() {
-  health_check
-  read -p "Would you like to backup the current network configurations? [y|n]: " config_net
-  if [[ "$config_net" == "y" || "$config_net" == "yes"  ]]; then
-    info "Preparing snapshots of the current configuration"
-    backup_all_configs
-    success "Backup of healthy network complete"
-  else
-    error "Network Config Backup Rejected"
-  fi
-  if [[ "$skip_check" -eq 0 ]]; then
-    return 0
-  fi
-  error "Network problem detected - attempting network repair"
-  if [[ -z "$skip_reason" ]]; then
-    printf "${yellow}[WARN] ${reset}Issue found with: %s\n" "${skip_reason[@]}"
-  fi
-  info "Attempting to diagnose the issue"
-  iface="$(primary_iface || true)"
-  if [[ -z "$iface" ]]; then
-    error "No interface detected"
-    info "[1/5]: Rescanning PCI Bus"
-    echo 1 > /sys/bus/pci/rescan
-    sleep 1
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-    warn "rescanning did not fix connectivity"
-    sleep 0.3
-    info "[2/5]: Reloading NIC drivers"
-    for mod in virtio_net e1000 e1000e igb ixgbe vmxnet3 r8169; do
-      modprobe -r "$mod" 2>/dev/null || true
-      modprobe "$mod" 2>/dev/null || true
-    done
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-    warn "Reloading of NIC drivers also did not restore connectivity"
-    sleep 0.3
-    info "[3/5]: Reloading Udev"
-    udevadm control --reload
-    udevadm trigger
-    sleep 2
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-    warn "Network still down after udev reload"
-    sleep 0.3
-    info "[4/5]: Checking for hidden interfaces"
-    if ip link show | grep -q "state DOWN"; then
-      ip link set up $(ip -o link show | awk -F': ' '{print $2}' | grep -v lo) || true
-    fi
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-    warn "No hidden interfaces found"
-    sleep 0.3
-    info "[5/5]: Forcefully trying to bring up the interface"
-    if systemctl is-enabled NetworkManager &>/dev/null; then
-      systemctl restart NetworkManager
-    elif systemctl is-enabled systemd-networkd &>/dev/null; then
-      systemctl restart systemd-networkd
-    fi
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-    error "All attempts to bring the network up have failed!"
-    die
-  fi
-  # ==== Bring interface up ====
-  info "Attempting to bring up interface $iface"
-  ip link set "$iface" up || true
-  sleep 2
-  if have_net; then
-    success "Connectivity has been restored"
-    exit 0
-  fi
-  # ==== Restore Snapshot ====
-  if ! ip -4 addr show "$iface" | grep -q inet; then
-    recovery_restore=1
-    restore_backup
-    if have_net; then
-      success "Connectivity has been restored"
-      exit 0
-    fi
-  fi
-  # ==== Ensure default route ====
-  if ! ip route | grep -q default; then
-    info "No default route available" "Configuring now."
-    ip route add default via "$sys_gw" dev "$nic" || true
-  fi
-  # ==== Restart if still no ping ====
-  if ! have_net; then
-    warn "Restarting interfaces"
-    if systemctl is-active NetworkManager &>/dev/null; then
-      systemctl restart NetworkManager
-    elif systemctl is-active systemd-networkd &>/dev/null; then
-      systemctl restart systemd-networkd
-    elif command -v service &>/dev/null; then
-      service networking restart || true
-    fi
-    sleep 5
-  fi
-  # ==== Reset DNS ====
-  if have_net && ! have_dns; then
-    warn "DNS is broken - restoring resolv.conf"
-    cat >/etc/resolv.conf <<EOF
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-EOF
-  fi
-  # ==== Network? ====
-  if have_net && have_dns; then
-    success "Network is active"
-  else
-    warn "Unable to bring the network up."
-  fi
-  echo "=== Network Repair finished ==="
+  [[ "${1:-}" == menu ]] && { read -r -p 'Press Enter to continue: ' || true; }
   return 0
 }
-fix_network() {
-  header_notice "$net_repair_title" "$net_repair_banner" "18" "4"
-  # ==== User Selection: DD or Rsync? ====
-  mkdir -p "$base_dir" "$backup_dir" "$snaps_dir" "$config_dir"
-  info "=== Network Repair started: $(date +'%F') ==="
-  # =========== BEGIN NETWORK REPAIR ===============
+
+# No driver unload, unscoped udev triggers, DNS overwrite, or automatic daemon restarts.
+# Active changes require a fresh backup and an explicit confirmation.
+repair() {
+  local iface route4
+  health_check
+  (( skip_check )) || return 0
+  net_warn "Detected: ${skip_reason[*]}"
+  if net_yes 'Create an offline-capable safety backup before diagnostics/repair?'; then
+    backup_all_configs || { net_fail 'Backup failed: no network changes will be attempted'; return 1; }
+  else
+    net_warn 'No backup: diagnostic-only mode. No configuration will be changed.'
+    return 0
+  fi
+  iface="$(primary_iface 2>/dev/null)"
+  if [[ -z "$iface" && -n "${nic:-}" ]] && ip link show "$nic" >/dev/null 2>&1; then iface="$nic"; fi
+  if [[ -z "$iface" ]]; then
+    net_fail 'No suitable NIC detected. PCI/driver operations require a local console and manual diagnosis.'
+    return 1
+  fi
+  if ! ip -o link show "$iface" 2>/dev/null | grep -q 'UP'; then
+    if net_yes "Bring only $iface up?"; then
+      ip link set dev "$iface" up || { net_fail 'Interface activation failed'; return 1; }
+    fi
+  fi
+  route4="$(ip -4 route show default 2>/dev/null | head -n 1)"
+  if [[ -z "$route4" && -n "${sys_gw:-}" ]]; then
+    net_warn "Missing IPv4 default route; proposed gateway $sys_gw on $iface."
+    if net_console_authorized && net_yes 'Add this default route?'; then
+      ip -4 route add default via "$sys_gw" dev "$iface" || net_fail 'Default route update failed'
+    fi
+  fi
+  if ! have_dns; then
+    net_warn 'DNS unresolved. Existing resolv.conf is preserved (may contain private resolvers).'
+    if command -v resolvectl >/dev/null 2>&1 && net_yes 'Flush systemd-resolved caches without changing configured DNS servers?'; then
+      resolvectl flush-caches || net_warn 'DNS cache flush failed'
+    fi
+  fi
+  health_check
+  if (( skip_check )); then
+    net_warn 'Connectivity is not fully verified; disruptive restarts and driver reloads were not attempted.'
+    return 1
+  fi
+  net_note 'Network health checks now pass.'
+  return 0
+}
+fix_network() (
+  net_repair_init || return 1
+  if declare -F header_notice >/dev/null 2>&1; then
+    header_notice "${net_repair_title:-Network Repair}" "${net_repair_banner:-}" "18" "4"
+  fi
   while true; do
-    network_select_option
+    network_select_option || return 0
     repair_select="${repair_select,,}"
     case "$repair_select" in
-      1) repair ;;
-      2)backup_all_configs                                    ;;
-      3)snapshot_state                                        ;;
-      4)
-        if [[ -z "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
-          warn "No backups found"
-        else
-          ls_table_all
-        fi
-        ;;
-      5)
-        if [[ -z "$(ls -A "$snaps_dir" 2>/dev/null)" ]]; then
-          warn "No snapshots found"
-        else
-          ls_table "$snaps_dir"
-        fi
-        ;;
-      6)restore_backup                                             ;;
-      7)install_cron "-x" "One-Click Network Repair Tool" "v"      ;;
-      0)( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0 ;;
-      *)warn "Invalid selection"                                   ;;
+      1) repair || net_warn 'Network recovery not confirmed' ;;
+      2) backup_all_configs || net_warn 'Backup failed' ;;
+      3) snapshot_state || net_warn 'Snapshot failed' ;;
+      4) if [[ -d "$backup_dir/sets" ]]; then ls -lah "$backup_dir/sets"; else net_warn 'No backups'; fi ;;
+      5) if [[ -d "$snaps_dir/sets" ]]; then ls -lah "$snaps_dir/sets"; else net_warn 'No snapshots'; fi ;;
+      6) restore_backup || net_warn 'Restore did not complete successfully' ;;
+      7) if declare -F install_cron >/dev/null 2>&1; then
+           install_cron '-x' 'One-Click Network Repair Tool' 'v' || net_warn 'Cron setup failed'
+         else net_warn 'Parent install_cron function is unavailable'; fi ;;
+      0) return 0 ;;
+      *) net_warn 'Invalid selection' ;;
     esac
-    echo
-    read -rp "${cyan}[USER]${reset} Press Enter to return to menu..."
-    clear
+    printf '\n'
+    read -r -p '[USER] Press Enter to return to menu...' || return 0
+    command -v clear >/dev/null 2>&1 && clear || true
   done
-}
+)
 # ==== End Of Network Repair ==== #
