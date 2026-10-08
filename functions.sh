@@ -6158,187 +6158,2832 @@ vps_vg_allocation() {
     info "Target block device /dev/${vg_name}/${vm_lv_name} already exists."
   fi
 }
-# ==== One-Click Fleet VPS Migration Engine ====
+# ==== One-Click Fleet To Fleet VPS Migration Engine ====
 fleet_vps_migrate() {
-  local target_vm="" dest_host=""
+  local dest_host="${1:-}" target_vm="${2:-}"
   local inventory_json="/etc/one-click/virtualization/inventory.json"
   local inventory_file="/etc/one-click/fleet/inventory.yml"
-  local dest_host="$1"
-  local target_vm="$2"
+  local migration_root="/etc/one-click/virtualization/migrations"
+  [[ -n "$dest_host" && -n "$target_vm" ]] || {
+    error "Usage: fleet_vps_migrate <destination-hypervisor> <vm-name>"
+    return 1
+  }
+  [[ "$target_vm" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    error "Invalid VM name '$target_vm'."
+    return 1
+  }
+  command -v jq >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 || {
+    error "Required migration tooling is unavailable on the controller."
+    return 1
+  }
+  [[ -s "$inventory_json" && -s "$inventory_file" ]] || {
+    error "Fleet or virtualization inventory is unavailable."
+    return 1
+  }
+  local lock_fd
+  exec {lock_fd}>/run/lock/one-click-vps-migrate.lock || return 1
+  flock -n "$lock_fd" || {
+    error "Another Fleet VPS migration is already running."
+    return 1
+  }
   local source_host vps_ip
-  source_host=$(jq -r ".[] | select(.name == \"$target_vm\") | .host" "$inventory_json" 2>/dev/null | head -1)
-  vps_ip=$(jq -r ".[] | select(.name == \"$target_vm\") | .cluster_private_ip" "$inventory_json" 2>/dev/null)
-  if [[ -z "$source_host" || "$source_host" == "null" ]]; then
+  source_host="$(jq -r --arg vm "$target_vm" '.[] | select(.name == $vm) | .host // empty' "$inventory_json" 2>/dev/null | head -1)"
+  vps_ip="$(jq -r --arg vm "$target_vm" '.[] | select(.name == $vm) | .cluster_private_ip // empty' "$inventory_json" 2>/dev/null | head -1)"
+  [[ -n "$source_host" ]] || {
     error "Target VM '$target_vm' could not be resolved to a valid source hypervisor."
     return 1
-  fi
-  if [[ "$source_host" == "$dest_host" ]]; then
+  }
+  [[ "$source_host" != "$dest_host" ]] || {
     error "Target VM '$target_vm' is already running on $dest_host."
     return 1
-  fi
-  info "Resolving routing paths for cluster nodes."
+  }
+  info "Resolving routing paths for Fleet hypervisors."
   local source_ip dest_ip
-  source_ip=$(ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' ansible-inventory -i "$inventory_file" --host "$source_host" 2> /dev/null | jq -r '.ansible_host // empty')
-  dest_ip=$(ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' ansible-inventory -i "$inventory_file" --host "$dest_host" 2> /dev/null | jq -r '.ansible_host // empty')
-  if [[ -z "$source_ip" || -z "$dest_ip" ]]; then
-    error "Network Resolution Fault: Could not map cluster host names to valid target IPs."
+  source_ip="$(ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' ansible-inventory -i "$inventory_file" --host "$source_host" 2>/dev/null | jq -r '.ansible_host // empty')"
+  dest_ip="$(ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' ansible-inventory -i "$inventory_file" --host "$dest_host" 2>/dev/null | jq -r '.ansible_host // empty')"
+  [[ -n "$source_ip" && -n "$dest_ip" ]] || {
+    error "Could not resolve both Fleet hypervisors."
     echo "Source [$source_host]: ${source_ip:-UNKNOWN}"
     echo "Destination [$dest_host]: ${dest_ip:-UNKNOWN}"
     return 1
-  fi
+  }
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
-  if [[ ! -f "$private_key" ]]; then
-    private_key="/home/oneclick/.ssh/id_ed25519"
-  fi
-  info "Begining migrating from $source_host ($source_ip) => $dest_host ($dest_ip)" \
-    "Extracting live instance XML definition blueprint structure."
-  local xml_blueprint
-  xml_blueprint=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh dumpxml $target_vm" 2>/dev/null)
-  if [[ -z "$xml_blueprint" || "$xml_blueprint" != *"<domain"* ]]; then
-    error "Critical Fault: Failed to capture valid KVM configuration blueprint metadata."
+  [[ -s "$private_key" ]] || private_key="/home/oneclick/.ssh/id_ed25519"
+  [[ -s "$private_key" ]] || {
+    error "No Fleet SSH private key is available."
+    return 1
+  }
+  local -a source_ssh=(ssh -i "$private_key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 "oneclick@${source_ip}")
+  local -a dest_ssh=(ssh -i "$private_key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 "oneclick@${dest_ip}")
+  info "Running source and destination hypervisor preflight checks."
+  "${source_ssh[@]}" 'sudo -n true && command -v virsh >/dev/null && command -v rsync >/dev/null' >/dev/null 2>&1 || {
+    error "Source hypervisor [$source_host] failed SSH/sudo/libvirt preflight."
+    return 1
+  }
+  "${dest_ssh[@]}" 'sudo -n true && command -v virsh >/dev/null && command -v rsync >/dev/null' >/dev/null 2>&1 || {
+    error "Destination hypervisor [$dest_host] failed SSH/sudo/libvirt preflight."
+    return 1
+  }
+  "${source_ssh[@]}" "sudo -n virsh dominfo '$target_vm' >/dev/null 2>&1" || {
+    error "VM '$target_vm' is not defined on source hypervisor [$source_host]."
+    return 1
+  }
+  if "${dest_ssh[@]}" "sudo -n virsh dominfo '$target_vm' >/dev/null 2>&1"; then
+    error "Destination hypervisor [$dest_host] already has a VM named '$target_vm'. Nothing was changed."
     return 1
   fi
-  local source_was_running=0
-  local source_state
-  source_state=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh domstate '$target_vm' 2>/dev/null" 2>/dev/null | tr -d '\r')
-  if [[ "$source_state" == "running" ]]; then
-    source_was_running=1
-    info "Stopping $target_vm cleanly on source hypervisor before disk synchronization."
-    if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh shutdown '$target_vm'" &>/dev/null; then
-      error "Failed to request a clean shutdown of $target_vm on source hypervisor [$source_host]."
+  local xml_blueprint asset_manifest
+  xml_blueprint="$("${source_ssh[@]}" "sudo -n virsh dumpxml '$target_vm'" 2>/dev/null)" || {
+    error "Failed to capture the source libvirt definition."
+    return 1
+  }
+  [[ "$xml_blueprint" == *"<domain"* ]] || {
+    error "Source libvirt definition is invalid."
+    return 1
+  }
+  if ! asset_manifest="$("${source_ssh[@]}" "sudo -n bash -s -- '$target_vm'" <<'ONECLICK_ASSET_DISCOVERY'
+set -e
+vm="$1"
+non_file="$(virsh domblklist "$vm" --details 2>/dev/null | awk '$2=="disk" && $1!="file" && $4!="-" {print $0}')"
+[[ -z "$non_file" ]] || exit 42
+virsh domblklist "$vm" --details 2>/dev/null | awk '$1=="file" && ($2=="disk" || $2=="cdrom") && $4!="-" {print $2 "|" $4}'
+nvram="$(virsh dumpxml "$vm" 2>/dev/null | sed -n 's:.*<nvram[^>]*>\([^<]*\)</nvram>.*:\1:p' | head -1)"
+[[ -z "$nvram" ]] || printf 'nvram|%s\n' "$nvram"
+ONECLICK_ASSET_DISCOVERY
+  )"; then
+    error "VM '$target_vm' uses a storage type that this safeguarded Fleet relocation cannot safely copy."
+    info "Only file-backed libvirt disks/media are accepted. Source was not changed."
+    return 1
+  fi
+  [[ -n "$asset_manifest" ]] || {
+    error "No file-backed VM storage assets were discovered for '$target_vm'."
+    return 1
+  }
+  local asset_type asset_path disk_count=0
+  while IFS='|' read -r asset_type asset_path; do
+    [[ -n "$asset_path" && "$asset_path" == /* ]] || {
+      error "Invalid storage path discovered for '$target_vm'."
       return 1
+    }
+    if [[ "$asset_type" == "disk" ]]; then
+      disk_count=$((disk_count + 1))
+      if "${source_ssh[@]}" "command -v qemu-img >/dev/null 2>&1 && sudo -n qemu-img info '$asset_path' 2>/dev/null | grep -q '^backing file:'"; then
+        error "Disk '$asset_path' uses a backing chain. Migration aborted rather than copy an incomplete chain."
+        return 1
+      fi
     fi
+  done <<< "$asset_manifest"
+  [[ "$disk_count" -gt 0 ]] || {
+    error "No VM disk was discovered for '$target_vm'."
+    return 1
+  }
+  local asset_b64
+  asset_b64="$(printf '%s\n' "$asset_manifest" | base64 -w0)"
+  if ! "${dest_ssh[@]}" "sudo -n bash -s -- '$asset_b64'" <<'ONECLICK_DEST_COLLISION'
+set -e
+manifest_b64="$1"
+while IFS='|' read -r kind path; do
+  [[ -n "$path" ]] || continue
+  if [[ -e "$path" ]]; then
+    printf 'collision:%s\n' "$path" >&2
+    exit 20
+  fi
+done < <(printf '%s' "$manifest_b64" | base64 -d)
+ONECLICK_DEST_COLLISION
+  then
+    error "Destination already contains one or more source VM storage paths. Nothing was overwritten."
+    return 1
+  fi
+  local total_bytes dest_free required_bytes
+  total_bytes="$("${source_ssh[@]}" "sudo -n bash -s -- '$asset_b64'" <<'ONECLICK_SOURCE_BYTES'
+set -e
+manifest_b64="$1"
+total=0
+while IFS='|' read -r kind path; do
+  [[ -n "$path" ]] || continue
+  size="$(stat -Lc '%s' "$path")"
+  total=$((total + size))
+done < <(printf '%s' "$manifest_b64" | base64 -d)
+printf '%s\n' "$total"
+ONECLICK_SOURCE_BYTES
+  )" || {
+    error "Unable to calculate source storage size."
+    return 1
+  }
+  dest_free="$("${dest_ssh[@]}" "df -PB1 /var/lib/libvirt/images 2>/dev/null | awk 'NR==2 {print \$4}'" 2>/dev/null)" || true
+  [[ "$total_bytes" =~ ^[0-9]+$ && "$dest_free" =~ ^[0-9]+$ ]] || {
+    error "Unable to verify destination storage capacity."
+    return 1
+  }
+  required_bytes=$((total_bytes + (total_bytes / 20) + 1073741824))
+  if (( dest_free < required_bytes )); then
+    error "Destination does not have enough free staging capacity."
+    printf 'Required: %s bytes\nAvailable: %s bytes\n' "$required_bytes" "$dest_free"
+    return 1
+  fi
+  local source_state source_was_running=0 source_autostart="disable"
+  source_state="$("${source_ssh[@]}" "sudo -n virsh domstate '$target_vm' 2>/dev/null" | tr -d '\r')" || {
+    error "Unable to read source VM state."
+    return 1
+  }
+  case "$source_state" in
+    running) source_was_running=1 ;;
+    "shut off") ;;
+    *)
+      error "Source VM is in unsupported state '$source_state'. Migration requires running or shut off."
+      return 1
+      ;;
+  esac
+  if "${source_ssh[@]}" "sudo -n virsh dominfo '$target_vm' 2>/dev/null | grep -Eq '^Autostart:[[:space:]]+enable'"; then
+    source_autostart="enable"
+  fi
+  local migration_id workspace state_file stage_dir
+  migration_id="$(date +%Y%m%d%H%M%S)-$(printf '%s' "$target_vm-$source_host-$dest_host" | sha256sum | cut -c1-8)"
+  workspace="${migration_root}/${migration_id}"
+  state_file="${workspace}/state.json"
+  stage_dir="/var/lib/libvirt/images/.one-click-migrate-${migration_id}"
+  install -d -m 700 "$workspace" || return 1
+  jq -n \
+    --arg id "$migration_id" \
+    --arg vm "$target_vm" \
+    --arg source_host "$source_host" \
+    --arg source_ip "$source_ip" \
+    --arg destination_host "$dest_host" \
+    --arg destination_ip "$dest_ip" \
+    --arg source_state "$source_state" \
+    --arg source_autostart "$source_autostart" \
+    --argjson source_was_running "$source_was_running" \
+    --arg stage_dir "$stage_dir" \
+    --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '{version:1,mode:"fleet",transport:"hypervisor",id:$id,vps_name:$vm,status:"prepared",started_at:$started,source:{host:$source_host,ip:$source_ip,state:$source_state,autostart:$source_autostart,was_running:($source_was_running==1)},destination:{host:$destination_host,ip:$destination_ip,stage_dir:$stage_dir},source_retained:true}' \
+    > "$state_file" || return 1
+  chmod 600 "$state_file"
+  printf '%s\n' "$xml_blueprint" > "${workspace}/source.xml"
+  chmod 600 "${workspace}/source.xml"
+  local rollback_needed=1
+  rollback_fleet_migration() {
+    warn "Rolling back incomplete Fleet VPS migration."
+    "${dest_ssh[@]}" "sudo -n bash -s -- '$target_vm' '$asset_b64' '$stage_dir'" <<'ONECLICK_DEST_ROLLBACK' >/dev/null 2>&1 || true
+set +e
+vm="$1"
+manifest_b64="$2"
+stage="$3"
+if virsh dominfo "$vm" >/dev/null 2>&1; then
+  virsh destroy "$vm" >/dev/null 2>&1 || true
+  virsh undefine "$vm" --nvram >/dev/null 2>&1 || virsh undefine "$vm" >/dev/null 2>&1 || true
+fi
+while IFS='|' read -r kind path; do
+  [[ -n "$path" ]] || continue
+  rm -f -- "$path"
+done < <(printf '%s' "$manifest_b64" | base64 -d)
+rm -rf -- "$stage"
+ONECLICK_DEST_ROLLBACK
+    if [[ "$source_autostart" == "enable" ]]; then
+      "${source_ssh[@]}" "sudo -n virsh autostart '$target_vm'" >/dev/null 2>&1 || true
+    fi
+    if [[ "$source_was_running" -eq 1 ]]; then
+      "${source_ssh[@]}" "sudo -n virsh start '$target_vm'" >/dev/null 2>&1 || true
+    fi
+    jq --arg failed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="failed" | .failed_at=$failed' "$state_file" > "${state_file}.tmp" 2>/dev/null &&
+      mv -f "${state_file}.tmp" "$state_file" || true
+  }
+  "${dest_ssh[@]}" "sudo -n install -d -m 700 '$stage_dir'" || {
+    rollback_fleet_migration
+    error "Unable to create destination staging area."
+    return 1
+  }
+  if [[ "$source_was_running" -eq 1 ]]; then
+    info "Stopping $target_vm cleanly on source hypervisor before disk synchronization."
+    "${source_ssh[@]}" "sudo -n virsh shutdown '$target_vm'" >/dev/null 2>&1 || {
+      rollback_fleet_migration
+      error "Failed to request a clean shutdown of '$target_vm'."
+      return 1
+    }
     local shutdown_wait=0
-    while [[ "$shutdown_wait" -lt 120 ]]; do
-      source_state=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh domstate '$target_vm' 2>/dev/null" 2>/dev/null | tr -d '\r')
+    while (( shutdown_wait < 120 )); do
+      source_state="$("${source_ssh[@]}" "sudo -n virsh domstate '$target_vm' 2>/dev/null" | tr -d '\r')" || true
       [[ "$source_state" == "shut off" ]] && break
       sleep 2
       shutdown_wait=$((shutdown_wait + 2))
     done
-    if [[ "$source_state" != "shut off" ]]; then
-      error "Source VM did not shut down within 120 seconds. Migration aborted before any source data was removed."
+    [[ "$source_state" == "shut off" ]] || {
+      rollback_fleet_migration
+      error "Source VM did not shut down within 120 seconds."
       return 1
-    fi
-  elif [[ "$source_state" != "shut off" ]]; then
-    error "Source VM is in unsupported state '$source_state'. Migration requires the VM to be running or shut off."
+    }
+  fi
+  "${source_ssh[@]}" "sudo -n virsh autostart '$target_vm' --disable" >/dev/null 2>&1 || true
+  jq --arg stopped "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="source_stopped" | .source_stopped_at=$stopped' "$state_file" > "${state_file}.tmp" &&
+    mv -f "${state_file}.tmp" "$state_file"
+  info "Replicating VM storage from $source_host ($source_ip) to $dest_host ($dest_ip)."
+  if ! "${source_ssh[@]}" "bash -s -- '$target_vm' '$dest_ip' '$stage_dir' '$asset_b64'" <<'ONECLICK_FLEET_TRANSFER'
+set -e
+vm="$1"
+dest_ip="$2"
+stage="$3"
+manifest_b64="$4"
+mapfile -t assets < <(printf '%s' "$manifest_b64" | base64 -d | cut -d'|' -f2-)
+rel_assets=()
+for path in "${assets[@]}"; do
+  rel_assets+=("/./${path#/}")
+done
+success=1
+for node_key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
+  [[ -s "$node_key" ]] || continue
+  if sudo -n rsync -aHAXS --numeric-ids --partial --info=progress2 --relative --rsync-path="sudo -n rsync" -e "ssh -i $node_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10" "${rel_assets[@]}" "oneclick@${dest_ip}:${stage}/"; then
+    success=0
+    break
+  fi
+done
+exit "$success"
+ONECLICK_FLEET_TRANSFER
+  then
+    rollback_fleet_migration
+    error "VM storage transfer failed. Source VM was retained and restored."
     return 1
   fi
-  info "Staging operational storage parameters on destination node."
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
-    mkdir -p /var/lib/libvirt/images
-    if ! mountpoint -q /var/lib/libvirt/images; then
-      mount /dev/one_click_vg/one_click_repo /var/lib/libvirt/images 2>/dev/null || true
+  info "Validating staged storage sizes before activation."
+  local verify_failed=0
+  while IFS='|' read -r asset_type asset_path; do
+    local source_size dest_size
+    source_size="$("${source_ssh[@]}" "sudo -n stat -Lc '%s' '$asset_path'" 2>/dev/null || true)"
+    dest_size="$("${dest_ssh[@]}" "sudo -n stat -Lc '%s' '$stage_dir/${asset_path#/}'" 2>/dev/null || true)"
+    if [[ ! "$source_size" =~ ^[0-9]+$ || "$source_size" != "$dest_size" ]]; then
+      error "Staged asset validation failed for '$asset_path'."
+      verify_failed=1
+      break
     fi
-    if lvs /dev/one_click_vg/one_click_pool &>/dev/null; then
-      lvextend -l +100%FREE /dev/one_click_vg/one_click_pool 2>/dev/null || true
-    fi
-    if lvs /dev/one_click_vg/one_click_repo &>/dev/null; then
-      lvextend -l +100%FREE -r /dev/one_click_vg/one_click_repo 2>/dev/null || true
-    fi
-    rm -f /tmp/${target_vm}.xml /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
-  '" &>/dev/null
-  echo "$xml_blueprint" | ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "cat > /tmp/${target_vm}.xml"
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo chown root:root /tmp/${target_vm}.xml && sudo chmod 600 /tmp/${target_vm}.xml" &>/dev/null
-  info "Replicating disk block to $dest_host ($dest_ip)." \
-    "[ $source_host ] => [ $dest_host ]"
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo chown oneclick:oneclick /var/lib/libvirt/images" &>/dev/null
-  ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "bash -s" << EOF
-    sync_success=1
-    for node_key in /home/oneclick/.ssh/id_ed25519 /etc/one-click/fleet/keys/id_ed25519; do
-      if [ ! -e "\$node_key" ]; then continue; fi
-      sudo rsync -avz --progress --no-implied-dirs \
-        -e "ssh -i \$node_key -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
-        --include="${target_vm}.qcow2" \
-        --include="${target_vm}_cloudinit.iso" \
-		--include="${target_vm}.*" \
-        --exclude="*" \
-        /var/lib/libvirt/images/ oneclick@${dest_ip}:/var/lib/libvirt/images/
-      if [ \$? -eq 0 ]; then
-        sync_success=0
+  done <<< "$asset_manifest"
+  if [[ "$verify_failed" -ne 0 ]]; then
+    rollback_fleet_migration
+    return 1
+  fi
+  local xml_b64
+  xml_b64="$(printf '%s' "$xml_blueprint" | base64 -w0)"
+  if ! "${dest_ssh[@]}" "sudo -n bash -s -- '$target_vm' '$stage_dir' '$asset_b64' '$xml_b64' '$source_autostart' '$source_was_running'" <<'ONECLICK_DEST_ACTIVATE'
+set -e
+vm="$1"
+stage="$2"
+manifest_b64="$3"
+xml_b64="$4"
+source_autostart="$5"
+source_was_running="$6"
+xml_file="$stage/domain.xml"
+printf '%s' "$xml_b64" | base64 -d > "$xml_file"
+grep -q '<domain' "$xml_file"
+qemu_user="root"
+qemu_group="root"
+if id libvirt-qemu >/dev/null 2>&1; then
+  qemu_user="libvirt-qemu"
+  qemu_group="$(id -gn libvirt-qemu)"
+elif id qemu >/dev/null 2>&1; then
+  qemu_user="qemu"
+  qemu_group="$(id -gn qemu)"
+fi
+while IFS='|' read -r kind path; do
+  [[ -n "$path" ]] || continue
+  staged="$stage/${path#/}"
+  [[ -e "$staged" ]]
+  [[ ! -e "$path" ]]
+  mkdir -p "$(dirname "$path")"
+  mv -- "$staged" "$path"
+  case "$kind" in
+    disk|nvram)
+      chown "$qemu_user:$qemu_group" "$path" 2>/dev/null || true
+      chmod 600 "$path"
+      ;;
+    cdrom)
+      chown root:root "$path" 2>/dev/null || true
+      chmod 644 "$path"
+      ;;
+  esac
+done < <(printf '%s' "$manifest_b64" | base64 -d)
+if command -v restorecon >/dev/null 2>&1; then
+  while IFS='|' read -r kind path; do
+    [[ -n "$path" ]] || continue
+    restorecon -F "$path" >/dev/null 2>&1 || true
+  done < <(printf '%s' "$manifest_b64" | base64 -d)
+fi
+virsh define "$xml_file" >/dev/null
+if [[ "$source_autostart" == "enable" ]]; then
+  virsh autostart "$vm" >/dev/null
+else
+  virsh autostart "$vm" --disable >/dev/null 2>&1 || true
+fi
+if [[ "$source_was_running" -eq 1 ]]; then
+  virsh start "$vm" >/dev/null
+  sleep 3
+  [[ "$(virsh domstate "$vm" 2>/dev/null | tr -d '\r')" == "running" ]]
+else
+  [[ "$(virsh domstate "$vm" 2>/dev/null | tr -d '\r')" == "shut off" ]]
+fi
+ONECLICK_DEST_ACTIVATE
+  then
+    rollback_fleet_migration
+    error "Destination VM activation failed. Source VM was retained and restored."
+    return 1
+  fi
+  jq --arg activated "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="destination_active" | .destination_activated_at=$activated' "$state_file" > "${state_file}.tmp" &&
+    mv -f "${state_file}.tmp" "$state_file"
+  if [[ "$source_was_running" -eq 1 && -n "$vps_ip" && "$vps_ip" != "null" && "$vps_ip" != "N/A" ]]; then
+    info "Validating guest Fleet-key access on the relocated VM."
+    local guest_ready=0
+    for _ in {1..60}; do
+      if ssh -i "$private_key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 "oneclick@${vps_ip}" 'sudo -n true' >/dev/null 2>&1; then
+        guest_ready=1
         break
       fi
+      sleep 5
     done
-    exit \$sync_success
-EOF
-  local sync_status=$?
-  if [[ $sync_status -eq 0 ]]; then
-    success "Data block synchronization completed successfully. Source VM retained until destination validation completes."
-  else
-    error "Data stream broken. Source VM has not been removed."
-    if [[ "$source_was_running" -eq 1 ]]; then
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
+    if [[ "$guest_ready" -ne 1 ]]; then
+      rollback_fleet_migration
+      error "Destination VM started, but Fleet-key guest validation failed. Source VM was restored."
+      return 1
     fi
+    success "Destination VM passed Fleet-key guest validation."
+  elif [[ "$source_was_running" -eq 1 ]]; then
+    warn "No cluster_private_ip is recorded for '$target_vm'; guest SSH validation could not be performed."
+    warn "The source will still be retained after commit."
+  fi
+  info "Updating virtualization inventory only after destination validation."
+  local inventory_tmp="${inventory_json}.tmp.${migration_id}"
+  if ! jq --arg vm "$target_vm" --arg new_host "$dest_host" --arg new_ip "$dest_ip" 'map(if .name == $vm then .host = $new_host | .host_ip = $new_ip else . end)' "$inventory_json" > "$inventory_tmp"; then
+    rm -f "$inventory_tmp"
+    rollback_fleet_migration
+    error "Failed to build updated virtualization inventory."
     return 1
   fi
-  ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
-    chown root:root /var/lib/libvirt/images
-    chown libvirt-qemu:libvirt-qemu /var/lib/libvirt/images/${target_vm}.qcow2 2>/dev/null || true
-    chown libvirt-qemu:libvirt-qemu /var/lib/libvirt/images/${target_vm}_cloudinit.iso 2>/dev/null || true
-    chmod 644 /var/lib/libvirt/images/${target_vm}.qcow2 2>/dev/null || true
-    chmod 644 /var/lib/libvirt/images/${target_vm}_cloudinit.iso 2>/dev/null || true
-  '" &>/dev/null
-  info "Registering runtime boundaries and starting VM on $dest_host."
-  if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -s" &>/dev/null <<EOF
-set -e
-virsh define "/tmp/${target_vm}.xml" >/dev/null
-virsh autostart "${target_vm}" >/dev/null
-state=\$(virsh domstate "${target_vm}" 2>/dev/null | tr -d '\r')
-if [[ "\$state" != "running" ]]; then
-  virsh start "${target_vm}" >/dev/null
+  chmod --reference="$inventory_json" "$inventory_tmp" 2>/dev/null || true
+  if ! mv -f "$inventory_tmp" "$inventory_json"; then
+    rm -f "$inventory_tmp"
+    rollback_fleet_migration
+    error "Failed to commit updated virtualization inventory."
+    return 1
+  fi
+  rollback_needed=0
+  "${dest_ssh[@]}" "sudo -n rm -rf '$stage_dir'" >/dev/null 2>&1 || warn "Migration succeeded, but destination staging cleanup was incomplete."
+  jq --arg completed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="complete" | .completed_at=$completed | .source_retained=true' "$state_file" > "${state_file}.tmp" &&
+    mv -f "${state_file}.tmp" "$state_file"
+  success "Fleet migration completed. '$target_vm' is authoritative on [$dest_host]."
+  warn "Safeguard copy retained on source hypervisor [$source_host]."
+  info "The retained source VM remains shut off with autostart disabled. Do not start it while the destination copy is active."
+  info "Migration state: $state_file"
+}
+# ==== Import/Export A External VPS In/Out of Fleet Management ====
+fleet_vps_external_migration() {
+  local mode="${1:-}"
+  local selected_vm="${2:-}"
+  local controller_env="/etc/one-click/fleet/controller.env"
+  local migration_root="/etc/one-click/virtualization/migrations"
+  local fleet_state_root="/etc/one-click/fleet/state"
+  local fleet_key="/etc/one-click/fleet/keys/id_ed25519"
+  build_vars
+  command -v collect_sysinfo >/dev/null 2>&1 && collect_sysinfo
+  [[ -f "$controller_env" ]] || {
+    error "Fleet controller state is missing. Initialize Fleet first."
+    return 1
+  }
+  . "$controller_env"
+  if [[ -n "${CONTROLLER_IP:-}" &&
+        "${sys_ip:-${sys_ipv6:-}}" != "$CONTROLLER_IP" &&
+        "$(hostname -s)" != "${CONTROLLER_NAME:-}" ]]; then
+    error "External VPS migration must be started from the Fleet controller."
+    return 1
+  fi
+  [[ "$mode" == "import" || "$mode" == "export" ]] || {
+    error "Usage: fleet_vps_external_migration <import|export> [vps_name]"
+    return 1
+  }
+  [[ -f "$fleet_key" ]] || {
+    error "Fleet controller key is missing: $fleet_key"
+    return 1
+  }
+  mkdir -p "$migration_root"
+  chmod 700 "$migration_root"
+  local migration_id workspace migration_key migration_pub state_file
+  migration_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+  workspace="${migration_root}/${migration_id}"
+  state_file="${workspace}/state.json"
+  mkdir -p "$workspace"
+  chmod 700 "$workspace"
+  local probe_cmd
+  probe_cmd='set -e
+  source /etc/os-release
+  disk_total=$(df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x nfs -x nfs4 -x cifs -x fuse.sshfs --output=source,size 2>/dev/null | awk '\''NR>1 && !seen[$1]++ {s+=$2} END {print s+0}'\'')
+  disk_used=$(df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x nfs -x nfs4 -x cifs -x fuse.sshfs --output=source,used 2>/dev/null | awk '\''NR>1 && !seen[$1]++ {s+=$2} END {print s+0}'\'')
+  ram_mb=$(awk '\''/MemTotal/{printf "%d", $2/1024}'\'' /proc/meminfo)
+  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)" "$(hostname -s)" "$(nproc)" "$ram_mb" "$disk_total" "$disk_used"'
+  if [[ "$mode" == "import" ]]; then
+    local source_host source_port source_user source_spec
+    local source_os_id source_os_version source_arch source_hostname
+    local source_cpu source_ram_mb source_disk_bytes source_used_bytes
+    local raw_password raw_password_confirm oneclick_hash
+    local migration_user migration_pub_value q_user q_key
+    migration_user="ocmig_${migration_id##*-}"
+    migration_key="${workspace}/bootstrap_id_ed25519"
+    migration_pub="${migration_key}.pub"
+    ssh-keygen -q -t ed25519 -N "" -C "one-click-vps-bootstrap-${migration_id}" -f "$migration_key" || {
+      error "Unable to generate temporary source bootstrap identity."
+      return 1
+    }
+    chmod 600 "$migration_key"
+    chmod 644 "$migration_pub"
+    migration_pub_value="$(<"$migration_pub")"
+    printf -v q_user '%q' "$migration_user"
+    printf -v q_key '%q' "$migration_pub_value"
+    printf '%s\n' "${yellow}VPS MIGRATION IMPORT${reset}" "One-Click will prepare temporary source access, inspect the source, build the replacement, then map the replacement VM keys onto source oneclick before migration."
+    read -rp "${cyan}[USER]${reset} Existing/source VPS address: " source_host
+    read -rp "${cyan}[USER]${reset} Existing/source SSH port [22]: " source_port
+    source_port="${source_port:-22}"
+    source_user="$migration_user"
+    [[ -n "$source_host" && "$source_port" =~ ^[0-9]+$ ]] || {
+      error "A valid source address and SSH port are required."
+      return 1
+    }
+    printf '%s\n' \
+      "" \
+      "${blue}[INFO] ${green}On the OLD/SOURCE VPS, copy and paste this entire block:${reset}" \
+      "" \
+      "==================================================" \
+      "${yellow}sudo bash <<'ONECLICK_MIGRATION_PREP'" \
+      "MIGRATION_USER=$q_user" \
+      "MIGRATION_KEY=$q_key" \
+      'set -euo pipefail' \
+      'if ! id "$MIGRATION_USER" >/dev/null 2>&1; then' \
+      '  useradd --create-home --shell /bin/bash "$MIGRATION_USER"' \
+      'fi' \
+      'MIGRATION_HOME="$(getent passwd "$MIGRATION_USER" | cut -d: -f6)"' \
+      'MIGRATION_GROUP="$(id -gn "$MIGRATION_USER")"' \
+      'if ! command -v sudo >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then' \
+      '  if command -v apt-get >/dev/null 2>&1; then' \
+      '    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y sudo rsync openssh-server' \
+      '  elif command -v dnf >/dev/null 2>&1; then' \
+      '    dnf -y install sudo rsync openssh-server' \
+      '  elif command -v yum >/dev/null 2>&1; then' \
+      '    yum -y install sudo rsync openssh-server' \
+      '  else' \
+      '    echo "Install sudo, rsync and OpenSSH before continuing."; exit 1' \
+      '  fi' \
+      'fi' \
+      'install -d -m 700 -o "$MIGRATION_USER" -g "$MIGRATION_GROUP" "$MIGRATION_HOME/.ssh"' \
+      'touch "$MIGRATION_HOME/.ssh/authorized_keys"' \
+      'grep -qxF "$MIGRATION_KEY" "$MIGRATION_HOME/.ssh/authorized_keys" || printf "%s\n" "$MIGRATION_KEY" >> "$MIGRATION_HOME/.ssh/authorized_keys"' \
+      'chown -R "$MIGRATION_USER:$MIGRATION_GROUP" "$MIGRATION_HOME/.ssh"' \
+      'chmod 700 "$MIGRATION_HOME/.ssh"' \
+      'chmod 600 "$MIGRATION_HOME/.ssh/authorized_keys"' \
+      'printf "%s ALL=(ALL) NOPASSWD:ALL\n" "$MIGRATION_USER" > "/etc/sudoers.d/one-click-migration-$MIGRATION_USER"' \
+      'chmod 440 "/etc/sudoers.d/one-click-migration-$MIGRATION_USER"' \
+      'command -v visudo >/dev/null 2>&1 && visudo -cf "/etc/sudoers.d/one-click-migration-$MIGRATION_USER" >/dev/null' \
+      'sshd -t' \
+      'echo' \
+      'echo "One-Click migration bootstrap access is ready."' \
+      'echo "Temporary user: $MIGRATION_USER"' \
+      'echo "Key fingerprint:"' \
+      'printf "%s\n" "$MIGRATION_KEY" | ssh-keygen -lf - 2>/dev/null || true' \
+      'ONECLICK_MIGRATION_PREP' \
+      "${reset}==================================================" \
+      "One-Click will use this temporary sudo account only until source oneclick is mapped from the replacement VM." \
+      ""
+    read -rp "${cyan}[USER]${reset} Press ENTER after the preparation block completes successfully."
+    local source_known_hosts="${workspace}/source_known_hosts"
+    touch "$source_known_hosts"
+    chmod 600 "$source_known_hosts"
+    local -a source_ssh=(
+      ssh
+      -i "$migration_key"
+      -p "$source_port"
+      -o IdentitiesOnly=yes
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="$source_known_hosts"
+      -o ConnectTimeout=10
+      "${source_user}@${source_host}"
+    )
+    info "Validating temporary sudo access to the source VPS."
+    if ! "${source_ssh[@]}" 'sudo -n true && command -v rsync >/dev/null' >/dev/null 2>&1; then
+      error "Could not authenticate to ${source_user}@${source_host}:${source_port} with the generated bootstrap key."
+      info "Re-run the preparation block on the source VPS and confirm the SSH port is reachable."
+      return 1
+    fi
+    source_spec="$("${source_ssh[@]}" 'sudo -n bash -s' <<< "$probe_cmd" 2>/dev/null | tail -n1)"
+    if [[ ! "$source_spec" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+      error "The source VPS specification probe returned invalid data."
+      return 1
+    fi
+    IFS='|' read -r source_os_id source_os_version source_arch source_hostname source_cpu source_ram_mb source_disk_bytes source_used_bytes <<< "$source_spec"
+    local source_disk_gib source_used_gib
+    source_disk_gib=$(( (source_disk_bytes + 1073741823) / 1073741824 ))
+    source_used_gib=$(( (source_used_bytes + 1073741823) / 1073741824 ))
+    printf '%s\n' "${green}Source VPS detected:${reset}" "  Hostname:      $source_hostname" "  OS:            $source_os_id $source_os_version ($source_arch)" "  CPU:           $source_cpu vCPU" "  RAM:           ${source_ram_mb}MB" "  Disk capacity: ${source_disk_gib}G" "  Disk used:     ${source_used_gib}G"
+    local vps_name target_host network_mode public_ip
+    local vps_cpu vps_ram disk_gib image_alias chosen_image major
+    read -rp "${cyan}[USER]${reset} Replacement Fleet VPS name [$source_hostname]: " vps_name
+    vps_name="${vps_name:-$source_hostname}"
+    local -a hypervisors=()
+    local sf i
+    shopt -s nullglob
+    for sf in "$fleet_state_root"/*.conf; do
+      grep -q '^ROLE_TYPE=hypervisor$' "$sf" && hypervisors+=("$(basename "$sf" .conf)")
+    done
+    shopt -u nullglob
+    [[ ${#hypervisors[@]} -gt 0 ]] || hypervisors+=("${CONTROLLER_NAME:-$(hostname -s)}")
+    printf '%s\n' "Available Fleet hypervisors:"
+    for i in "${!hypervisors[@]}"; do
+      printf '  [%d] %s\n' "$((i+1))" "${hypervisors[$i]}"
+    done
+    read -rp "${cyan}[USER]${reset} Select target hypervisor [1]: " hyper_choice
+    hyper_choice="${hyper_choice:-1}"
+    [[ "$hyper_choice" =~ ^[0-9]+$ ]] && (( hyper_choice >= 1 && hyper_choice <= ${#hypervisors[@]} )) || {
+      error "Invalid hypervisor selection."
+      return 1
+    }
+    target_host="${hypervisors[$((hyper_choice-1))]}"
+    [[ "$source_arch" == "x86_64" || "$source_arch" == "amd64" ]] || {
+      error "Migration import currently supports x86_64 sources only."
+      return 1
+    }
+    major="${source_os_version%%.*}"
+    local expected_profile expected_family selected_norm compatible=false
+    case "${source_os_id,,}" in
+      ubuntu) expected_profile="ubuntu${major}"; expected_family="ubuntu" ;;
+      debian) expected_profile="debian${major}"; expected_family="debian" ;;
+      rocky) expected_profile="rocky${major}"; expected_family="rocky" ;;
+      almalinux|alma) expected_profile="alma${major}"; expected_family="almalinux" ;;
+      centos|centos-stream|centos_stream) expected_profile="centos${major}"; expected_family="centos" ;;
+      fedora) expected_profile="fedora${major}"; expected_family="fedora" ;;
+      *) error "Unsupported source OS for automatic like-for-like migration: $source_os_id $source_os_version"; return 1 ;;
+    esac
+    image_alias="$expected_profile"
+    read -rp "${cyan}[USER]${reset} Replacement image/profile [$expected_profile]: " chosen_image
+    image_alias="${chosen_image:-$expected_profile}"
+    selected_norm="${image_alias,,}"
+    selected_norm="${selected_norm##*/}"
+    selected_norm="${selected_norm%.qcow2}"
+    selected_norm="${selected_norm%.img}"
+    selected_norm="${selected_norm//_/}"
+    selected_norm="${selected_norm//-/}"
+    case "$expected_family" in
+      ubuntu) [[ "$selected_norm" == ubuntu${major}* ]] && compatible=true ;;
+      debian) [[ "$selected_norm" == debian${major}* ]] && compatible=true ;;
+      rocky) [[ "$selected_norm" == rocky${major}* || "$selected_norm" == rockylinux${major}* ]] && compatible=true ;;
+      almalinux) [[ "$selected_norm" == alma${major}* || "$selected_norm" == almalinux${major}* ]] && compatible=true ;;
+      centos) [[ "$selected_norm" == centos${major}* || "$selected_norm" == centosstream${major}* ]] && compatible=true ;;
+      fedora) [[ "$selected_norm" == fedora${major}* ]] && compatible=true ;;
+    esac
+    [[ "$compatible" == "true" ]] || {
+      error "Replacement OS/profile is not compatible with the source."
+      error "Source: $source_os_id $source_os_version ($source_arch)"
+      error "Required: $expected_profile"
+      error "Selected: $image_alias"
+      return 1
+    }
+    success "Pre-build OS check passed: $source_os_id $source_os_version ($source_arch) -> $image_alias"
+    read -rp "${cyan}[USER]${reset} Replacement disk size in GiB [$source_disk_gib]: " disk_gib
+    disk_gib="${disk_gib:-$source_disk_gib}"
+    read -rp "${cyan}[USER]${reset} Replacement RAM in MB [$source_ram_mb]: " vps_ram
+    vps_ram="${vps_ram:-$source_ram_mb}"
+    read -rp "${cyan}[USER]${reset} Replacement CPU count [$source_cpu]: " vps_cpu
+    vps_cpu="${vps_cpu:-$source_cpu}"
+    [[ "$disk_gib" =~ ^[0-9]+$ && "$vps_ram" =~ ^[0-9]+$ && "$vps_cpu" =~ ^[0-9]+$ ]] || {
+      error "CPU, RAM and disk values must be numeric."
+      return 1
+    }
+    (( disk_gib * 1073741824 > source_used_bytes + 1073741824 )) || {
+      error "Replacement disk must exceed current source usage by at least 1GiB."
+      return 1
+    }
+    read -rp "${cyan}[USER]${reset} Network mode [nat|public] [nat]: " network_mode
+    network_mode="${network_mode:-nat}"
+    [[ "$network_mode" == "nat" || "$network_mode" == "public" ]] || {
+      error "Network mode must be nat or public."
+      return 1
+    }
+    public_ip=""
+    if [[ "$network_mode" == "public" ]]; then
+      read -rp "${cyan}[USER]${reset} Replacement public IPv4 address (without CIDR): " public_ip
+      [[ -n "$public_ip" ]] || return 1
+    fi
+    while :; do
+      read -rsp "${cyan}[USER]${reset} oneclick recovery password for the migrated VPS (required, minimum 12 characters): " raw_password
+      echo
+      [[ ${#raw_password} -ge 12 ]] || {
+        error "The recovery password must be at least 12 characters."
+        continue
+      }
+      read -rsp "${cyan}[USER]${reset} Confirm oneclick recovery password: " raw_password_confirm
+      echo
+      [[ "$raw_password" == "$raw_password_confirm" ]] || {
+        error "Recovery passwords do not match."
+        continue
+      }
+      break
+    done
+    unset raw_password_confirm
+    oneclick_hash="$(openssl passwd -6 "$raw_password")" || return 1
+    jq -n \
+      --arg mode "import" \
+      --arg id "$migration_id" \
+      --arg workspace "$workspace" \
+      --arg vps_name "$vps_name" \
+      --arg source_host "$source_host" \
+      --arg source_user "oneclick" \
+      --argjson source_port "$source_port" \
+      --arg os_id "$source_os_id" \
+      --arg os_version "$source_os_version" \
+      --arg arch "$source_arch" \
+      --arg hostname "$source_hostname" \
+      --argjson cpu "$source_cpu" \
+      --argjson ram_mb "$source_ram_mb" \
+      --argjson disk_bytes "$source_disk_bytes" \
+      --argjson used_bytes "$source_used_bytes" \
+      --arg expected_profile "$expected_profile" \
+      --arg selected_profile "$image_alias" \
+      '{
+        version:4,
+        mode:$mode,
+        id:$id,
+        workspace:$workspace,
+        vps_name:$vps_name,
+        status:"prepared",
+        source:{
+          kind:"external",
+          host:$source_host,
+          user:$source_user,
+          port:$source_port,
+          prepared:false,
+          os_id:$os_id,
+          os_version:$os_version,
+          arch:$arch,
+          hostname:$hostname,
+          cpu:$cpu,
+          ram_mb:$ram_mb,
+          disk_bytes:$disk_bytes,
+          used_bytes:$used_bytes
+        },
+        destination:{kind:"fleet"},
+        preflight:{
+          os_checked:true,
+          expected_profile:$expected_profile,
+          selected_profile:$selected_profile
+        }
+      }' > "$state_file" || return 1
+    chmod 600 "$state_file"
+    jq --arg requested "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.build={status:"requested",requested_at:$requested,error:null}' "$state_file" > "${state_file}.tmp" || return 1
+    mv -f "${state_file}.tmp" "$state_file"
+    chmod 600 "$state_file"
+    if ! grep -Fq 'One-Click migration create handoff v5' /usr/local/bin/one-click; then
+      error "The installed front controller does not contain the migration-aware create handoff."
+      return 1
+    fi
+    local -a create_cmd=(
+      /usr/local/bin/one-click --vps create
+      --name "$vps_name"
+      --target "$target_host"
+      --mode "$network_mode"
+      --image "$image_alias"
+      --disk "${disk_gib}G"
+      --password "$raw_password"
+      --ram "$vps_ram"
+      --cpu "$vps_cpu"
+      --import-state "$state_file"
+    )
+    [[ -n "$public_ip" ]] && create_cmd+=(--public-ip "$public_ip")
+    info "Building the replacement VPS through the normal Fleet create path."
+    local create_rc=0
+    "${create_cmd[@]}" || create_rc=$?
+    local build_status build_error build_host build_port
+    build_status="$(jq -r '.build.status // empty' "$state_file" 2>/dev/null || true)"
+    build_error="$(jq -r '.build.error // empty' "$state_file" 2>/dev/null || true)"
+    case "$build_status" in
+      complete) ;;
+      failed) error "Replacement VPS provisioning failed: ${build_error:-unknown error}"; info "Migration state retained at: $state_file"; return 1 ;;
+      *) error "The create session ended without a valid migration handoff."; error "Build state is '${build_status:-missing}', expected complete/failed."; info "Migration state retained at: $state_file"; return 1 ;;
+    esac
+    build_host="$(jq -r '.destination.management_host // empty' "$state_file")"
+    build_port="$(jq -r '.destination.management_port // 22' "$state_file")"
+    [[ -n "$build_host" && "$build_port" =~ ^[0-9]+$ ]] || {
+      error "Create reported success but did not return a usable replacement endpoint."
+      return 1
+    }
+    local destination_known_hosts="${workspace}/destination_known_hosts"
+    touch "$destination_known_hosts"
+    chmod 600 "$destination_known_hosts"
+    local -a destination_ssh=(
+      ssh
+      -i "$fleet_key"
+      -p "$build_port"
+      -o IdentitiesOnly=yes
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="$destination_known_hosts"
+      -o ConnectTimeout=10
+      "oneclick@${build_host}"
+    )
+    info "Waiting for the newly built VPS to become reachable over Fleet SSH."
+    local ready=0
+    for _ in {1..60}; do
+      if "${destination_ssh[@]}" 'sudo -n true' >/dev/null 2>&1; then
+        ready=1
+        break
+      fi
+      sleep 5
+    done
+    [[ "$ready" -eq 1 ]] || {
+      error "The newly built VPS never became reachable over Fleet SSH."
+      return 1
+    }
+    local remote_pull_dir="/etc/one-click/virtualization/migrations/${migration_id}"
+    local remote_pull_key="${remote_pull_dir}/id_ed25519"
+    local key_bundle authorized_keys_b64 pull_pub_b64 pull_pub
+    key_bundle="$("${destination_ssh[@]}" "sudo -n bash -s -- '$remote_pull_dir' '$remote_pull_key'" <<'ONECLICK_BUILD_KEYS'
+set -euo pipefail
+PULL_DIR="$1"
+PULL_KEY="$2"
+install -d -m 700 "$PULL_DIR"
+if [[ ! -s "$PULL_KEY" ]]; then
+  ssh-keygen -q -t ed25519 -N "" -C "one-click-import-pull" -f "$PULL_KEY"
 fi
-sleep 2
-state=\$(virsh domstate "${target_vm}" 2>/dev/null | tr -d '\r')
-[[ "\$state" == "running" ]]
-rm -f "/tmp/${target_vm}.xml"
-EOF
-  then
-    error "Destination VM failed activation validation on [$dest_host]. Source VM has not been removed."
-    ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
-      virsh destroy ${target_vm} 2>/dev/null || true
-      virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
-      rm -f /tmp/${target_vm}.xml /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
-      chown root:root /var/lib/libvirt/images
-    '" &>/dev/null || true
-    if [[ "$source_was_running" -eq 1 ]]; then
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
-    fi
-    return 1
-  fi
-  success "Destination VM is defined and running on [$dest_host]."
-  info "Updating dynamic network routing ledger in virtualization inventory."
-  if jq --arg vm "$target_vm" \
-        --arg new_host "$dest_host" \
-        --arg new_ip "$dest_ip" \
-       'map(if .name == $vm then .host = $new_host | .host_ip = $new_ip else . end)' \
-       "$inventory_json" > "${inventory_json}.tmp"; then
-     mv "${inventory_json}.tmp" "$inventory_json"
-     success "Virtualization state ledger successfully updated."
+chmod 600 "$PULL_KEY"
+chmod 644 "${PULL_KEY}.pub"
+test -s /home/oneclick/.ssh/authorized_keys
+printf 'AUTHORIZED_KEYS_B64=%s\n' "$(base64 -w0 /home/oneclick/.ssh/authorized_keys)"
+printf 'PULL_PUB_B64=%s\n' "$(base64 -w0 "${PULL_KEY}.pub")"
+ONECLICK_BUILD_KEYS
+)" || {
+      error "Unable to obtain the new VPS Fleet keys or create its pull key."
+      return 1
+    }
+    authorized_keys_b64="$(sed -n 's/^AUTHORIZED_KEYS_B64=//p' <<< "$key_bundle" | tail -n1)"
+    pull_pub_b64="$(sed -n 's/^PULL_PUB_B64=//p' <<< "$key_bundle" | tail -n1)"
+    [[ -n "$authorized_keys_b64" && -n "$pull_pub_b64" ]] || {
+      error "The new VPS did not return a usable oneclick key bundle."
+      return 1
+    }
+    pull_pub="$(printf '%s' "$pull_pub_b64" | base64 -d)"
+    local hash_b64
+    hash_b64="$(printf '%s' "$oneclick_hash" | base64 -w0)"
+    info "Preparing oneclick on the source from the keys created by the new VPS."
+    local prep_cmd
+    printf -v prep_cmd 'sudo -n bash -s -- %q %q %q' "$authorized_keys_b64" "$pull_pub_b64" "$hash_b64"
+    "${source_ssh[@]}" "$prep_cmd" <<'ONECLICK_SOURCE_PREP'
+set -euo pipefail
+AUTHORIZED_KEYS_B64="$1"
+PULL_PUB_B64="$2"
+HASH_B64="$3"
+ONECLICK_USER=oneclick
+ONECLICK_HOME=/home/oneclick
+if ! command -v sudo >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y sudo rsync
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y install sudo rsync
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y install sudo rsync
   else
-     error "Critical Failure: Failed to update virtualization inventory ledger state. Reverting destination activation."
-     rm -f "${inventory_json}.tmp"
-     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${dest_ip}" "sudo bash -c '
-       virsh destroy ${target_vm} 2>/dev/null || true
-       virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
-       rm -f /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
-       chown root:root /var/lib/libvirt/images
-     '" &>/dev/null || true
-     if [[ "$source_was_running" -eq 1 ]]; then
-       ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo virsh start '$target_vm'" &>/dev/null || true
-     fi
-     return 1
+    echo "A supported package manager is required to install sudo/rsync." >&2
+    exit 1
   fi
-  info "Destination ownership confirmed. Removing retained source VM assets from [$source_host]."
-  if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${source_ip}" "sudo bash -c '
-    virsh autostart ${target_vm} --disable 2>/dev/null || true
-    virsh undefine ${target_vm} --nvram 2>/dev/null || virsh undefine ${target_vm} 2>/dev/null || true
-    rm -f /var/lib/libvirt/images/${target_vm}.qcow2 /var/lib/libvirt/images/${target_vm}_cloudinit.iso
-    ! virsh dominfo ${target_vm} &>/dev/null
-    ! test -e /var/lib/libvirt/images/${target_vm}.qcow2
-  '" &>/dev/null; then
-    warn "Migration is active on [$dest_host], but source cleanup on [$source_host] was incomplete. Do not manually start the retained source definition."
+fi
+if ! id "$ONECLICK_USER" >/dev/null 2>&1; then
+  useradd --create-home --home-dir "$ONECLICK_HOME" --shell /bin/bash "$ONECLICK_USER"
+else
+  current_home="$(getent passwd "$ONECLICK_USER" | cut -d: -f6)"
+  if [[ "$current_home" != "$ONECLICK_HOME" ]]; then
+    usermod --home "$ONECLICK_HOME" --move-home "$ONECLICK_USER"
+  fi
+  usermod --shell /bin/bash "$ONECLICK_USER"
+fi
+ONECLICK_GROUP="$(id -gn "$ONECLICK_USER")"
+ONECLICK_HASH="$(printf '%s' "$HASH_B64" | base64 -d)"
+usermod --password "$ONECLICK_HASH" "$ONECLICK_USER"
+chage -M -1 -E -1 "$ONECLICK_USER" 2>/dev/null || true
+install -d -m 700 -o "$ONECLICK_USER" -g "$ONECLICK_GROUP" "$ONECLICK_HOME/.ssh"
+printf '%s' "$AUTHORIZED_KEYS_B64" | base64 -d > "$ONECLICK_HOME/.ssh/authorized_keys"
+printf '%s' "$PULL_PUB_B64" | base64 -d >> "$ONECLICK_HOME/.ssh/authorized_keys"
+awk 'NF && !seen[$0]++' "$ONECLICK_HOME/.ssh/authorized_keys" > "$ONECLICK_HOME/.ssh/authorized_keys.tmp"
+mv -f "$ONECLICK_HOME/.ssh/authorized_keys.tmp" "$ONECLICK_HOME/.ssh/authorized_keys"
+chown -R "$ONECLICK_USER:$ONECLICK_GROUP" "$ONECLICK_HOME/.ssh"
+chmod 700 "$ONECLICK_HOME/.ssh"
+chmod 600 "$ONECLICK_HOME/.ssh/authorized_keys"
+install -d -m 755 /etc/sudoers.d
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$ONECLICK_USER" > /etc/sudoers.d/99-oneclick-fleet
+chmod 440 /etc/sudoers.d/99-oneclick-fleet
+command -v visudo >/dev/null 2>&1 && visudo -cf /etc/sudoers.d/99-oneclick-fleet >/dev/null
+sshd -t
+id oneclick
+ONECLICK_SOURCE_PREP
+    info "Verifying the new VPS can pull directly from source oneclick."
+    if ! "${destination_ssh[@]}" "sudo -n ssh -i '$remote_pull_key' -p '$source_port' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='${remote_pull_dir}/known_hosts' -o ConnectTimeout=10 'oneclick@${source_host}' 'sudo -n true && command -v rsync >/dev/null'" >/dev/null 2>&1; then
+      error "The new VPS cannot authenticate to source oneclick with its pull key."
+      return 1
+    fi
+    local source_fleet_known_hosts="${workspace}/source_fleet_known_hosts"
+    touch "$source_fleet_known_hosts"
+    chmod 600 "$source_fleet_known_hosts"
+    local -a source_fleet_ssh=(
+      ssh
+      -i "$fleet_key"
+      -p "$source_port"
+      -o IdentitiesOnly=yes
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="$source_fleet_known_hosts"
+      -o ConnectTimeout=10
+      "oneclick@${source_host}"
+    )
+    info "Verifying the permanent Fleet controller key is mapped to source oneclick."
+    if ! "${source_fleet_ssh[@]}" 'sudo -n true' >/dev/null 2>&1; then
+      error "Source oneclick does not accept the Fleet controller key copied from the replacement VM."
+      return 1
+    fi
+    info "Removing the temporary source bootstrap account before rsync begins."
+    "${source_ssh[@]}" "sudo -n bash -s -- '$migration_user'" <<'ONECLICK_REMOVE_BOOTSTRAP' >/dev/null 2>&1 || {
+set -e
+migration_user="$1"
+case "$migration_user" in
+  ocmig_*) ;;
+  *) exit 1 ;;
+esac
+rm -f "/etc/sudoers.d/one-click-migration-${migration_user}"
+nohup bash -s -- "$migration_user" >/tmp/one-click-bootstrap-remove.log 2>&1 </dev/null <<'ONECLICK_REMOVE_WORKER' &
+set -e
+migration_user="$1"
+sleep 2
+migration_uid="$(id -u "$migration_user" 2>/dev/null || true)"
+if [[ -n "$migration_uid" ]]; then
+  pkill -KILL -u "$migration_uid" 2>/dev/null || true
+  sleep 1
+fi
+userdel -r "$migration_user"
+ONECLICK_REMOVE_WORKER
+ONECLICK_REMOVE_BOOTSTRAP
+      error "Unable to schedule removal of temporary source bootstrap account '${migration_user}'."
+      return 1
+    }
+    local bootstrap_removed=0
+    for _ in {1..15}; do
+      if ! "${source_fleet_ssh[@]}" "getent passwd '$migration_user'" >/dev/null 2>&1; then
+        bootstrap_removed=1
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$bootstrap_removed" -ne 1 ]]; then
+      error "Temporary source bootstrap account '${migration_user}' was not removed."
+      "${source_fleet_ssh[@]}" 'sudo -n cat /tmp/one-click-bootstrap-remove.log 2>/dev/null || true' || true
+      return 1
+    fi
+    if "${source_ssh[@]}" 'true' >/dev/null 2>&1; then
+      error "Temporary source bootstrap account '${migration_user}' was removed from passwd but its SSH session still succeeded unexpectedly."
+      return 1
+    fi
+    "${source_fleet_ssh[@]}" 'sudo -n rm -f /tmp/one-click-bootstrap-remove.log' >/dev/null 2>&1 || true
+    rm -f "$migration_key" "$migration_pub"
+    local recovery_hypervisor="" recovery_ip="" recovery_mode="" vps_ledger
+    vps_ledger="/etc/one-click/virtualization/inventory.json"
+    recovery_hypervisor="$(jq -r '.destination.target_host // empty' "$state_file" 2>/dev/null || true)"
+    if [[ -s "$vps_ledger" ]] && jq empty "$vps_ledger" >/dev/null 2>&1; then
+      [[ -n "$recovery_hypervisor" ]] || recovery_hypervisor="$(jq -r --arg name "$vps_name" '.[] | select(.name == $name) | .host // empty' "$vps_ledger" | tail -n1)"
+      recovery_ip="$(jq -r --arg name "$vps_name" --arg host "$recovery_hypervisor" '.[] | select(.name == $name and (.host == $host or $host == "")) | .nat_ip // empty' "$vps_ledger" | tail -n1)"
+      recovery_mode="$(jq -r --arg name "$vps_name" --arg host "$recovery_hypervisor" '.[] | select(.name == $name and (.host == $host or $host == "")) | .mode // empty' "$vps_ledger" | tail -n1)"
+      [[ "$recovery_ip" == "N/A" || "$recovery_ip" == "null" ]] && recovery_ip=""
+    fi
+    jq \
+      --arg pull_key "$remote_pull_key" \
+      --arg pull_public_key "$pull_pub" \
+      --arg hypervisor "$recovery_hypervisor" \
+      --arg recovery_ip "$recovery_ip" \
+      --arg recovery_mode "$recovery_mode" \
+      '.source.prepared=true |
+       .destination.pull_key=$pull_key |
+       .destination.pull_public_key=$pull_public_key |
+       .destination.recovery_hypervisor=$hypervisor |
+       .destination.recovery_ip=$recovery_ip |
+       .destination.recovery_mode=$recovery_mode' \
+      "$state_file" > "${state_file}.tmp" || return 1
+    mv -f "${state_file}.tmp" "$state_file"
+    chmod 600 "$state_file"
+    success "Replacement VPS provisioning handoff completed."
+    info "Replacement Fleet endpoint: ${build_host}:${build_port}"
+    info "The replacement VM supplied the Fleet keys now mapped to source oneclick."
+    info "The replacement VM generated and verified its own temporary pull key."
+    fleet_vps_external_transfer "$state_file" || {
+      error "Replacement VPS exists, but the migration transfer failed."
+      info "Migration state retained at: $state_file"
+      return 1
+    }
+    success "VPS import completed into Fleet as '$vps_name'."
+    warn "The source VPS was not deleted. Validate the replacement before decommissioning it."
+    return 0
+  fi
+  local migration_user migration_pub_value q_user q_key
+  migration_user="ocmig_${migration_id##*-}"
+  migration_key="${workspace}/id_ed25519"
+  migration_pub="${migration_key}.pub"
+  ssh-keygen -q -t ed25519 -N "" -C "one-click-vps-migration-${migration_id}" -f "$migration_key" || {
+    error "Unable to generate temporary export migration identity."
+    return 1
+  }
+  chmod 600 "$migration_key"
+  chmod 644 "$migration_pub"
+  migration_pub_value="$(<"$migration_pub")"
+  printf -v q_user '%q' "$migration_user"
+  printf -v q_key '%q' "$migration_pub_value"
+  [[ -n "$selected_vm" ]] ||
+    read -rp "${cyan}[USER]${reset} Fleet VPS name to export: " selected_vm
+  [[ -n "$selected_vm" ]] || {
+    error "A Fleet VPS name is required."
+    return 1
+  }
+  local fleet_state="${fleet_state_root}/${selected_vm}.conf"
+  [[ -f "$fleet_state" ]] || {
+    error "Fleet state for '$selected_vm' was not found."
+    return 1
+  }
+  local IP="" NAT_IP="" MESH_IP="" PORT="" ROLE_TYPE=""
+  . "$fleet_state"
+  local source_mgmt_host source_mgmt_port
+  source_mgmt_host="${MESH_IP:-${IP:-${NAT_IP:-}}}"
+  source_mgmt_host="${source_mgmt_host%%/*}"
+  source_mgmt_port="${PORT:-22}"
+  [[ -n "$source_mgmt_host" ]] || {
+    error "No management address is recorded for Fleet VPS '$selected_vm'."
+    return 1
+  }
+  local fleet_known_hosts="${workspace}/fleet_known_hosts"
+  touch "$fleet_known_hosts"
+  chmod 600 "$fleet_known_hosts"
+  local -a fleet_source_ssh=(
+    ssh
+    -i "$fleet_key"
+    -p "$source_mgmt_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$fleet_known_hosts"
+    -o ConnectTimeout=10
+    "oneclick@${source_mgmt_host}"
+  )
+  info "Inspecting Fleet VPS '$selected_vm'."
+  if ! "${fleet_source_ssh[@]}" 'sudo -n true && command -v rsync >/dev/null' >/dev/null 2>&1; then
+    error "Fleet SSH access to '$selected_vm' failed using $fleet_key."
     return 1
   fi
-  success "Migration process complete. $target_vm is now active on $dest_host."
+  local source_spec
+  source_spec="$("${fleet_source_ssh[@]}" 'sudo -n bash -s' <<< "$probe_cmd" 2>/dev/null | tail -n1)"
+  if [[ ! "$source_spec" =~ ^[^|]+\|[^|]+\|[^|]+\|[^|]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$ ]]; then
+    error "Fleet VPS specification probe returned invalid data."
+    return 1
+  fi
+  local source_os_id source_os_version source_arch source_hostname
+  local source_cpu source_ram_mb source_disk_bytes source_used_bytes
+  IFS='|' read -r source_os_id source_os_version source_arch source_hostname \
+    source_cpu source_ram_mb source_disk_bytes source_used_bytes <<< "$source_spec"
+  printf '%s\n' \
+    "" \
+    "${green}Fleet VPS detected:${reset}" \
+    "  Hostname: $source_hostname" \
+    "  OS:       $source_os_id $source_os_version ($source_arch)" \
+    "  CPU:      $source_cpu vCPU" \
+    "  RAM:      ${source_ram_mb}MB" \
+    "  Disk:     $(( (source_disk_bytes + 1073741823) / 1073741824 ))G or larger" \
+    "" \
+    "Prepare a fresh external VPS with the same OS release and architecture." \
+    ""
+  local pull_host pull_port default_pull
+  default_pull="${NAT_IP:-${IP:-}}"
+  default_pull="${default_pull%%/*}"
+  read -rp "${cyan}[USER]${reset} Fleet source address reachable FROM the replacement [${default_pull:-none}]: " pull_host
+  pull_host="${pull_host:-$default_pull}"
+  read -rp "${cyan}[USER]${reset} Fleet source SSH port reachable FROM the replacement [$source_mgmt_port]: " pull_port
+  pull_port="${pull_port:-$source_mgmt_port}"
+  [[ -n "$pull_host" && "$pull_port" =~ ^[0-9]+$ ]] || {
+    error "A source address/port reachable from the replacement is required."
+    return 1
+  }
+  local pub_b64
+  pub_b64="$(base64 -w0 < "$migration_pub")"
+  if ! "${fleet_source_ssh[@]}" \
+    "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys; printf '%s' '$pub_b64' | base64 -d > /tmp/oc-migration-key.$$; grep -qxF -f /tmp/oc-migration-key.$$ ~/.ssh/authorized_keys || cat /tmp/oc-migration-key.$$ >> ~/.ssh/authorized_keys; rm -f /tmp/oc-migration-key.$$"; then
+    error "Unable to authorize the temporary migration key on '$selected_vm'."
+    return 1
+  fi
+  local destination_host destination_port destination_user
+  read -rp "${cyan}[USER]${reset} External replacement address: " destination_host
+  read -rp "${cyan}[USER]${reset} External replacement SSH port [22]: " destination_port
+  destination_port="${destination_port:-22}"
+  destination_user="$migration_user"
+  [[ -n "$destination_host" && "$destination_port" =~ ^[0-9]+$ ]] || {
+    error "A valid replacement address and SSH port are required."
+    return 1
+  }
+  printf '%s\n' \
+    "" \
+    "${green}On the NEW/REPLACEMENT VPS, copy and paste this entire block:${reset}" \
+    "" \
+    "${yellow}sudo bash <<'ONECLICK_MIGRATION_PREP'${reset}" \
+    "MIGRATION_USER=$q_user" \
+    "MIGRATION_KEY=$q_key" \
+    'set -euo pipefail' \
+    'if ! id "$MIGRATION_USER" >/dev/null 2>&1; then' \
+    '  useradd --create-home --shell /bin/bash "$MIGRATION_USER"' \
+    'fi' \
+    'MIGRATION_HOME="$(getent passwd "$MIGRATION_USER" | cut -d: -f6)"' \
+    'MIGRATION_GROUP="$(id -gn "$MIGRATION_USER")"' \
+    'if ! command -v sudo >/dev/null 2>&1 || ! command -v rsync >/dev/null 2>&1; then' \
+    '  if command -v apt-get >/dev/null 2>&1; then' \
+    '    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y sudo rsync openssh-server' \
+    '  elif command -v dnf >/dev/null 2>&1; then' \
+    '    dnf -y install sudo rsync openssh-server' \
+    '  elif command -v yum >/dev/null 2>&1; then' \
+    '    yum -y install sudo rsync openssh-server' \
+    '  else' \
+    '    echo "Install sudo, rsync and OpenSSH before continuing."; exit 1' \
+    '  fi' \
+    'fi' \
+    'install -d -m 700 -o "$MIGRATION_USER" -g "$MIGRATION_GROUP" "$MIGRATION_HOME/.ssh"' \
+    'touch "$MIGRATION_HOME/.ssh/authorized_keys"' \
+    'grep -qxF "$MIGRATION_KEY" "$MIGRATION_HOME/.ssh/authorized_keys" || printf "%s\n" "$MIGRATION_KEY" >> "$MIGRATION_HOME/.ssh/authorized_keys"' \
+    'chown "$MIGRATION_USER:$MIGRATION_GROUP" "$MIGRATION_HOME/.ssh/authorized_keys"' \
+    'chmod 600 "$MIGRATION_HOME/.ssh/authorized_keys"' \
+    'printf "%s ALL=(ALL) NOPASSWD:ALL\n" "$MIGRATION_USER" > "/etc/sudoers.d/one-click-migration-$MIGRATION_USER"' \
+    'chmod 440 "/etc/sudoers.d/one-click-migration-$MIGRATION_USER"' \
+    'command -v visudo >/dev/null 2>&1 && visudo -cf "/etc/sudoers.d/one-click-migration-$MIGRATION_USER" >/dev/null' \
+    'sshd -t' \
+    'echo' \
+    'echo "One-Click migration access is ready."' \
+    'echo "Temporary user: $MIGRATION_USER"' \
+    'echo "Key fingerprint:"' \
+    'printf "%s\n" "$MIGRATION_KEY" | ssh-keygen -lf - 2>/dev/null || true' \
+    'ONECLICK_MIGRATION_PREP' \
+    ""
+  read -rp "${cyan}[USER]${reset} Press ENTER after the preparation block completes successfully."
+  local destination_known_hosts="${workspace}/destination_known_hosts"
+  touch "$destination_known_hosts"
+  chmod 600 "$destination_known_hosts"
+  local -a destination_ssh=(
+    ssh
+    -i "$migration_key"
+    -p "$destination_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$destination_known_hosts"
+    -o ConnectTimeout=10
+    "${destination_user}@${destination_host}"
+  )
+  if ! "${destination_ssh[@]}" 'sudo -n true && command -v rsync >/dev/null' >/dev/null 2>&1; then
+    error "Could not authenticate to ${destination_user}@${destination_host}:${destination_port}."
+    return 1
+  fi
+  jq -n \
+    --arg mode "export" \
+    --arg id "$migration_id" \
+    --arg workspace "$workspace" \
+    --arg vps_name "$selected_vm" \
+    --arg key_file "$migration_key" \
+    --arg public_key_file "$migration_pub" \
+    --arg source_host "$pull_host" \
+    --arg source_user "oneclick" \
+    --argjson source_port "$pull_port" \
+    --arg source_mgmt_host "$source_mgmt_host" \
+    --argjson source_mgmt_port "$source_mgmt_port" \
+    --arg destination_host "$destination_host" \
+    --arg destination_user "$destination_user" \
+    --argjson destination_port "$destination_port" \
+    --arg os_id "$source_os_id" \
+    --arg os_version "$source_os_version" \
+    --arg arch "$source_arch" \
+    --arg hostname "$source_hostname" \
+    --argjson cpu "$source_cpu" \
+    --argjson ram_mb "$source_ram_mb" \
+    --argjson disk_bytes "$source_disk_bytes" \
+    --argjson used_bytes "$source_used_bytes" \
+    '{
+      version:3,
+      mode:$mode,
+      id:$id,
+      workspace:$workspace,
+      vps_name:$vps_name,
+      key_file:$key_file,
+      public_key_file:$public_key_file,
+      status:"prepared",
+      source:{
+        kind:"fleet",
+        host:$source_host,
+        user:$source_user,
+        port:$source_port,
+        management_host:$source_mgmt_host,
+        management_port:$source_mgmt_port,
+        os_id:$os_id,
+        os_version:$os_version,
+        arch:$arch,
+        hostname:$hostname,
+        cpu:$cpu,
+        ram_mb:$ram_mb,
+        disk_bytes:$disk_bytes,
+        used_bytes:$used_bytes
+      },
+      destination:{
+        kind:"external",
+        host:$destination_host,
+        user:$destination_user,
+        port:$destination_port
+      }
+    }' > "$state_file" || return 1
+  chmod 600 "$state_file"
+  fleet_vps_external_transfer "$state_file" || return 1
+  success "Fleet VPS '$selected_vm' was exported to the external replacement."
+  warn "The original Fleet VPS was NOT deleted. Its application services remain stopped to prevent split-brain."
+  info "Validate the replacement, then use the normal Fleet VPS deletion workflow when ready."
+}
+fleet_vps_external_import_transfer_migrator_style() {
+  local state_file="$1"
+  local fleet_key="/etc/one-click/fleet/keys/id_ed25519"
+  [[ -f "$state_file" ]] && jq empty "$state_file" >/dev/null 2>&1 || {
+    error "Migration state is missing or invalid: $state_file"
+    return 1
+  }
+  [[ "$(jq -r '.mode // empty' "$state_file")" == "import" ]] || return 1
+  [[ "$(jq -r '.build.status // empty' "$state_file")" == "complete" ]] || {
+    error "Replacement build is not complete."
+    return 1
+  }
+  [[ "$(jq -r '.source.prepared // false' "$state_file")" == "true" ]] || {
+    error "Source oneclick was not prepared from the replacement VM keys."
+    return 1
+  }
+  local workspace migration_id vps_name source_host source_port destination_host destination_port target_hypervisor
+  local pull_key pull_pub
+  workspace="$(jq -r '.workspace // empty' "$state_file")"
+  migration_id="$(jq -r '.id // empty' "$state_file")"
+  vps_name="$(jq -r '.vps_name // empty' "$state_file")"
+  source_host="$(jq -r '.source.host // empty' "$state_file")"
+  source_port="$(jq -r '.source.port // 22' "$state_file")"
+  destination_host="$(jq -r '.destination.management_host // empty' "$state_file")"
+  destination_port="$(jq -r '.destination.management_port // 22' "$state_file")"
+  target_hypervisor="$(jq -r '.destination.target_host // .destination.recovery_hypervisor // empty' "$state_file")"
+  pull_key="$(jq -r '.destination.pull_key // empty' "$state_file")"
+  pull_pub="$(jq -r '.destination.pull_public_key // empty' "$state_file")"
+  [[ -f "$fleet_key" && -n "$pull_key" && -n "$pull_pub" && -n "$source_host" && -n "$destination_host" ]] || {
+    error "Import migration state is incomplete."
+    return 1
+  }
+  local destination_known_hosts="${workspace}/destination_known_hosts"
+  touch "$destination_known_hosts"
+  chmod 600 "$destination_known_hosts"
+  local -a destination_ssh_opts=(
+    -i "$fleet_key"
+    -p "$destination_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$destination_known_hosts"
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=10
+    -o ConnectTimeout=10
+  )
+  local destination_target="oneclick@${destination_host}"
+  console_recovery_route() {
+    local hv="${target_hypervisor:-}" local_hv hv_host=""
+    local_hv="$(hostname -s)"
+    error "Fleet-key SSH is unavailable on the migrated VPS."
+    info "Recovery is through the VM console, not guest SSH."
+    if [[ -z "$hv" || "$hv" == "$local_hv" || "$hv" == "127.0.0.1" || "$hv" == "localhost" ]]; then
+      printf '%s\n' "Recovery route:" "  sudo virsh console '$vps_name' --force" "Log in as oneclick using the recovery password, repair ~/.ssh/authorized_keys, then exit with Ctrl+]."
+      return 0
+    fi
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_TIMEOUT=5 ANSIBLE_GATHERING=explicit ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+      ansible "$hv" -i /etc/one-click/fleet/inventory.yml -u oneclick --become -m shell -a "virsh domstate '$vps_name' 2>/dev/null; virsh ttyconsole '$vps_name' 2>/dev/null || true" >/dev/null 2>&1 || true
+    hv_host="$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --list 2>/dev/null | jq -r --arg hv "$hv" '._meta.hostvars[$hv].ansible_host // empty')"
+    printf '%s\n' "Recovery route:" "  1. Open the owning Fleet hypervisor '$hv'${hv_host:+ ($hv_host)}." "  2. On that hypervisor run:" "     sudo virsh console '$vps_name' --force" "  3. Log in as oneclick using the recovery password and repair ~/.ssh/authorized_keys." "  4. Exit with Ctrl+]."
+  }
+  info "Waiting for replacement Fleet SSH at ${destination_host}:${destination_port}."
+  local ready=0
+  for _ in {1..60}; do
+    if ssh "${destination_ssh_opts[@]}" "$destination_target" 'sudo -n true' >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  [[ "$ready" -eq 1 ]] || {
+    error "Replacement did not become reachable over Fleet SSH."
+    return 1
+  }
+  info "Ensuring rsync is installed on the replacement VPS."
+  ssh "${destination_ssh_opts[@]}" "$destination_target" 'sudo -n bash -s' <<'ONECLICK_DEST_RSYNC'
+set -e
+if command -v rsync >/dev/null 2>&1; then exit 0; fi
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y rsync
+elif command -v dnf >/dev/null 2>&1; then
+  dnf -y install rsync
+elif command -v yum >/dev/null 2>&1; then
+  yum -y install rsync
+else
+  exit 1
+fi
+ONECLICK_DEST_RSYNC
+  jq --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="migrating" | .migration_started_at=$started' "$state_file" > "${state_file}.tmp" || return 1
+  mv -f "${state_file}.tmp" "$state_file"
+  chmod 600 "$state_file"
+  local remote_dir="/tmp/one-click-vps-migration-${migration_id}"
+  local remote_helper="${remote_dir}/pull.sh"
+  local helper_file="${workspace}/pull.sh"
+  cat > "$helper_file" <<'ONECLICK_MIGRATOR_PULL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SOURCE_HOST="$1"
+SOURCE_PORT="$2"
+KEY="$3"
+MIGRATION_LABEL="$4"
+KNOWN_HOSTS="/root/.ssh/one-click-migration-known_hosts"
+EXCLUDES="/tmp/one-click-migration-excludes.$$"
+SOURCE_SERVICES=""
+SOURCE_SERVICES_STOPPED=0
+red=$'\033[31m'
+green=$'\033[32m'
+yellow=$'\033[33m'
+blue=$'\033[34m'
+cyan=$'\033[36m'
+reset=$'\033[0m'
+mkdir -p /root/.ssh
+touch "$KNOWN_HOSTS"
+chmod 600 "$KNOWN_HOSTS" "$KEY"
+ssh_source() {
+  ssh -i "$KEY" -p "$SOURCE_PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "oneclick@${SOURCE_HOST}" "$@"
+}
+source_run() {
+  local cmd="$1" quoted
+  printf -v quoted '%q' "$cmd"
+  ssh_source "sudo -n bash -c $quoted"
+}
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+  if [[ "$rc" -ne 0 && "$SOURCE_SERVICES_STOPPED" -eq 1 && -n "$SOURCE_SERVICES" ]]; then
+    echo "${yellow}[ROLLBACK]${reset} Restarting source application services."
+    source_run "systemctl start $SOURCE_SERVICES" >/dev/null 2>&1 || true
+  fi
+  rm -f "$EXCLUDES"
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
+echo "${cyan}[CHECK]${reset} Validating source oneclick account and replacement-generated pull key."
+source_run 'id oneclick >/dev/null; sudo -n true; test -s /home/oneclick/.ssh/authorized_keys; command -v rsync >/dev/null'
+source_os="$(source_run '. /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)"')"
+dest_os="$(. /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)")"
+if [[ "$source_os" != "$dest_os" ]]; then
+  echo "${red}[ERROR]${reset} Like-for-like migration requires identical OS release and architecture."
+  echo "Source: $source_os"
+  echo "Destination: $dest_os"
+  exit 1
+fi
+cat > "$EXCLUDES" <<'EOF'
+/dev/***
+/proc/***
+/sys/***
+/tmp/***
+/run/***
+/var/run/***
+/var/lock/***
+/mnt/***
+/media/***
+/boot/***
+/lost+found
+/swapfile
+/.autorelabel
+/etc/fstab
+/etc/hostname
+/etc/hosts
+/etc/resolv.conf
+/etc/machine-id
+/var/lib/dbus/machine-id
+/etc/ssh/***
+/etc/network/***
+/etc/NetworkManager/***
+/etc/netplan/***
+/etc/sysconfig/network*
+/var/lib/NetworkManager/***
+/etc/wireguard/one-click.conf
+/etc/one-click/fleet/***
+/etc/one-click/virtualization/***
+/etc/localtime
+/etc/mtab
+/etc/adjtime
+/etc/modprobe.d/***
+/etc/modules-load.d/***
+/etc/dracut.conf.d/***
+/etc/chrony.conf
+/etc/ntp.conf
+/etc/systemd/***
+/etc/udev/***
+/etc/default/***
+/var/lib/rpm/***
+/var/lib/yum/***
+/lib/modules/***
+/usr/lib/modules/***
+/lib/firmware/***
+/lib64/modules/***
+/lib64/firmware/***
+/var/lib/nfs/rpc_pipefs/***
+/etc/passwd
+/etc/shadow
+/etc/group
+/etc/gshadow
+EOF
+while IFS= read -r net_mount; do
+  [[ -n "$net_mount" && "$net_mount" != "/" ]] || continue
+  printf '%s\n' "${net_mount%/}/***" >> "$EXCLUDES"
+done < <(source_run "findmnt -rn -t nfs,nfs4,cifs,sshfs,fuse.sshfs -o TARGET 2>/dev/null || true")
+rsync_host="$SOURCE_HOST"
+[[ "$rsync_host" == *:* && "$rsync_host" != \[*\] ]] && rsync_host="[$rsync_host]"
+SSH_RSYNC="ssh -i '$KEY' -p '$SOURCE_PORT' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='$KNOWN_HOSTS' -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+sync_tree() {
+  local entry
+  mapfile -t roots < <(source_run "find / -mindepth 1 -maxdepth 1 -printf '%f\n' | sort")
+  for entry in "${roots[@]}"; do
+    case "$entry" in
+      dev|proc|sys|tmp|run|mnt|media|boot|lost+found) continue ;;
+    esac
+    echo "${blue}[SYNC]${reset} /$entry"
+    rsync --relative -aHAXxP --filter='-x security.selinux' --numeric-ids --partial --stats --human-readable --info=progress2 --exclude-from="$EXCLUDES" --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/./${entry}" /
+  done
+}
+sync_sensitive_accounts() {
+  local file
+  echo "${blue}[SYNC]${reset} Staging final account database migration."
+  rm -rf /etc-temp
+  install -d -m 700 /etc-temp
+  for file in group gshadow shadow passwd; do
+    rsync -aHAXP --filter='-x security.selinux' --numeric-ids --partial --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/etc/${file}" /etc-temp/
+  done
+  grep -q '^oneclick:' /etc-temp/passwd || {
+    echo "${red}[ERROR]${reset} Staged passwd file does not contain oneclick."
+    exit 1
+  }
+  grep -q '^oneclick:' /etc-temp/group || {
+    echo "${red}[ERROR]${reset} Staged group file does not contain oneclick."
+    exit 1
+  }
+}
+echo "${blue}[SYNC]${reset} Initial migrator-style whole-system synchronization."
+sync_tree
+SOURCE_SERVICES="$(source_run "systemctl list-units --type=service --state=running --no-legend 2>/dev/null | awk '\$1 ~ /^(mariadb|mysql|mysqld|postgresql|redis|redis-server|valkey|mongod|docker|containerd|podman|nginx|apache2|httpd|php.*fpm).*\\.service\$/ {print \$1}' | tr '\n' ' '")"
+if [[ -n "$SOURCE_SERVICES" ]]; then
+  echo "${blue}[CUTOVER]${reset} Stopping source application/stateful services:"
+  echo "$SOURCE_SERVICES"
+  source_run "systemctl stop $SOURCE_SERVICES"
+  SOURCE_SERVICES_STOPPED=1
+fi
+echo "${blue}[SYNC]${reset} Final migrator-style synchronization."
+sync_tree
+sync_sensitive_accounts
+echo "${blue}[SYNC]${reset} Final PAM synchronization."
+rsync -aHAXP --delete --filter='-x security.selinux' --numeric-ids --partial --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/etc/pam.d/" /etc/pam.d/
+echo "${cyan}[CHECK]${reset} Validating migrated oneclick files before cutover."
+test -s /home/oneclick/.ssh/authorized_keys || {
+  echo "${red}[ERROR]${reset} Migrated oneclick authorized_keys is missing."
+  exit 1
+}
+migration_pub="$(ssh-keygen -y -f "$KEY")"
+auth_file="/home/oneclick/.ssh/authorized_keys"
+auth_tmp="/home/oneclick/.ssh/authorized_keys.one-click-migrate.$$"
+grep -Fvx "$migration_pub" "$auth_file" > "$auth_tmp" || true
+chown --reference="$auth_file" "$auth_tmp"
+chmod --reference="$auth_file" "$auth_tmp"
+mv -f "$auth_tmp" "$auth_file"
+test -s "$auth_file" || {
+  echo "${red}[ERROR]${reset} No permanent Fleet key remained after temporary pull-key removal."
+  exit 1
+}
+command -v visudo >/dev/null 2>&1 && visudo -c >/dev/null || exit 1
+command -v sshd >/dev/null 2>&1 && sshd -t
+if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+  command -v restorecon >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} SELinux is enforcing but restorecon is unavailable."
+    exit 1
+  }
+  restorecon -F /home/oneclick /home/oneclick/.ssh /home/oneclick/.ssh/authorized_keys || {
+    echo "${red}[ERROR]${reset} SELinux relabel failed for the migrated oneclick home."
+    exit 1
+  }
+  if [[ -e /etc/sudoers.d/99-oneclick-fleet ]]; then
+    restorecon -F /etc/sudoers.d/99-oneclick-fleet || {
+      echo "${red}[ERROR]${reset} SELinux relabel failed for the oneclick sudo policy."
+      exit 1
+    }
+  fi
+  touch /.autorelabel
+fi
+cutover_dir="$(dirname "$KEY")"
+cutover_script="${cutover_dir}/cutover.sh"
+cutover_log="${cutover_dir}/cutover.log"
+cat > "$cutover_script" <<'ONECLICK_ACCOUNT_CUTOVER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+for file in group gshadow shadow passwd; do
+  test -s "/etc-temp/$file"
+done
+for file in group gshadow shadow passwd; do
+  mv -f "/etc-temp/$file" "/etc/$file"
+done
+rmdir /etc-temp
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -F /etc/passwd /etc/shadow /etc/group /etc/gshadow /home/oneclick /home/oneclick/.ssh /home/oneclick/.ssh/authorized_keys /etc/sudoers.d/99-oneclick-fleet 2>/dev/null || true
+fi
+sync
+systemctl reboot -f || reboot -f
+ONECLICK_ACCOUNT_CUTOVER
+chmod 700 "$cutover_script"
+bash -n "$cutover_script"
+systemctl daemon-reload
+sync
+echo "${green}[SUCCESS]${reset} Migrator-style payload completed for $MIGRATION_LABEL."
+echo "${yellow}[NOTICE]${reset} Source application services remain stopped to prevent split-brain."
+echo "${blue}[CUTOVER]${reset} Account database is staged. Scheduling atomic swap and reboot."
+nohup bash -c 'sleep 2; exec "$1" >"$2" 2>&1' _ "$cutover_script" "$cutover_log" >/dev/null 2>&1 </dev/null &
+ONECLICK_MIGRATOR_PULL
+  chmod 700 "$helper_file"
+  ssh "${destination_ssh_opts[@]}" "$destination_target" "rm -rf '$remote_dir' && mkdir -p '$remote_dir' && chmod 700 '$remote_dir'" || return 1
+  scp -i "$fleet_key" -P "$destination_port" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$destination_known_hosts" "$helper_file" "${destination_target}:${remote_dir}/" || {
+    error "Unable to stage migration worker on replacement."
+    return 1
+  }
+  local -a helper_args=("$source_host" "$source_port" "$pull_key" "$vps_name")
+  local helper_cmd
+  printf -v helper_cmd '%q ' "${helper_args[@]}"
+  info "Starting migrator-style destination pull."
+  if ! ssh "${destination_ssh_opts[@]}" "$destination_target" "sudo -n bash '$remote_helper' $helper_cmd"; then
+    error "Whole-VPS migration failed. Source services are restarted automatically when cutover had begun."
+    return 1
+  fi
+  info "Final account cutover and reboot were scheduled by the migration worker."
+  local down_seen=0
+  for _ in {1..60}; do
+    if ! ssh "${destination_ssh_opts[@]}" "$destination_target" 'true' >/dev/null 2>&1; then
+      down_seen=1
+      break
+    fi
+    sleep 1
+  done
+  [[ "$down_seen" -eq 1 ]] || {
+    error "Destination never entered the scheduled reboot."
+    console_recovery_route
+    return 1
+  }
+  info "Destination reboot detected. Waiting for Fleet-key access to return."
+  ready=0
+  for _ in {1..120}; do
+    if ssh "${destination_ssh_opts[@]}" "$destination_target" 'sudo -n true' >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    error "Migration payload completed, but Fleet-key SSH did not return after reboot."
+    console_recovery_route
+    return 1
+  fi
+  info "Destination returned after reboot with Fleet-key access."
+  ssh "${destination_ssh_opts[@]}" "$destination_target" "sudo -n rm -f '$pull_key' '${pull_key}.pub'; sudo -n rm -rf '$remote_dir'" >/dev/null 2>&1 || warn "Migration completed, but temporary destination migration files still need cleanup."
+  local source_cleanup_known_hosts="${workspace}/source_cleanup_known_hosts"
+  touch "$source_cleanup_known_hosts"
+  chmod 600 "$source_cleanup_known_hosts"
+  local -a source_cleanup_ssh=(
+    ssh
+    -i "$fleet_key"
+    -p "$source_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$source_cleanup_known_hosts"
+    -o ConnectTimeout=10
+    "oneclick@${source_host}"
+  )
+  local pull_pub_b64
+  pull_pub_b64="$(printf '%s' "$pull_pub" | base64 -w0)"
+  "${source_cleanup_ssh[@]}" "bash -s -- '$pull_pub_b64'" <<'ONECLICK_SOURCE_KEY_CLEANUP' >/dev/null 2>&1 || warn "Migration succeeded, but the temporary pull public key still needs removal from source oneclick."
+set -e
+PUB_B64="$1"
+printf '%s' "$PUB_B64" | base64 -d > /tmp/oneclick-pull.pub
+grep -Fvx -f /tmp/oneclick-pull.pub /home/oneclick/.ssh/authorized_keys > /home/oneclick/.ssh/authorized_keys.tmp || true
+mv -f /home/oneclick/.ssh/authorized_keys.tmp /home/oneclick/.ssh/authorized_keys
+chmod 600 /home/oneclick/.ssh/authorized_keys
+rm -f /tmp/oneclick-pull.pub
+ONECLICK_SOURCE_KEY_CLEANUP
+  jq --arg completed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="complete" | .completed_at=$completed' "$state_file" > "${state_file}.tmp" && mv -f "${state_file}.tmp" "$state_file"
+  success "Whole-VPS migration completed successfully."
+  warn "The source VPS was not deleted. Its application services remain stopped to prevent split-brain."
+}
+fleet_vps_external_export_transfer_migrator_style() {
+  local state_file="$1"
+  local fleet_key="/etc/one-click/fleet/keys/id_ed25519"
+  [[ -f "$state_file" ]] && jq empty "$state_file" >/dev/null 2>&1 || {
+    error "Migration state is missing or invalid: $state_file"
+    return 1
+  }
+  [[ "$(jq -r '.mode // empty' "$state_file")" == "export" ]] || return 1
+  local workspace migration_id vps_name migration_key migration_pub
+  local source_host source_port source_mgmt_host source_mgmt_port
+  local destination_host destination_port destination_user
+  workspace="$(jq -r '.workspace // empty' "$state_file")"
+  migration_id="$(jq -r '.id // empty' "$state_file")"
+  vps_name="$(jq -r '.vps_name // empty' "$state_file")"
+  migration_key="$(jq -r '.key_file // empty' "$state_file")"
+  migration_pub="$(jq -r '.public_key_file // empty' "$state_file")"
+  source_host="$(jq -r '.source.host // empty' "$state_file")"
+  source_port="$(jq -r '.source.port // 22' "$state_file")"
+  source_mgmt_host="$(jq -r '.source.management_host // empty' "$state_file")"
+  source_mgmt_port="$(jq -r '.source.management_port // 22' "$state_file")"
+  destination_host="$(jq -r '.destination.host // empty' "$state_file")"
+  destination_user="$(jq -r '.destination.user // empty' "$state_file")"
+  destination_port="$(jq -r '.destination.port // 22' "$state_file")"
+  [[ -f "$fleet_key" && -f "$migration_key" && -f "$migration_pub" &&
+     -n "$source_host" && -n "$source_mgmt_host" &&
+     -n "$destination_host" && -n "$destination_user" &&
+     "$source_port" =~ ^[0-9]+$ && "$source_mgmt_port" =~ ^[0-9]+$ &&
+     "$destination_port" =~ ^[0-9]+$ ]] || {
+    error "Export migration state is incomplete."
+    return 1
+  }
+  local destination_known_hosts="${workspace}/destination_known_hosts"
+  touch "$destination_known_hosts"
+  chmod 600 "$destination_known_hosts"
+  local -a bootstrap_ssh_opts=(
+    -i "$migration_key"
+    -p "$destination_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$destination_known_hosts"
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=10
+    -o ConnectTimeout=10
+  )
+  local bootstrap_target="${destination_user}@${destination_host}"
+  external_recovery_route() {
+    error "SSH did not return on the exported replacement."
+    info "Recovery is through the external provider console/KVM/VNC, not Fleet virsh."
+    printf '%s\n' \
+      "Recovery route:" \
+      "  1. Open the replacement VPS console from its hosting provider." \
+      "  2. Boot the VPS normally and log in with an account from the migrated source." \
+      "  3. Verify /home/oneclick/.ssh/authorized_keys and the preserved destination SSH configuration." \
+      "  4. The original Fleet VPS remains available and was not deleted."
+  }
+  info "Waiting for external replacement bootstrap access at ${destination_host}:${destination_port}."
+  local ready=0
+  for _ in {1..60}; do
+    if ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" 'sudo -n true' >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  [[ "$ready" -eq 1 ]] || {
+    error "External replacement did not become reachable with the temporary export account."
+    return 1
+  }
+  info "Ensuring rsync is installed on the external replacement."
+  ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" 'sudo -n bash -s' <<'ONECLICK_EXPORT_RSYNC'
+set -e
+if command -v rsync >/dev/null 2>&1; then exit 0; fi
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y rsync
+elif command -v dnf >/dev/null 2>&1; then
+  dnf -y install rsync
+elif command -v yum >/dev/null 2>&1; then
+  yum -y install rsync
+else
+  exit 1
+fi
+ONECLICK_EXPORT_RSYNC
+  local pre_boot_id
+  pre_boot_id="$(ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)"
+  [[ -n "$pre_boot_id" ]] || {
+    error "Could not read the replacement boot ID before migration."
+    return 1
+  }
+  jq --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '.status="migrating" | .migration_started_at=$started' "$state_file" > "${state_file}.tmp" || return 1
+  mv -f "${state_file}.tmp" "$state_file"
+  chmod 600 "$state_file"
+  local remote_dir="/tmp/one-click-vps-export-${migration_id}"
+  local remote_key="${remote_dir}/migration_key"
+  local remote_helper="${remote_dir}/pull.sh"
+  local helper_file="${workspace}/export-pull.sh"
+  cat > "$helper_file" <<'ONECLICK_EXPORT_PULL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SOURCE_HOST="$1"
+SOURCE_PORT="$2"
+KEY="$3"
+MIGRATION_LABEL="$4"
+DEST_BOOTSTRAP_USER="$5"
+KNOWN_HOSTS="/root/.ssh/one-click-export-known_hosts"
+EXCLUDES="/tmp/one-click-export-excludes.$$"
+SOURCE_SERVICES=""
+SOURCE_SERVICES_STOPPED=0
+red=$'\033[31m'
+green=$'\033[32m'
+yellow=$'\033[33m'
+blue=$'\033[34m'
+cyan=$'\033[36m'
+reset=$'\033[0m'
+mkdir -p /root/.ssh
+touch "$KNOWN_HOSTS"
+chmod 600 "$KNOWN_HOSTS" "$KEY"
+ssh_source() {
+  ssh -i "$KEY" -p "$SOURCE_PORT" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "oneclick@${SOURCE_HOST}" "$@"
+}
+source_run() {
+  local cmd="$1" quoted
+  printf -v quoted '%q' "$cmd"
+  ssh_source "sudo -n bash -c $quoted"
+}
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+  if [[ "$rc" -ne 0 && "$SOURCE_SERVICES_STOPPED" -eq 1 && -n "$SOURCE_SERVICES" ]]; then
+    echo "${yellow}[ROLLBACK]${reset} Restarting source application services."
+    source_run "systemctl start $SOURCE_SERVICES" >/dev/null 2>&1 || true
+  fi
+  rm -f "$EXCLUDES"
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
+echo "${cyan}[CHECK]${reset} Validating Fleet source oneclick and export key."
+source_run 'id oneclick >/dev/null; sudo -n true; test -s /home/oneclick/.ssh/authorized_keys; command -v rsync >/dev/null'
+source_os="$(source_run '. /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)"')"
+dest_os="$(. /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)")"
+if [[ "$source_os" != "$dest_os" ]]; then
+  echo "${red}[ERROR]${reset} Like-for-like export requires identical OS release and architecture."
+  echo "Source: $source_os"
+  echo "Destination: $dest_os"
+  exit 1
+fi
+cat > "$EXCLUDES" <<'EOF'
+/dev/***
+/proc/***
+/sys/***
+/tmp/***
+/run/***
+/var/run/***
+/var/lock/***
+/mnt/***
+/media/***
+/boot/***
+/lost+found
+/swapfile
+/.autorelabel
+/etc/fstab
+/etc/hostname
+/etc/hosts
+/etc/resolv.conf
+/etc/machine-id
+/var/lib/dbus/machine-id
+/etc/ssh/***
+/etc/network/***
+/etc/NetworkManager/***
+/etc/netplan/***
+/etc/sysconfig/network*
+/var/lib/NetworkManager/***
+/etc/wireguard/***
+/etc/one-click/fleet/***
+/etc/one-click/virtualization/***
+/etc/localtime
+/etc/mtab
+/etc/adjtime
+/etc/modprobe.d/***
+/etc/modules-load.d/***
+/etc/dracut.conf.d/***
+/etc/chrony.conf
+/etc/ntp.conf
+/etc/systemd/***
+/etc/udev/***
+/etc/default/***
+/var/lib/rpm/***
+/var/lib/yum/***
+/lib/modules/***
+/usr/lib/modules/***
+/lib/firmware/***
+/lib64/modules/***
+/lib64/firmware/***
+/var/lib/nfs/rpc_pipefs/***
+/etc/passwd
+/etc/shadow
+/etc/group
+/etc/gshadow
+EOF
+while IFS= read -r net_mount; do
+  [[ -n "$net_mount" && "$net_mount" != "/" ]] || continue
+  printf '%s\n' "${net_mount%/}/***" >> "$EXCLUDES"
+done < <(source_run "findmnt -rn -t nfs,nfs4,cifs,sshfs,fuse.sshfs -o TARGET 2>/dev/null || true")
+rsync_host="$SOURCE_HOST"
+[[ "$rsync_host" == *:* && "$rsync_host" != \[*\] ]] && rsync_host="[$rsync_host]"
+SSH_RSYNC="ssh -i '$KEY' -p '$SOURCE_PORT' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='$KNOWN_HOSTS' -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+sync_tree() {
+  local entry
+  mapfile -t roots < <(source_run "find / -mindepth 1 -maxdepth 1 -printf '%f\n' | sort")
+  for entry in "${roots[@]}"; do
+    case "$entry" in
+      dev|proc|sys|tmp|run|mnt|media|boot|lost+found) continue ;;
+    esac
+    echo "${blue}[SYNC]${reset} /$entry"
+    rsync --relative -aHAXxP --filter='-x security.selinux' --numeric-ids --partial --stats --human-readable --info=progress2 --exclude-from="$EXCLUDES" --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/./${entry}" /
+  done
+}
+stage_accounts() {
+  local file
+  echo "${blue}[SYNC]${reset} Staging final source account database."
+  rm -rf /etc-temp
+  install -d -m 700 /etc-temp
+  for file in group gshadow shadow passwd; do
+    rsync -aHAXP --filter='-x security.selinux' --numeric-ids --partial --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/etc/${file}" /etc-temp/
+  done
+  grep -q '^oneclick:' /etc-temp/passwd || {
+    echo "${red}[ERROR]${reset} Staged passwd file does not contain source oneclick."
+    exit 1
+  }
+  grep -q '^oneclick:' /etc-temp/group || {
+    echo "${red}[ERROR]${reset} Staged group file does not contain source oneclick."
+    exit 1
+  }
+}
+echo "${blue}[SYNC]${reset} Initial whole-system export synchronization."
+sync_tree
+SOURCE_SERVICES="$(source_run "systemctl list-units --type=service --state=running --no-legend 2>/dev/null | awk '\$1 ~ /^(mariadb|mysql|mysqld|postgresql|redis|redis-server|valkey|mongod|docker|containerd|podman|nginx|apache2|httpd|php.*fpm).*\\.service\$/ {print \$1}' | tr '\n' ' '")"
+if [[ -n "$SOURCE_SERVICES" ]]; then
+  echo "${blue}[CUTOVER]${reset} Stopping source application/stateful services:"
+  echo "$SOURCE_SERVICES"
+  source_run "systemctl stop $SOURCE_SERVICES"
+  SOURCE_SERVICES_STOPPED=1
+fi
+echo "${blue}[SYNC]${reset} Final whole-system export synchronization."
+sync_tree
+stage_accounts
+echo "${blue}[SYNC]${reset} Final PAM synchronization."
+rsync -aHAXP --delete --filter='-x security.selinux' --numeric-ids --partial --rsync-path="sudo -n rsync" -e "$SSH_RSYNC" "oneclick@${rsync_host}:/etc/pam.d/" /etc/pam.d/
+echo "${cyan}[CHECK]${reset} Validating migrated source oneclick before cutover."
+test -s /home/oneclick/.ssh/authorized_keys || {
+  echo "${red}[ERROR]${reset} Migrated source oneclick authorized_keys is missing."
+  exit 1
+}
+migration_pub="$(ssh-keygen -y -f "$KEY")"
+grep -qxF "$migration_pub" /home/oneclick/.ssh/authorized_keys || {
+  echo "${red}[ERROR]${reset} Temporary export key did not migrate with source oneclick."
+  exit 1
+}
+command -v visudo >/dev/null 2>&1 && visudo -c >/dev/null || exit 1
+command -v sshd >/dev/null 2>&1 && sshd -t
+if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+  command -v restorecon >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} SELinux is enforcing but restorecon is unavailable."
+    exit 1
+  }
+  restorecon -F /home/oneclick /home/oneclick/.ssh /home/oneclick/.ssh/authorized_keys || {
+    echo "${red}[ERROR]${reset} SELinux relabel failed for migrated oneclick."
+    exit 1
+  }
+  touch /.autorelabel
+fi
+cutover_dir="$(dirname "$KEY")"
+cutover_script="${cutover_dir}/cutover.sh"
+cutover_log="${cutover_dir}/cutover.log"
+cat > "$cutover_script" <<'ONECLICK_EXPORT_CUTOVER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+DEST_BOOTSTRAP_USER="$1"
+for file in group gshadow shadow passwd; do
+  test -s "/etc-temp/$file"
+done
+for file in group gshadow shadow passwd; do
+  mv -f "/etc-temp/$file" "/etc/$file"
+done
+rmdir /etc-temp
+rm -f "/etc/sudoers.d/one-click-migration-${DEST_BOOTSTRAP_USER}" 2>/dev/null || true
+rm -rf "/home/${DEST_BOOTSTRAP_USER}" 2>/dev/null || true
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -F /etc/passwd /etc/shadow /etc/group /etc/gshadow /home/oneclick /home/oneclick/.ssh /home/oneclick/.ssh/authorized_keys 2>/dev/null || true
+fi
+sync
+systemctl reboot -f || reboot -f
+ONECLICK_EXPORT_CUTOVER
+chmod 700 "$cutover_script"
+bash -n "$cutover_script"
+systemctl daemon-reload
+sync
+echo "${green}[SUCCESS]${reset} Export payload completed for $MIGRATION_LABEL."
+echo "${yellow}[NOTICE]${reset} Source application services remain stopped to prevent split-brain."
+echo "${blue}[CUTOVER]${reset} Source account database is staged. Scheduling atomic swap and reboot."
+nohup bash -c 'sleep 2; exec "$1" "$2" >"$3" 2>&1' _ "$cutover_script" "$DEST_BOOTSTRAP_USER" "$cutover_log" >/dev/null 2>&1 </dev/null &
+ONECLICK_EXPORT_PULL
+  chmod 700 "$helper_file"
+  ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" "rm -rf '$remote_dir' && mkdir -p '$remote_dir' && chmod 700 '$remote_dir'" || return 1
+  scp -i "$migration_key" -P "$destination_port" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$destination_known_hosts" "$helper_file" "$migration_key" "${bootstrap_target}:${remote_dir}/" || {
+    error "Unable to stage export worker/key on the external replacement."
+    return 1
+  }
+  ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" "mv '$remote_dir/$(basename "$migration_key")' '$remote_key'; chmod 600 '$remote_key'; chmod 700 '$remote_helper'" || return 1
+  local -a helper_args=("$source_host" "$source_port" "$remote_key" "$vps_name" "$destination_user")
+  local helper_cmd
+  printf -v helper_cmd '%q ' "${helper_args[@]}"
+  info "Starting external destination pull."
+  info "The Fleet source remains live for the first pass; application services stop only for the final pass."
+  if ! ssh "${bootstrap_ssh_opts[@]}" "$bootstrap_target" "sudo -n bash '$remote_helper' $helper_cmd"; then
+    error "Export failed. The worker attempts to restart Fleet source services if cutover had begun."
+    return 1
+  fi
+  info "Final account cutover and reboot were scheduled by the external replacement."
+  local oneclick_target="oneclick@${destination_host}"
+  local post_boot_id=""
+  ready=0
+  for _ in {1..120}; do
+    post_boot_id="$(ssh "${bootstrap_ssh_opts[@]}" "$oneclick_target" 'cat /proc/sys/kernel/random/boot_id; sudo -n true' 2>/dev/null | head -n1 || true)"
+    if [[ -n "$post_boot_id" && "$post_boot_id" != "$pre_boot_id" ]]; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    error "Export payload completed, but source oneclick did not return after the replacement reboot."
+    external_recovery_route
+    return 1
+  fi
+  success "External replacement returned after reboot as migrated source oneclick."
+  local -a permanent_ssh_opts=(
+    -i "$fleet_key"
+    -p "$destination_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$destination_known_hosts"
+    -o ConnectTimeout=10
+  )
+  local permanent_key_ok=0
+  if ssh "${permanent_ssh_opts[@]}" "$oneclick_target" 'sudo -n true' >/dev/null 2>&1; then
+    permanent_key_ok=1
+    success "Permanent Fleet controller key also authenticates to exported oneclick."
+  else
+    warn "Permanent Fleet controller key did not authenticate to the external replacement."
+    warn "The temporary export key is being retained so the exported VPS remains accessible."
+  fi
+  local source_known_hosts="${workspace}/fleet_source_cleanup_known_hosts"
+  touch "$source_known_hosts"
+  chmod 600 "$source_known_hosts"
+  local pub_b64
+  pub_b64="$(base64 -w0 < "$migration_pub")"
+  ssh -i "$fleet_key" -p "$source_mgmt_port" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$source_known_hosts" "oneclick@${source_mgmt_host}" "bash -s -- '$pub_b64'" <<'ONECLICK_EXPORT_SOURCE_CLEANUP' >/dev/null 2>&1 || warn "Export succeeded, but the temporary export key still needs removal from the original Fleet source."
+set -e
+PUB_B64="$1"
+printf '%s' "$PUB_B64" | base64 -d > /tmp/one-click-export.pub
+grep -Fvx -f /tmp/one-click-export.pub /home/oneclick/.ssh/authorized_keys > /home/oneclick/.ssh/authorized_keys.tmp || true
+mv -f /home/oneclick/.ssh/authorized_keys.tmp /home/oneclick/.ssh/authorized_keys
+chown oneclick:"$(id -gn oneclick)" /home/oneclick/.ssh/authorized_keys
+chmod 600 /home/oneclick/.ssh/authorized_keys
+rm -f /tmp/one-click-export.pub
+ONECLICK_EXPORT_SOURCE_CLEANUP
+  if [[ "$permanent_key_ok" -eq 1 ]]; then
+    ssh "${permanent_ssh_opts[@]}" "$oneclick_target" "bash -s -- '$pub_b64' '$remote_dir'" <<'ONECLICK_EXPORT_DEST_CLEANUP' >/dev/null 2>&1 || warn "Export succeeded, but temporary export files still need cleanup on the replacement."
+set -e
+PUB_B64="$1"
+REMOTE_DIR="$2"
+printf '%s' "$PUB_B64" | base64 -d > /tmp/one-click-export.pub
+grep -Fvx -f /tmp/one-click-export.pub /home/oneclick/.ssh/authorized_keys > /home/oneclick/.ssh/authorized_keys.tmp || true
+mv -f /home/oneclick/.ssh/authorized_keys.tmp /home/oneclick/.ssh/authorized_keys
+chown oneclick:"$(id -gn oneclick)" /home/oneclick/.ssh/authorized_keys
+chmod 600 /home/oneclick/.ssh/authorized_keys
+rm -f /tmp/one-click-export.pub
+sudo -n rm -rf "$REMOTE_DIR"
+ONECLICK_EXPORT_DEST_CLEANUP
+    rm -f "$migration_key" "$migration_pub"
+  fi
+  jq \
+    --arg completed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --argjson temporary_key_retained "$([[ "$permanent_key_ok" -eq 1 ]] && echo false || echo true)" \
+    '.status="complete" | .completed_at=$completed | .temporary_key_retained=$temporary_key_retained' \
+    "$state_file" > "${state_file}.tmp" &&
+    mv -f "${state_file}.tmp" "$state_file"
+  success "Fleet VPS export completed successfully."
+  warn "The original Fleet VPS was not deleted. Its application services remain stopped to prevent split-brain."
+  if [[ "$permanent_key_ok" -ne 1 ]]; then
+    info "Temporary export key retained at: $migration_key"
+  fi
+}
+fleet_vps_external_transfer() {
+  local state_file="$1"
+  local fleet_state_root="/etc/one-click/fleet/state"
+  local fleet_key="/etc/one-click/fleet/keys/id_ed25519"
+  [[ -n "$state_file" && -f "$state_file" ]] || {
+    error "Migration state file not found: ${state_file:-unset}"
+    return 1
+  }
+  jq empty "$state_file" >/dev/null 2>&1 || {
+    error "Migration state is invalid: $state_file"
+    return 1
+  }
+  local version mode migration_id workspace vps_name migration_key migration_pub
+  version="$(jq -r '.version // 0' "$state_file")"
+  mode="$(jq -r '.mode // empty' "$state_file")"
+  if [[ "$mode" == "import" ]]; then
+    fleet_vps_external_import_transfer_migrator_style "$state_file"
+    return $?
+  fi
+  if [[ "$mode" == "export" ]]; then
+    fleet_vps_external_export_transfer_migrator_style "$state_file"
+    return $?
+  fi
+  migration_id="$(jq -r '.id // empty' "$state_file")"
+  workspace="$(jq -r '.workspace // empty' "$state_file")"
+  vps_name="$(jq -r '.vps_name // empty' "$state_file")"
+  migration_key="$(jq -r '.key_file // empty' "$state_file")"
+  migration_pub="$(jq -r '.public_key_file // empty' "$state_file")"
+  [[ "$version" == "3" || "$version" == "4" ]] || {
+    error "Unsupported migration state version: $version"
+    return 1
+  }
+  [[ "$mode" == "import" || "$mode" == "export" ]] || {
+    error "Unsupported migration mode: ${mode:-unset}"
+    return 1
+  }
+  [[ -n "$workspace" && -n "$vps_name" &&
+     -f "$migration_key" && -f "$migration_pub" ]] || {
+    error "Migration state is incomplete."
+    return 1
+  }
+  [[ -f "$fleet_key" ]] || {
+    error "Fleet controller key is missing: $fleet_key"
+    return 1
+  }
+  local source_host source_user source_port
+  source_host="$(jq -r '.source.host // empty' "$state_file")"
+  source_user="$(jq -r '.source.user // empty' "$state_file")"
+  source_port="$(jq -r '.source.port // 22' "$state_file")"
+  [[ -n "$source_host" && -n "$source_user" && "$source_port" =~ ^[0-9]+$ ]] || {
+    error "Migration source transport is incomplete."
+    return 1
+  }
+  local destination_host destination_user destination_port destination_key
+  local destination_known_hosts="${workspace}/destination_known_hosts"
+  if [[ "$mode" == "import" ]]; then
+    local build_status
+    build_status="$(jq -r '.build.status // empty' "$state_file")"
+    [[ "$build_status" == "complete" ]] || {
+      error "Migration refused: replacement build status is '${build_status:-missing}'."
+      return 1
+    }
+    destination_host="$(jq -r '.destination.management_host // empty' "$state_file")"
+    destination_port="$(jq -r '.destination.management_port // 22' "$state_file")"
+    destination_user="oneclick"
+    destination_key="$fleet_key"
+    local recovery_hypervisor recovery_ip
+    recovery_hypervisor="$(jq -r '.destination.recovery_hypervisor // .destination.target_host // empty' "$state_file")"
+    recovery_ip="$(jq -r '.destination.recovery_ip // empty' "$state_file")"
+    [[ -n "$destination_host" && "$destination_port" =~ ^[0-9]+$ ]] || {
+      error "Migration refused: the create handoff did not include the replacement Fleet endpoint."
+      return 1
+    }
+  else
+    destination_host="$(jq -r '.destination.host // empty' "$state_file")"
+    destination_user="$(jq -r '.destination.user // empty' "$state_file")"
+    destination_port="$(jq -r '.destination.port // 22' "$state_file")"
+    destination_key="$migration_key"
+  fi
+  [[ -n "$destination_host" && -n "$destination_user" &&
+     "$destination_port" =~ ^[0-9]+$ ]] || {
+    error "Migration destination transport is incomplete."
+    return 1
+  }
+  touch "$destination_known_hosts"
+  chmod 600 "$destination_known_hosts"
+  local -a destination_ssh_opts=(
+    -i "$destination_key"
+    -p "$destination_port"
+    -o IdentitiesOnly=yes
+    -o BatchMode=yes
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$destination_known_hosts"
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=10
+    -o ConnectTimeout=10
+  )
+  local destination_target="${destination_user}@${destination_host}"
+  migration_password_recovery_hint() {
+    [[ "$mode" == "import" ]] || return 0
+    local hv="${recovery_hypervisor:-}" rip="${recovery_ip:-}" local_hv hv_host="" console_tty=""
+    warn "Fleet-key SSH is unavailable on ${destination_host}:${destination_port}."
+    info "Guest SSH is NOT used for recovery. Recovery is through the VM console."
+    local_hv="$(hostname -s)"
+    if [[ -z "$hv" || "$hv" == "$local_hv" || "$hv" == "127.0.0.1" || "$hv" == "localhost" ]]; then
+      info "Recovery hypervisor: local (${local_hv})."
+      if command -v virsh >/dev/null 2>&1; then
+        if sudo virsh domstate "$vps_name" >/dev/null 2>&1; then
+          console_tty="$(sudo virsh ttyconsole "$vps_name" 2>/dev/null || true)"
+          [[ -n "$console_tty" ]] && info "VM serial console device: $console_tty"
+        else
+          warn "VM '$vps_name' is not currently visible to local libvirt."
+        fi
+      fi
+      printf '%s\n' \
+        "Recovery route:" \
+        "  1. Stay on this hypervisor." \
+        "  2. Open the VM console:" \
+        "     sudo virsh console '$vps_name' --force" \
+        "  3. Log in as oneclick using the recovery password configured during provisioning." \
+        "  4. Repair /home/oneclick/.ssh/authorized_keys or the Fleet SSH configuration." \
+        "  5. Exit the libvirt console with Ctrl+]."
+      [[ -n "$rip" ]] && info "Recorded DHCP-side VM address (diagnostic only): $rip"
+      return 0
+    fi
+    info "Recovery hypervisor: remote Fleet node '$hv'."
+    info "Verifying the VM and serial console on '$hv' through Fleet Ansible."
+    local console_check
+    console_check="$(
+      ANSIBLE_HOST_KEY_CHECKING=False \
+      ANSIBLE_SSH_TIMEOUT=5 \
+      ANSIBLE_GATHERING=explicit \
+      ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+      ansible "$hv" \
+        -i /etc/one-click/fleet/inventory.yml \
+        -u oneclick --become \
+        -m shell \
+        -a "printf 'STATE='; virsh domstate '$vps_name' 2>/dev/null || true; printf 'TTY='; virsh ttyconsole '$vps_name' 2>/dev/null || true" \
+        2>/dev/null || true
+    )"
+    if [[ -n "$console_check" ]]; then
+      printf '%s\n' "$console_check" | sed -n '/STATE=/p;/TTY=/p'
+    else
+      warn "Fleet Ansible could not verify the VM console on '$hv'."
+    fi
+    hv_host="$(
+      ansible-inventory -i /etc/one-click/fleet/inventory.yml --list 2>/dev/null |
+        jq -r --arg hv "$hv" '._meta.hostvars[$hv].ansible_host // empty'
+    )"
+    if [[ -z "$hv_host" ]]; then
+      warn "Could not resolve the Fleet management address for hypervisor '$hv'."
+      printf '%s\n' \
+        "Recovery route:" \
+        "  1. Open an interactive Fleet session to hypervisor '$hv' using the normal Fleet management path." \
+        "  2. On that hypervisor run:" \
+        "     sudo virsh console '$vps_name' --force" \
+        "  3. Log in as oneclick using the recovery password configured during provisioning." \
+        "  4. Repair /home/oneclick/.ssh/authorized_keys or the Fleet SSH configuration." \
+        "  5. Exit the libvirt console with Ctrl+]."
+      [[ -n "$rip" ]] && info "Recorded DHCP-side VM address (diagnostic only): $rip"
+      return 0
+    fi
+    printf '%s\n' \
+      "Recovery route:" \
+      "  1. Fleet/Ansible has identified the owning hypervisor as '$hv' ($hv_host)." \
+      "  2. Open an interactive shell to that hypervisor:" \
+      "     ssh -tt -i /etc/one-click/fleet/keys/id_ed25519 -o IdentitiesOnly=yes oneclick@$hv_host" \
+      "  3. On the hypervisor open the VM console:" \
+      "     sudo virsh console '$vps_name' --force" \
+      "  4. Log in as oneclick using the recovery password configured during provisioning." \
+      "  5. Repair /home/oneclick/.ssh/authorized_keys or the Fleet SSH configuration." \
+      "  6. Exit the libvirt console with Ctrl+]."
+    [[ -n "$rip" ]] && info "Recorded DHCP-side VM address (diagnostic only): $rip"
+  }
+  info "Waiting for migration destination ${destination_target}:${destination_port} to become ready."
+  local destination_ready=0
+  for _ in {1..60}; do
+    if ssh "${destination_ssh_opts[@]}" "$destination_target" \
+      'sudo -n true' >/dev/null 2>&1; then
+      destination_ready=1
+      break
+    fi
+    sleep 5
+  done
+  [[ "$destination_ready" -eq 1 ]] || {
+    error "Destination did not become reachable over SSH within 5 minutes."
+    return 1
+  }
+  info "Ensuring migration tooling is installed on the replacement VPS."
+  if ! ssh "${destination_ssh_opts[@]}" "$destination_target" 'sudo -n bash -s' <<'ONECLICK_DEST_PREP'
+set -e
+if command -v rsync >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y rsync
+elif command -v dnf >/dev/null 2>&1; then
+  dnf -y install rsync
+elif command -v yum >/dev/null 2>&1; then
+  yum -y install rsync
+else
+  echo "No supported package manager is available to install rsync." >&2
+  exit 1
+fi
+ONECLICK_DEST_PREP
+  then
+    error "Could not prepare rsync on the replacement VPS."
+    return 1
+  fi
+  if [[ "$mode" == "import" ]]; then
+    jq \
+      --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '.status="migrating" | .migration_started_at=$started' \
+      "$state_file" > "${state_file}.tmp" || return 1
+    mv "${state_file}.tmp" "$state_file"
+    chmod 600 "$state_file"
+  fi
+  local remote_dir="/tmp/one-click-vps-migration-${migration_id}"
+  local remote_helper="${remote_dir}/pull.sh"
+  local remote_key="${remote_dir}/migration_key"
+  local helper_file="${workspace}/pull.sh"
+  cat > "$helper_file" <<'ONECLICK_MIGRATION_HELPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+SOURCE_HOST="$1"
+SOURCE_USER="$2"
+SOURCE_PORT="$3"
+KEY="$4"
+DEST_LOGIN_USER="$5"
+MIGRATION_MODE="$6"
+MIGRATION_LABEL="$7"
+KNOWN_HOSTS="/root/.ssh/one-click-migration-known_hosts"
+EXCLUDES="/tmp/one-click-migration-excludes.$$"
+PRESERVE="/tmp/one-click-migration-preserve.$$"
+SOURCE_SERVICES=""
+SOURCE_SERVICES_STOPPED=0
+red=$'\033[31m'
+green=$'\033[32m'
+yellow=$'\033[33m'
+blue=$'\033[34m'
+cyan=$'\033[36m'
+magenta=$'\033[35m'
+orange=$'\033[38;5;208m'
+lime=$'\033[38;5;193m'
+bold=$'\033[1m'
+reset=$'\033[0m'
+mkdir -p /root/.ssh "$PRESERVE"
+chmod 700 "$PRESERVE"
+touch "$KNOWN_HOSTS"
+chmod 600 "$KNOWN_HOSTS" "$KEY"
+ssh_source() {
+  ssh -i "$KEY" -p "$SOURCE_PORT" \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=10 \
+    "${SOURCE_USER}@${SOURCE_HOST}" "$@"
+}
+source_run() {
+  local cmd="$1" quoted
+  printf -v quoted '%q' "$cmd"
+  if [[ "$SOURCE_USER" == "root" ]]; then
+    ssh_source "bash -c $quoted"
+  else
+    ssh_source "sudo -n bash -c $quoted"
+  fi
+}
+restore_preserved_identity_on_failure() {
+  if [[ "${dest_had_oneclick:-0}" -eq 1 &&
+        -s "$PRESERVE/passwd.oneclick" &&
+        -s "$PRESERVE/group.oneclick" ]]; then
+    local group_name tmp safe_id
+    group_name="$(cat "$PRESERVE/oneclick.primary_group" 2>/dev/null || true)"
+    safe_id="${oneclick_safe_id:-}"
+    if [[ -n "$group_name" && -n "$safe_id" ]]; then
+      tmp="/etc/passwd.one-click-rollback.$$"
+      grep -v '^oneclick:' /etc/passwd > "$tmp" || true
+      cat "$PRESERVE/passwd.oneclick" >> "$tmp"
+      chown --reference=/etc/passwd "$tmp" 2>/dev/null || true
+      chmod "$(cat "$PRESERVE/passwd.mode")" "$tmp" 2>/dev/null || true
+      mv -f "$tmp" /etc/passwd
+      tmp="/etc/shadow.one-click-rollback.$$"
+      grep -v '^oneclick:' /etc/shadow > "$tmp" || true
+      cat "$PRESERVE/shadow.oneclick" >> "$tmp"
+      chown --reference=/etc/shadow "$tmp" 2>/dev/null || true
+      chmod "$(cat "$PRESERVE/shadow.mode")" "$tmp" 2>/dev/null || true
+      mv -f "$tmp" /etc/shadow
+      tmp="/etc/group.one-click-rollback.$$"
+      grep -v "^${group_name}:" /etc/group > "$tmp" || true
+      cat "$PRESERVE/group.oneclick" >> "$tmp"
+      chown --reference=/etc/group "$tmp" 2>/dev/null || true
+      chmod "$(cat "$PRESERVE/group.mode")" "$tmp" 2>/dev/null || true
+      mv -f "$tmp" /etc/group
+      tmp="/etc/gshadow.one-click-rollback.$$"
+      grep -v "^${group_name}:" /etc/gshadow > "$tmp" || true
+      cat "$PRESERVE/gshadow.oneclick" >> "$tmp"
+      chown --reference=/etc/gshadow "$tmp" 2>/dev/null || true
+      chmod "$(cat "$PRESERVE/gshadow.mode")" "$tmp" 2>/dev/null || true
+      mv -f "$tmp" /etc/gshadow
+      if [[ -d "$PRESERVE/oneclick.ssh" ]]; then
+        rm -rf /home/oneclick/.ssh
+        cp -a "$PRESERVE/oneclick.ssh" /home/oneclick/.ssh
+      fi
+      chown -R "${safe_id}:${safe_id}" /home/oneclick 2>/dev/null || true
+      chmod 700 /home/oneclick /home/oneclick/.ssh 2>/dev/null || true
+      chmod 600 /home/oneclick/.ssh/authorized_keys 2>/dev/null || true
+      printf '%s
+' 'oneclick ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-oneclick-fleet 2>/dev/null || true
+      chmod 440 /etc/sudoers.d/99-oneclick-fleet 2>/dev/null || true
+      if command -v restorecon >/dev/null 2>&1; then
+        restorecon -F /etc/passwd /etc/shadow /etc/group /etc/gshadow           /home/oneclick /home/oneclick/.ssh           /home/oneclick/.ssh/authorized_keys >/dev/null 2>&1 || true
+      fi
+      echo "${orange}[ROLLBACK]${reset} Restored Fleet management account after migration failure."
+    fi
+  fi
+}
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+  if [[ "$rc" -ne 0 ]]; then
+    restore_preserved_identity_on_failure || true
+    if [[ "$SOURCE_SERVICES_STOPPED" -eq 1 && -n "$SOURCE_SERVICES" ]]; then
+      echo "${orange}[ROLLBACK]${reset} Restarting source application services."
+      source_run "systemctl start $SOURCE_SERVICES" >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$KEY" "$EXCLUDES"
+  rm -rf "$PRESERVE"
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
+install_local_rsync() {
+  command -v rsync >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y rsync
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y install rsync
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y install rsync
+  else
+    return 1
+  fi
+}
+install_source_rsync() {
+  source_run '
+    command -v rsync >/dev/null 2>&1 && exit 0
+    if command -v apt-get >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq &&
+      DEBIAN_FRONTEND=noninteractive apt-get install -y rsync
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf -y install rsync
+    elif command -v yum >/dev/null 2>&1; then
+      yum -y install rsync
+    else
+      exit 1
+    fi
+  '
+}
+echo "${yellow}[CHECK]${reset} Validating migration endpoints."
+install_local_rsync || { echo "${red}[ERROR]${reset} rsync unavailable on destination."; exit 1; }
+install_source_rsync || { echo "${red}[ERROR]${reset} rsync unavailable on source."; exit 1; }
+ssh_source "exit" >/dev/null 2>&1 || {
+  echo "${red}[ERROR]${reset} Source SSH validation failed."
+  exit 1
+}
+if [[ "$SOURCE_USER" != "root" ]] &&
+   ! ssh_source "sudo -n true" >/dev/null 2>&1; then
+  echo "${red}[ERROR]${reset} Source account requires passwordless sudo."
+  exit 1
+fi
+source_os="$(source_run 'source /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)"')"
+dest_os="$(source /etc/os-release; printf "%s|%s|%s\n" "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -m)")"
+if [[ "$source_os" != "$dest_os" ]]; then
+  echo "${red}[ERROR]${reset} Like-for-like migration requires identical OS release and architecture."
+  echo "${lime}[OS]${reset} Source:      $source_os"
+  echo "${lime}[OS]${reset} Destination: $dest_os"
+  exit 1
+fi
+DEST_SELINUX_ENABLED=0
+if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; then
+  DEST_SELINUX_ENABLED=1
+elif [[ -d /sys/fs/selinux ]] && command -v getenforce >/dev/null 2>&1 &&
+     [[ "$(getenforce 2>/dev/null)" != "Disabled" ]]; then
+  DEST_SELINUX_ENABLED=1
+fi
+rsync_filter_test="$(mktemp -d)"
+mkdir -p "$rsync_filter_test/src" "$rsync_filter_test/dst"
+touch "$rsync_filter_test/src/test"
+if ! rsync -aX --dry-run --filter='-x security.selinux'      "$rsync_filter_test/src/" "$rsync_filter_test/dst/" >/dev/null 2>&1; then
+  rm -rf "$rsync_filter_test"
+  echo "${red}[ERROR]${reset} Local rsync does not support the required SELinux xattr filter."
+  exit 1
+fi
+rm -rf "$rsync_filter_test"
+if [[ "$DEST_SELINUX_ENABLED" -eq 1 ]] &&
+   ! command -v restorecon >/dev/null 2>&1; then
+  echo "${red}[ERROR]${reset} SELinux is enabled on the replacement but restorecon is unavailable."
+  exit 1
+fi
+source_used="$(
+  source_run "df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x nfs -x nfs4 -x cifs -x fuse.sshfs --output=source,used 2>/dev/null |
+    awk 'NR>1 && !seen[\$1]++ {s+=\$2} END {print s+0}'"
+)"
+dest_total="$(
+  df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x nfs -x nfs4 -x cifs -x fuse.sshfs --output=source,size 2>/dev/null |
+    awk 'NR>1 && !seen[$1]++ {s+=$2} END {print s+0}'
+)"
+[[ "$source_used" =~ ^[0-9]+$ ]] || source_used=0
+[[ "$dest_total" =~ ^[0-9]+$ ]] || dest_total=0
+reserve=$((1024 * 1024 * 1024))
+if (( source_used <= 0 || dest_total <= 0 || source_used > dest_total - reserve )); then
+  echo "${red}[ERROR]${reset} Destination storage is too small."
+  echo "${lime}[OS]${reset} Source used: $source_used bytes"
+  echo "${lime}[OS]${reset} Destination: $dest_total bytes"
+  exit 1
+fi
+dest_had_oneclick=0
+oneclick_safe_id=""
+oneclick_group_name=""
+if [[ "$MIGRATION_MODE" == "import" ]]; then
+  id oneclick >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} Fresh replacement is missing Fleet account oneclick."
+    exit 1
+  }
+  dest_had_oneclick=1
+  oneclick_group_name="$(id -gn oneclick)"
+  source_identity_ids="$(
+    source_run '
+      getent passwd | cut -d: -f3 | sed "s/^/U:/"
+      getent group  | cut -d: -f3 | sed "s/^/G:/"
+    '
+  )"
+  destination_identity_ids="$(
+    {
+      getent passwd | cut -d: -f3 | sed 's/^/U:/'
+      getent group  | cut -d: -f3 | sed 's/^/G:/'
+    }
+  )"
+  for ((candidate=60000; candidate<=64999; candidate++)); do
+    if ! grep -qxF "U:${candidate}" <<< "$source_identity_ids" &&
+       ! grep -qxF "G:${candidate}" <<< "$source_identity_ids" &&
+       ! grep -qxF "U:${candidate}" <<< "$destination_identity_ids" &&
+       ! grep -qxF "G:${candidate}" <<< "$destination_identity_ids"; then
+      oneclick_safe_id="$candidate"
+      break
+    fi
+  done
+  [[ -n "$oneclick_safe_id" ]] || {
+    echo "${red}[ERROR]${reset} Unable to reserve a collision-free UID/GID for oneclick."
+    exit 1
+  }
+  original_oneclick_passwd="$(getent passwd oneclick)"
+  original_oneclick_shadow="$(getent shadow oneclick)"
+  original_oneclick_group="$(getent group "$oneclick_group_name")"
+  oneclick_password_hash="$(cut -d: -f2 <<< "$original_oneclick_shadow")"
+  [[ -n "$oneclick_password_hash" &&
+     "$oneclick_password_hash" != "!" &&
+     "$oneclick_password_hash" != "!!" &&
+     "$oneclick_password_hash" != "*" ]] || {
+    echo "${red}[ERROR]${reset} oneclick has no usable recovery password hash."
+    exit 1
+  }
+  [[ -s /home/oneclick/.ssh/authorized_keys ]] || {
+    echo "${red}[ERROR]${reset} Fresh replacement has no oneclick authorized_keys."
+    exit 1
+  }
+  cp -a /home/oneclick/.ssh "$PRESERVE/oneclick.ssh"
+  sha256sum /home/oneclick/.ssh/authorized_keys > "$PRESERVE/authorized_keys.sha256"
+  awk -F: -v OFS=: -v uid="$oneclick_safe_id" -v gid="$oneclick_safe_id" \
+    '{$3=uid; $4=gid; print}' <<< "$original_oneclick_passwd" > "$PRESERVE/passwd.oneclick"
+  printf '%s\n' "$original_oneclick_shadow" > "$PRESERVE/shadow.oneclick"
+  awk -F: -v OFS=: -v gid="$oneclick_safe_id" \
+    '{$3=gid; print}' <<< "$original_oneclick_group" > "$PRESERVE/group.oneclick"
+  grep "^${oneclick_group_name}:" /etc/gshadow > "$PRESERVE/gshadow.oneclick"
+  printf '%s\n' "$oneclick_group_name" > "$PRESERVE/oneclick.primary_group"
+  id -nG oneclick > "$PRESERVE/oneclick.groups"
+  stat -c '%a' /etc/passwd > "$PRESERVE/passwd.mode"
+  stat -c '%a' /etc/shadow > "$PRESERVE/shadow.mode"
+  stat -c '%a' /etc/group > "$PRESERVE/group.mode"
+  stat -c '%a' /etc/gshadow > "$PRESERVE/gshadow.mode"
+  printf '%s\n' 'oneclick ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-oneclick-fleet
+  chmod 440 /etc/sudoers.d/99-oneclick-fleet
+  command -v visudo >/dev/null 2>&1 &&
+    visudo -cf /etc/sudoers.d/99-oneclick-fleet >/dev/null || {
+      echo "${red}[ERROR]${reset} Fleet sudo rule is invalid."
+      exit 1
+    }
+  echo "${yellow}[CHECK]${reset} Fleet account oneclick will be restored as UID/GID ${oneclick_safe_id}."
+  echo "${yellow}[CHECK]${reset} Fleet authorized keys and recovery password hash were preserved."
+fi
+dest_login_preserved=0
+login_safe_id=""
+login_group_name=""
+if [[ "$DEST_LOGIN_USER" != "root" && "$DEST_LOGIN_USER" != "oneclick" ]] &&
+   id "$DEST_LOGIN_USER" >/dev/null 2>&1; then
+  dest_login_preserved=1
+  login_group_name="$(id -gn "$DEST_LOGIN_USER")"
+  for ((candidate=60000; candidate<=64999; candidate++)); do
+    [[ -n "$oneclick_safe_id" && "$candidate" == "$oneclick_safe_id" ]] && continue
+    if ! grep -qxF "U:${candidate}" <<< "$source_identity_ids" &&
+       ! grep -qxF "G:${candidate}" <<< "$source_identity_ids" &&
+       ! grep -qxF "U:${candidate}" <<< "$destination_identity_ids" &&
+       ! grep -qxF "G:${candidate}" <<< "$destination_identity_ids"; then
+      login_safe_id="$candidate"
+      break
+    fi
+  done
+  [[ -n "$login_safe_id" ]] || {
+    echo "${red}[ERROR]${reset} Unable to reserve a collision-free UID/GID for '$DEST_LOGIN_USER'."
+    exit 1
+  }
+  original_login_passwd="$(getent passwd "$DEST_LOGIN_USER")"
+  original_login_group="$(getent group "$login_group_name")"
+  awk -F: -v OFS=: -v uid="$login_safe_id" -v gid="$login_safe_id" \
+    '{$3=uid; $4=gid; print}' <<< "$original_login_passwd" > "$PRESERVE/passwd.login"
+  grep "^${DEST_LOGIN_USER}:" /etc/shadow > "$PRESERVE/shadow.login"
+  awk -F: -v OFS=: -v gid="$login_safe_id" \
+    '{$3=gid; print}' <<< "$original_login_group" > "$PRESERVE/group.login"
+  grep "^${login_group_name}:" /etc/gshadow > "$PRESERVE/gshadow.login"
+  printf '%s\n' "$login_group_name" > "$PRESERVE/login.primary_group"
+  id -nG "$DEST_LOGIN_USER" > "$PRESERVE/login.groups"
+  stat -c '%a' /etc/passwd > "$PRESERVE/passwd.login.mode"
+  stat -c '%a' /etc/shadow > "$PRESERVE/shadow.login.mode"
+  stat -c '%a' /etc/group > "$PRESERVE/group.login.mode"
+  stat -c '%a' /etc/gshadow > "$PRESERVE/gshadow.login.mode"
+  echo "${yellow}[CHECK]${reset} Destination control account $DEST_LOGIN_USER will be restored as UID/GID ${login_safe_id}."
+fi
+cat > "$EXCLUDES" <<'EOF'
+/dev/***
+/proc/***
+/sys/***
+/run/***
+/tmp/***
+/mnt/***
+/media/***
+/lost+found
+/boot/***
+/lib/modules/***
+/usr/lib/modules/***
+/etc/fstab
+/etc/hostname
+/etc/hosts
+/etc/resolv.conf
+/etc/machine-id
+/var/lib/dbus/machine-id
+/etc/default/grub
+/etc/ssh/***
+/etc/netplan/***
+/etc/network/***
+/etc/NetworkManager/system-connections/***
+/var/lib/NetworkManager/***
+/etc/sysconfig/network*
+/etc/cloud/***
+/var/lib/cloud/***
+/var/lib/dhcp/***
+/var/lib/nfs/rpc_pipefs/***
+/etc/wireguard/***
+/etc/one-click/fleet/***
+/etc/one-click/virtualization/***
+/home/oneclick/***
+/etc/sudoers.d/oneclick*
+/etc/sudoers.d/99-oneclick-fleet
+/root/.ssh/***
+/.autorelabel
+EOF
+if [[ "$DEST_LOGIN_USER" != "root" && "$DEST_LOGIN_USER" != "oneclick" ]]; then
+  login_home="$(getent passwd "$DEST_LOGIN_USER" | cut -d: -f6)"
+  [[ -n "$login_home" ]] && printf '%s\n' "${login_home}/.ssh/***" >> "$EXCLUDES"
+  printf '%s\n' "/etc/sudoers.d/one-click-migration-${DEST_LOGIN_USER}" >> "$EXCLUDES"
+fi
+while IFS= read -r net_mount; do
+  [[ -n "$net_mount" && "$net_mount" != "/" ]] || continue
+  printf '%s\n' "${net_mount%/}/***" >> "$EXCLUDES"
+done < <(source_run "findmnt -rn -t nfs,nfs4,cifs,sshfs,fuse.sshfs -o TARGET 2>/dev/null || true")
+source_rsync_path="rsync"
+[[ "$SOURCE_USER" != "root" ]] && source_rsync_path="sudo -n rsync"
+rsync_host="$SOURCE_HOST"
+[[ "$rsync_host" == *:* && "$rsync_host" != \[*\] ]] && rsync_host="[$rsync_host]"
+run_sync() {
+  rsync -aHAX \
+    --filter='-x security.selinux' \
+    --numeric-ids \
+    --partial \
+    --delete-delay \
+    --human-readable \
+    --info=progress2 \
+    --exclude-from="$EXCLUDES" \
+    --rsync-path="$source_rsync_path" \
+    -e "ssh -i '$KEY' -p '$SOURCE_PORT' -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='$KNOWN_HOSTS' -o ServerAliveInterval=30 -o ServerAliveCountMax=10" \
+    "${SOURCE_USER}@${rsync_host}:/" /
+}
+schedule_full_selinux_relabel() {
+  [[ "$DEST_SELINUX_ENABLED" -eq 1 ]] || return 0
+  echo "${magenta}[SELINUX]${reset} Scheduling a full destination relabel for the migration reboot."
+  rm -f /.autorelabel
+  if command -v fixfiles >/dev/null 2>&1; then
+    fixfiles -F onboot >/dev/null 2>&1 || touch /.autorelabel
+  else
+    touch /.autorelabel
+  fi
+  [[ -e /.autorelabel ]] || {
+    echo "${red}[ERROR]${reset} Unable to schedule SELinux relabel."
+    return 1
+  }
+}
+echo "${blue}[SYNC]${reset} Initial whole-system synchronization."
+run_sync || { echo "${red}[ERROR]${reset} Initial synchronization failed."; exit 1; }
+SOURCE_SERVICES="$(
+  source_run "systemctl list-units --type=service --state=running --no-legend 2>/dev/null |
+    awk '\$1 ~ /^(mariadb|mysql|mysqld|postgresql|redis|redis-server|valkey|mongod|docker|containerd|podman|nginx|apache2|httpd|php.*fpm).*\\.service\$/ {print \$1}' |
+    tr '\n' ' '"
+)"
+if [[ -n "$SOURCE_SERVICES" ]]; then
+  echo "${blue}[CUTOVER]${reset} Stopping source application/stateful services:"
+  echo "$SOURCE_SERVICES"
+  source_run "systemctl stop $SOURCE_SERVICES" || exit 1
+  SOURCE_SERVICES_STOPPED=1
+fi
+echo "${lime}[SYNC]${reset} Final synchronization."
+run_sync || { echo "${red}[ERROR]${reset} Final synchronization failed."; exit 1; }
+if [[ "$dest_had_oneclick" -eq 1 ]]; then
+  oneclick_group_name="$(cat "$PRESERVE/oneclick.primary_group")"
+  tmp="/etc/passwd.one-click-migrate.$$"
+  grep -v '^oneclick:' /etc/passwd > "$tmp"
+  cat "$PRESERVE/passwd.oneclick" >> "$tmp"
+  chown --reference=/etc/passwd "$tmp"
+  chmod "$(cat "$PRESERVE/passwd.mode")" "$tmp"
+  mv "$tmp" /etc/passwd
+  tmp="/etc/shadow.one-click-migrate.$$"
+  grep -v '^oneclick:' /etc/shadow > "$tmp"
+  cat "$PRESERVE/shadow.oneclick" >> "$tmp"
+  chown --reference=/etc/shadow "$tmp"
+  chmod "$(cat "$PRESERVE/shadow.mode")" "$tmp"
+  mv "$tmp" /etc/shadow
+  tmp="/etc/group.one-click-migrate.$$"
+  grep -v "^${oneclick_group_name}:" /etc/group > "$tmp"
+  cat "$PRESERVE/group.oneclick" >> "$tmp"
+  chown --reference=/etc/group "$tmp"
+  chmod "$(cat "$PRESERVE/group.mode")" "$tmp"
+  mv "$tmp" /etc/group
+  tmp="/etc/gshadow.one-click-migrate.$$"
+  grep -v "^${oneclick_group_name}:" /etc/gshadow > "$tmp"
+  cat "$PRESERVE/gshadow.oneclick" >> "$tmp"
+  chown --reference=/etc/gshadow "$tmp"
+  chmod "$(cat "$PRESERVE/gshadow.mode")" "$tmp"
+  mv "$tmp" /etc/gshadow
+  chown -R "${oneclick_safe_id}:${oneclick_safe_id}" /home/oneclick 2>/dev/null || true
+  while IFS= read -r grp; do
+    [[ -n "$grp" && "$grp" != "$oneclick_group_name" ]] || continue
+    getent group "$grp" >/dev/null 2>&1 &&
+      usermod -aG "$grp" oneclick >/dev/null 2>&1 || true
+  done < <(tr ' ' '\n' < "$PRESERVE/oneclick.groups")
+  id oneclick >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} Fleet management account could not be restored."
+    exit 1
+  }
+  [[ "$(id -u oneclick)" == "$oneclick_safe_id" &&
+     "$(id -g oneclick)" == "$oneclick_safe_id" ]] || {
+    echo "${red}[ERROR]${reset} Fleet management UID/GID remap did not persist."
+    exit 1
+  }
+elif [[ "$MIGRATION_MODE" == "export" ]] && id oneclick >/dev/null 2>&1; then
+  userdel -r oneclick >/dev/null 2>&1 || {
+    sed -i '/^oneclick:/d' /etc/passwd /etc/shadow /etc/group /etc/gshadow
+    rm -rf /home/oneclick
+  }
+fi
+if [[ "$MIGRATION_MODE" == "import" && "$SOURCE_USER" == ocmig_* ]] &&
+   id "$SOURCE_USER" >/dev/null 2>&1; then
+  rm -f "/etc/sudoers.d/one-click-migration-${SOURCE_USER}" 2>/dev/null || true
+  userdel -r "$SOURCE_USER" >/dev/null 2>&1 || {
+    sed -i "/^${SOURCE_USER}:/d" /etc/passwd /etc/shadow /etc/group /etc/gshadow
+    rm -rf "/home/${SOURCE_USER}"
+  }
+fi
+if [[ "$dest_login_preserved" -eq 1 ]]; then
+  login_group_name="$(cat "$PRESERVE/login.primary_group")"
+  tmp="/etc/passwd.one-click-login.$$"
+  grep -v "^${DEST_LOGIN_USER}:" /etc/passwd > "$tmp"
+  cat "$PRESERVE/passwd.login" >> "$tmp"
+  chown --reference=/etc/passwd "$tmp"
+  chmod "$(cat "$PRESERVE/passwd.login.mode")" "$tmp"
+  mv "$tmp" /etc/passwd
+  tmp="/etc/shadow.one-click-login.$$"
+  grep -v "^${DEST_LOGIN_USER}:" /etc/shadow > "$tmp"
+  cat "$PRESERVE/shadow.login" >> "$tmp"
+  chown --reference=/etc/shadow "$tmp"
+  chmod "$(cat "$PRESERVE/shadow.login.mode")" "$tmp"
+  mv "$tmp" /etc/shadow
+  tmp="/etc/group.one-click-login.$$"
+  grep -v "^${login_group_name}:" /etc/group > "$tmp"
+  cat "$PRESERVE/group.login" >> "$tmp"
+  chown --reference=/etc/group "$tmp"
+  chmod "$(cat "$PRESERVE/group.login.mode")" "$tmp"
+  mv "$tmp" /etc/group
+  tmp="/etc/gshadow.one-click-login.$$"
+  grep -v "^${login_group_name}:" /etc/gshadow > "$tmp"
+  cat "$PRESERVE/gshadow.login" >> "$tmp"
+  chown --reference=/etc/gshadow "$tmp"
+  chmod "$(cat "$PRESERVE/gshadow.login.mode")" "$tmp"
+  mv "$tmp" /etc/gshadow
+  login_home="$(getent passwd "$DEST_LOGIN_USER" | cut -d: -f6)"
+  [[ -n "$login_home" ]] &&
+    chown -R "${login_safe_id}:${login_safe_id}" "$login_home" 2>/dev/null || true
+  while IFS= read -r grp; do
+    [[ -n "$grp" && "$grp" != "$login_group_name" ]] || continue
+    getent group "$grp" >/dev/null 2>&1 &&
+      usermod -aG "$grp" "$DEST_LOGIN_USER" >/dev/null 2>&1 || true
+  done < <(tr ' ' '\n' < "$PRESERVE/login.groups")
+  id "$DEST_LOGIN_USER" >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} Destination login account '$DEST_LOGIN_USER' could not be restored."
+    exit 1
+  }
+fi
+command -v visudo >/dev/null 2>&1 && visudo -c >/dev/null || {
+  echo "${red}[ERROR]${reset} sudo policy validation failed after migration."
+  exit 1
+}
+if [[ "$MIGRATION_MODE" == "import" ]] && command -v runuser >/dev/null 2>&1; then
+  runuser -u oneclick -- sudo -n true >/dev/null 2>&1 || {
+    echo "${red}[ERROR]${reset} Restored oneclick account cannot use passwordless sudo."
+    exit 1
+  }
+fi
+if command -v sshd >/dev/null 2>&1 && ! sshd -t; then
+  echo "${red}[ERROR]${reset} SSH daemon validation failed after migration."
+  exit 1
+fi
+ldconfig 2>/dev/null || true
+if [[ "$DEST_SELINUX_ENABLED" -eq 1 ]]; then
+  restorecon -F     /etc/passwd /etc/shadow /etc/group /etc/gshadow     /etc/sudoers /etc/sudoers.d     /home/oneclick /home/oneclick/.ssh     /home/oneclick/.ssh/authorized_keys >/dev/null 2>&1 || {
+      echo "${red}[ERROR]${reset} Failed to restore critical SELinux contexts."
+      exit 1
+    }
+  schedule_full_selinux_relabel || exit 1
+fi
+systemctl daemon-reload || exit 1
+sync
+echo "${green}[SUCCESS]${reset} Whole-VPS migration payload completed for $MIGRATION_LABEL."
+echo "${yellow}[NOTICE]${reset} Source application services remain stopped to prevent split-brain."
+echo "${yellow}[NOTICE]${reset} Destination networking, boot files, SSH host identity and Fleet management identity were preserved where applicable."
+ONECLICK_MIGRATION_HELPER
+  chmod 700 "$helper_file"
+  ssh "${destination_ssh_opts[@]}" "$destination_target" \
+    "rm -rf '$remote_dir' && mkdir -p '$remote_dir' && chmod 700 '$remote_dir'" || {
+      error "Unable to create migration workspace on destination."
+      return 1
+    }
+  scp \
+    -i "$destination_key" \
+    -P "$destination_port" \
+    -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$destination_known_hosts" \
+    "$helper_file" "$migration_key" \
+    "${destination_target}:${remote_dir}/" || {
+      error "Unable to stage migration worker on destination."
+      return 1
+    }
+  ssh "${destination_ssh_opts[@]}" "$destination_target" \
+    "mv '$remote_dir/$(basename "$migration_key")' '$remote_key'; chmod 600 '$remote_key'; chmod 700 '$remote_helper'" || {
+      error "Unable to prepare the staged migration worker."
+      return 1
+    }
+  local -a helper_args=(
+    "$source_host"
+    "$source_user"
+    "$source_port"
+    "$remote_key"
+    "$destination_user"
+    "$mode"
+    "$vps_name"
+  )
+  local helper_cmd
+  printf -v helper_cmd '%q ' "${helper_args[@]}"
+  info "Starting destination-pull migration."
+  info "The first rsync pass runs while the source remains live; the final pass will stop application services briefly."
+  if ! ssh "${destination_ssh_opts[@]}" "$destination_target" \
+    "sudo -n bash '$remote_helper' $helper_cmd"; then
+    error "Whole-VPS migration failed. The worker attempts to restart source services on failure."
+    return 1
+  fi
+  if [[ "$mode" == "import" ]]; then
+    info "Validating a fresh Fleet-key login before reboot."
+    if ! ssh "${destination_ssh_opts[@]}" "$destination_target" 'sudo -n true' >/dev/null 2>&1; then
+      error "Fleet-key authentication was lost before reboot. Destination will NOT be rebooted."
+      migration_password_recovery_hint || true
+      return 1
+    fi
+    success "Fleet-key authentication survived the migration payload."
+  fi
+  ssh "${destination_ssh_opts[@]}" "$destination_target" \
+    "rm -rf '$remote_dir'" >/dev/null 2>&1 || true
+  info "Rebooting the destination into the migrated userspace."
+  ssh "${destination_ssh_opts[@]}" "$destination_target" \
+    "sudo -n nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 &" \
+    >/dev/null 2>&1 || true
+  sleep 8
+  local destination_ready=0
+  for _ in {1..60}; do
+    if ssh "${destination_ssh_opts[@]}" "$destination_target" \
+      'sudo -n true' >/dev/null 2>&1; then
+      destination_ready=1
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$destination_ready" -ne 1 ]]; then
+    error "Migration payload completed, but Fleet-key SSH did not return after reboot."
+    migration_password_recovery_hint || true
+    return 1
+  fi
+  info "Destination returned after reboot."
+  if [[ "$mode" == "import" ]]; then
+    local source_known_hosts="${workspace}/source_known_hosts"
+    touch "$source_known_hosts"
+    chmod 600 "$source_known_hosts"
+    local -a source_cleanup_opts=(
+      -i "$migration_key"
+      -p "$source_port"
+      -o IdentitiesOnly=yes
+      -o BatchMode=yes
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="$source_known_hosts"
+      -o ConnectTimeout=10
+    )
+    ssh "${source_cleanup_opts[@]}" "${source_user}@${source_host}" \
+      "sudo -n bash -c 'rm -f /etc/sudoers.d/one-click-migration-${source_user}; nohup sh -c \"sleep 2; userdel -r ${source_user} >/dev/null 2>&1 || true\" >/dev/null 2>&1 &'" \
+      >/dev/null 2>&1 || warn "Migration succeeded, but the temporary source account needs manual removal: $source_user"
+  else
+    local source_mgmt_host source_mgmt_port
+    source_mgmt_host="$(jq -r '.source.management_host // empty' "$state_file")"
+    source_mgmt_port="$(jq -r '.source.management_port // 22' "$state_file")"
+    if [[ -n "$source_mgmt_host" ]]; then
+      local fleet_known_hosts="${workspace}/fleet_known_hosts"
+      touch "$fleet_known_hosts"
+      chmod 600 "$fleet_known_hosts"
+      local pub_b64
+      pub_b64="$(base64 -w0 < "$migration_pub")"
+      ssh \
+        -i "$fleet_key" \
+        -p "$source_mgmt_port" \
+        -o IdentitiesOnly=yes \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$fleet_known_hosts" \
+        "oneclick@${source_mgmt_host}" \
+        "set -e; printf '%s' '$pub_b64' | base64 -d > /tmp/oc-migration-key.$$; if [ -f ~/.ssh/authorized_keys ]; then grep -Fvx -f /tmp/oc-migration-key.$$ ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp || true; mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys; fi; rm -f /tmp/oc-migration-key.$$" \
+        >/dev/null 2>&1 || warn "Migration succeeded, but the temporary key could not be removed from Fleet source '$vps_name'."
+    fi
+    ssh "${destination_ssh_opts[@]}" "$destination_target" \
+      "sudo -n bash -c 'rm -f /etc/sudoers.d/one-click-migration-${destination_user}; nohup sh -c \"sleep 2; userdel -r ${destination_user} >/dev/null 2>&1 || true\" >/dev/null 2>&1 &'" \
+      >/dev/null 2>&1 || warn "Migration succeeded, but temporary destination account '$destination_user' needs manual removal."
+  fi
+  jq \
+    --arg completed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '.status="complete" | .completed_at=$completed' \
+    "$state_file" > "${state_file}.tmp" &&
+    mv "${state_file}.tmp" "$state_file"
+  rm -f "$migration_key" "$migration_pub"
+  success "Whole-VPS migration completed successfully."
 }
 # ==== Fleet VPS Snapshot ====
 fleet_vps_snapshot() {
@@ -6644,7 +9289,7 @@ fleet_proxy_provision() {
     return 1
   fi
   if [[ -z "$target_vm" ]]; then
-    error "Usage: one-click fleet proxy --target <vm> [--website <domain> --proto <http/https>] [--source <backend_port> --port <frontend_port>]"
+    error "Usage: one-click proxy --target <vm> [--website <domain> --proto <http/https>] [--source <backend_port> --port <frontend_port>]"
     return 1
   fi
   if [[ ! -f "$inventory_json" ]]; then
