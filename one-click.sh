@@ -63,7 +63,6 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  help                    Display this help menu." \
     "  logs | log-browser      Browse and inspect system log files interactively." \
     "  menu                    Central menu with direct access to most tools." \
-    "  migrator                Migrate systems using rsync or disk-level cloning (dd)." \
     "  recovery                Backup and restore boot partitions (BIOS, UEFI, GRUB)." \
     "  fleet                   Run remote commands to your fleet of registered servers" \
     "  reinstall               Perform a full operating system reinstallation." \
@@ -228,7 +227,9 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  snapshot                Create, delete and restore snapshots" \
     "  backup                  Create, delete and restore backups" \
     "  patch                   Patch a target node or entire fleet." \
-    "  migrate                 Migrate VPS instance to another hypervisor." \
+    "  migrate                 Migrate Fleet VPS instance to another Fleet hypervisor." \
+	"  import                  Migrate an external VPS into Fleet." \
+	"  export                  Migrate a Fleet member VPS out to an external VPS." \
     "  start                   Start a VPS instance" \
     "  stop                    Stop a VPS instance " \
 	"  info                    View stats of VM such as storage, RAM and resources utilized." \
@@ -249,6 +250,8 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "    one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 1 --ram 1G --disk 6G --mode nat --password <password>" \
     "    one-click --vps snapshot create --target <vm_name> --name <snapshot name>" \
     "    one-click --vps migrate --target <target hypervisor> --name <vm_name>" \
+	"    one-click --vps import" \
+	"    one-click --vps export -n <vm_name>" \
     "    one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>" \
 	"    one-click --vps info <vps_name>" \
 	"    one-click --vps patch <vm_name|all>" \
@@ -605,16 +608,6 @@ load_recovery() {
   # ==== Alt Mirror ====
   #local bacup_url="https://as214354.network/boot-recovery.sh"
   local cache_file="${cache_dir}/boot-recovery.sh"
-  collect_sysinfo
-  load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
-}
-# ==== Migrator ====
-load_migrator() {
-  local url="https://raw.githubusercontent.com/SiteHUB-NG/One-Click/main/migrator.sh"
-  local backup_url=""
-  # ==== Alt Mirror ====
-  #local bacup_url="https://as214354.network/migrator.sh"
-  local cache_file="${cache_dir}/migrator.sh"
   collect_sysinfo
   load_body "$url" "$backup_url" "$cache_dir" "$cache_file"
 }
@@ -1002,30 +995,34 @@ fleet_manager_menu() {
   done
 }
 vps_manager_menu() {
-  local target name proto src p_port action
+  local target name proto src p_port choice vm_vnc_name vm_console_name
   while true; do
     printf "${blue}┌────┬────────────────────────────────┬───────────────────────────────────────────────┐${reset}\n"
     printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
     printf "${blue}├────┼────────────────────────────────┼───────────────────────────────────────────────┤${reset}\n"
     printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" \
-      "${magenta}1${blue}"  "${blue}Start VM Instance${blue}"              "${blue}one-click --vps start <vm_name>${blue}" \
-      "${magenta}2${blue}"  "${blue}Stop VM Instance${blue}"               "${blue}one-click --vps stop <vm_name>${blue}" \
+      "${magenta}1${blue}"  "${blue}Start VM Instance${blue}"              "${blue}one-click --vps start --name <vm>${blue}" \
+      "${magenta}2${blue}"  "${blue}Stop VM Instance${blue}"               "${blue}one-click --vps stop --name <vm>${blue}" \
       "${magenta}3${blue}"  "${blue}Cluster Node Patch${blue}"             "${blue}one-click --vps patch <all|vm_name> -f${blue}" \
-      "${magenta}4${blue}"  "${blue}NAT DNS Forwarder${blue}"              "${blue}one-click --proxy --target -s <port> -d <port>${blue}" \
-      "${magenta}5${blue}"  "${blue}Snapshot Manager${blue}"               "${blue}N/A${blue}" \
+      "${magenta}4${blue}"  "${blue}NAT DNS Forwarder${blue}"              "${blue}one-click --proxy --target <vm> ...${blue}" \
+      "${magenta}5${blue}"  "${blue}Snapshot Manager${blue}"               "${blue}one-click --vps snapshot ...${blue}" \
       "${magenta}6${blue}"  "${blue}View Available Snapshots${blue}"       "${blue}one-click --vps view${blue}" \
-	  "${magenta}7${blue}"  "${blue}Create browser VNC session${blue}"     "${blue}one-click --vnc <vm_name${blue}" \
-	  "${magenta}6${blue}"  "${blue}Access a virsh console session${blue}" "${blue}one-click --console <vm_name>${blue}" \
+      "${magenta}7${blue}"  "${blue}Create Browser VNC Session${blue}"     "${blue}one-click --vnc <vm_name>${blue}" \
+      "${magenta}8${blue}"  "${blue}Access Virsh Console Session${blue}"   "${blue}one-click --console <vm_name>${blue}" \
+      "${magenta}9${blue}"  "${blue}Import External VPS Into Fleet${blue}" "${blue}one-click --vps import${blue}" \
+      "${magenta}10${blue}" "${blue}Export Fleet VPS To External VPS${blue}" "${blue}one-click --vps export --name <vm>${blue}" \
       "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"              "${blue}return${blue}"
     printf "${blue}└────┴────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
     case "$sub_ch" in
       1)
         read -rp "${cyan}[USER]:${reset} Enter VM name to boot: " target
-        [[ -n "$target" ]] && one-click --vps "start" "$target" ;;
+        [[ -n "$target" ]] && one-click --vps start --name "$target"
+        ;;
       2)
         read -rp "${cyan}[USER]:${reset} Enter VM name to halt: " target
-        [[ -n "$target" ]] && one-click --vps "stop" "$target" ;;
+        [[ -n "$target" ]] && one-click --vps stop --name "$target"
+        ;;
       3)
         read -rp "${cyan}[USER]:${reset} Target scope (type 'all' or specific host): " target
         read -rp "${cyan}[USER]:${reset} Force complete dist-upgrade upgrade? (y/N): " choice
@@ -1064,48 +1061,54 @@ vps_manager_menu() {
 
           case "$snap_ch" in
             1)
-              echo -e "\n${orange}--- CURRENT REGISTERED FLEET SNAPSHOTS ---${reset}"
               one-click --vps view
               ;;
             2)
               one-click --vps view
               read -rp "${cyan}[USER]:${reset} Enter Target VM Name: " target
               read -rp "${cyan}[USER]:${reset} Enter Snapshot Name: " name
-              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshot create --target "$target" --name "$name"
+              [[ -n "$target" && -n "$name" ]] &&
+                one-click --vps snapshot create --target "$target" --name "$name"
               ;;
             3)
-              echo -e "\n${orange}--- AVAILABLE RESTORATION VECTORS ---${reset}"
               one-click --vps view
               read -rp "${cyan}[USER]:${reset} Enter Target VM Name to Revert: " target
               read -rp "${cyan}[USER]:${reset} Enter Snapshot Target Identifier to Apply: " name
-              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshot restore --target "$target" --name "$name"
+              [[ -n "$target" && -n "$name" ]] &&
+                one-click --vps snapshot restore --target "$target" --name "$name"
               ;;
             4)
-              echo -e "\n${orange}--- REGISTERED ALLOCATION CHAINS AVAILABLE FOR PURGING ---${reset}"
               one-click --vps view
               read -rp "${cyan}[USER]:${reset} Enter Target VM Name: " target
               read -rp "${cyan}[USER]:${reset} Enter Snapshot Name to Permanently Delete: " name
-              [[ -n "$target" && -n "$name" ]] && one-click --vps snapshotn delete --target "$target" --name "$name"
+              [[ -n "$target" && -n "$name" ]] &&
+                one-click --vps snapshot delete --target "$target" --name "$name"
               ;;
-            5)
-              break
-              ;;
-            *)
-              echo "Invalid action selection."
-              ;;
+            5) break ;;
+            *) echo "Invalid action selection." ;;
           esac
           echo
         done
         ;;
-	  6)
-	    read -rp "Please enter the VM name: " vm_vnc_name
-		fleet_vps_web_console "$vm_vnc_name"
-		;;
-	  7)
-	    read -rp "Please enter the VM name: " vm_console_name
-		fleet_console "$vm_vnc_name"
-		;;
-      0) break                 ;;
+      6)
+        one-click --vps view
+        ;;
+      7)
+        read -rp "${cyan}[USER]:${reset} Enter VM name: " vm_vnc_name
+        [[ -n "$vm_vnc_name" ]] && one-click --vnc "$vm_vnc_name"
+        ;;
+      8)
+        read -rp "${cyan}[USER]:${reset} Enter VM name: " vm_console_name
+        [[ -n "$vm_console_name" ]] && one-click --console "$vm_console_name"
+        ;;
+      9)
+        one-click --vps import
+        ;;
+      10)
+        read -rp "${cyan}[USER]:${reset} Enter Fleet VPS name to export: " target
+        [[ -n "$target" ]] && one-click --vps export --name "$target"
+        ;;
+      0) break ;;
       *) echo "Invalid option" ;;
     esac
   done
@@ -1331,9 +1334,14 @@ if [[ "$1" == "--vps" ]]; then
 	  exit 1
 	fi
   fi
-  if [[ "$2" == "console" ]]; then
-    fleet_console "$2" "${3:-}"
-	exit 0
+  if [[ "${2:-}" == "console" ]]; then
+    if [[ -z "${3:-}" ]]; then
+      error "Usage: one-click --vps console <vps_name> [host]"
+      exit 1
+    fi
+    build_vars
+    fleet_console "$3" "${4:-}"
+    exit $?
   fi
   action="${2:-}"
   if [[ "$action" == "patch" ]]; then
@@ -1409,6 +1417,10 @@ if [[ "$1" == "--vps" ]]; then
   vps_ram="2048"
   vps_cpu="2"
   public_ip=""
+  raw_password=""
+  language=""
+  virt_mac=""
+  import_state=""
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       -n|--name)     vps_name="$2"        ; shift 2 ;;
@@ -1421,7 +1433,8 @@ if [[ "$1" == "--vps" ]]; then
       -c|--cpu)      vps_cpu="$2"         ; shift 2 ;;
       -p|--ip)       public_ip="$2"       ; shift 2 ;;
       -l|--language) language="$2"        ; shift 2 ;;
-	  -v|--virt)     virt_mac="$2"        ; shift 2 ;;
+      -v|--virt)     virt_mac="$2"        ; shift 2 ;;
+      --import-state) import_state="$2"    ; shift 2 ;;
       create)        snap_action="create" ; shift 1 ;;
       delete)        snap_action="delete" ; shift 1 ;;
       restore)       snap_action="restore"; shift 1 ;;
@@ -1563,6 +1576,16 @@ if [[ "$1" == "--vps" ]]; then
       fi
       fleet_vps_migrate "$target_host" "$vps_name"
       exit 0
+      ;;
+    import)
+      build_vars
+      fleet_vps_external_migration "import"
+      exit $?
+      ;;
+    export)
+      build_vars
+      fleet_vps_external_migration "export" "$vps_name"
+      exit $?
       ;;
     create)
 	  build_vars
@@ -1733,14 +1756,38 @@ if [[ "$1" == "--vps" ]]; then
         printf '%s' "Launching a TMUX session for Provisioning"
         for i in {1..5}; do printf '.'; sleep 0.2; done
         echo
-        tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip' -v '${virt_mac:-}'; exec bash"
+        if [[ -n "$import_state" ]]; then
+          # One-Click migration create handoff v5
+          [[ -f "$import_state" ]] && jq empty "$import_state" >/dev/null 2>&1 || {
+            error "Migration import state is missing or invalid: $import_state"
+            exit 1
+          }
+          [[ "$(jq -r '.vps_name // empty' "$import_state")" == "$vps_name" ]] || {
+            error "Migration state VPS name does not match create target '$vps_name'."
+            exit 1
+          }
+          printf -v import_state_q '%q' "$import_state"
+          tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip' -v '${virt_mac:-}' --import-state $import_state_q"
+        else
+          tmux_cmd="env $flag=1 bash /usr/local/bin/one-click --vps create --name '$vps_name' --target '$target_host' --mode '$network_mode' -i '$base_image_name' -d '$disk_size' --password '$raw_password' -r '$vps_ram' -c '$vps_cpu' -p '$public_ip' -v '${virt_mac:-}'; exec bash"
+        fi
         printf '%s\n' \
           "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━" \
           "${bold}${blue}One-Click is opening inside TMUX. Attach with: ${red}▶ ${yellow}tmux attach -t $session${red} ◀" \
           "                                                ${cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━${reset}"
         echo "Provisioning running in background. Attach with: tmux attach -t $session"
-		sleep 2
-		tmux new-session -s "$session" "$tmux_cmd"
+        sleep 2
+        if [[ -n "$import_state" ]]; then
+          tmux new-session -s "$session" "$tmux_cmd" || true
+          handoff_status="$(jq -r '.build.status // empty' "$import_state" 2>/dev/null || true)"
+          if [[ "$handoff_status" != "complete" ]]; then
+            handoff_error="$(jq -r '.build.error // empty' "$import_state" 2>/dev/null || true)"
+            error "Migration create did not complete: ${handoff_error:-status ${handoff_status:-missing}}"
+            exit 1
+          fi
+          exit 0
+        fi
+        tmux new-session -s "$session" "$tmux_cmd"
         exit 0
       fi
       tmux set -g mouse on || true
@@ -1749,10 +1796,48 @@ if [[ "$1" == "--vps" ]]; then
       tmux set -g automatic-rename off || true
       tmux set -g default-terminal "tmux-256color" || true
       tmux set -g terminal-overrides ',xterm-256color:Tc' || true
+      migration_create_guard=0
+      if [[ -n "$import_state" ]]; then
+        [[ -f "$import_state" ]] && jq empty "$import_state" >/dev/null 2>&1 || {
+          error "Migration import state is missing or invalid: $import_state"
+          exit 1
+        }
+
+        migration_create_guard=1
+        migration_create_exit_guard() {
+          local rc=$?
+          if [[ "$migration_create_guard" -eq 1 ]]; then
+            set +e
+            jq \
+              --arg msg "Migration create ended before successful handoff (exit $rc)" \
+              --arg failed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+              '.build.status="failed" |
+               .build.failed_at=$failed |
+               .build.error=$msg' \
+              "$import_state" > "${import_state}.tmp" 2>/dev/null &&
+              mv -f "${import_state}.tmp" "$import_state"
+            chmod 600 "$import_state" 2>/dev/null || true
+          fi
+        }
+        trap migration_create_exit_guard EXIT
+
+        jq \
+          --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+          '.build.status="provisioning" |
+           .build.started_at=$started |
+           .build.error=null' \
+          "$import_state" > "${import_state}.tmp" || exit 1
+        mv -f "${import_state}.tmp" "$import_state" || exit 1
+        chmod 600 "$import_state"
+      fi
 	  if ansible-inventory -i "$inventory_file" --list | jq -e --arg name "$vps_name" '._meta.hostvars[$name] != null' &>/dev/null; then
         error "VPS name '$vps_name' already exists in inventory! Aborting build." >&2
-		sleep 2
-        ( sleep 0.5 && tmux kill-session -t "one-click" ) & exit 0
+        if [[ -n "$import_state" ]]; then
+          exit 1
+        fi
+        sleep 2
+        ( sleep 0.5 && tmux kill-session -t "$session" 2>/dev/null || true ) &
+        exit 1
       else
         success "VPS name '$vps_name' is available. Proceeding with build."
       fi
@@ -1820,7 +1905,72 @@ __     ___      _        _____             _
    \_/  |_|_|   \__|    |_____|_| |_|\__, |_|_| |_|\___|
                                      |___/
 EOF
-      fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip"
+      if [[ -n "$import_state" ]]; then
+        # ROOT CAUSE:
+        # fleet_vps_provision() exits the shell on the Linux success path.
+        # Isolate it so CREATE survives long enough to write the migration
+        # handoff and terminate its own TMUX session cleanly.
+        if ( fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip" ); then
+          :
+        else
+          provision_rc=$?
+          error "VPS provisioning failed (status $provision_rc)."
+          exit "$provision_rc"
+        fi
+
+        vps_ledger="/etc/one-click/virtualization/inventory.json"
+        [[ -s "$vps_ledger" ]] && jq empty "$vps_ledger" >/dev/null 2>&1 || {
+          error "Provisioning returned but the VPS inventory is missing or invalid."
+          exit 1
+        }
+
+        matching_count="$(jq --arg name "$vps_name" --arg host "$target_host"           '[.[] | select(.name == $name and .host == $host)] | length' "$vps_ledger")"
+        [[ "$matching_count" == "1" ]] || {
+          error "Expected one VPS record for '$vps_name' on '$target_host'; found ${matching_count:-0}."
+          exit 1
+        }
+
+        fleet_ip="$(jq -r --arg name "$vps_name" --arg host "$target_host"           '.[] | select(.name == $name and .host == $host) | .cluster_private_ip // empty' "$vps_ledger")"
+        fleet_port=22
+
+        [[ "$fleet_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || {
+          error "Provisioned VPS has no valid cluster_private_ip: ${fleet_ip:-missing}."
+          exit 1
+        }
+
+        jq \
+          --arg host "$fleet_ip" \
+          --argjson port "$fleet_port" \
+          --arg target "$target_host" \
+          --arg completed "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+          '.build.status="complete" |
+           .build.completed_at=$completed |
+           .build.error=null |
+           .destination.kind="fleet" |
+           .destination.management_host=$host |
+           .destination.management_port=$port |
+           .destination.target_host=$target' \
+          "$import_state" > "${import_state}.tmp" || exit 1
+
+        mv -f "${import_state}.tmp" "$import_state" || exit 1
+        chmod 600 "$import_state"
+        sync
+
+        migration_create_guard=0
+        trap - EXIT
+
+        success "Replacement VPS ready at ${fleet_ip}:${fleet_port}."
+        info "Returning control to the migration importer."
+
+        ( sleep 0.5 && tmux kill-session -t "$session" 2>/dev/null || true ) &
+        exit 0
+      fi
+
+      # Ordinary VPS create is unchanged.
+      if ! fleet_vps_provision "$vps_name" "$target_host" "$network_mode" "$base_image_name" "$disk_size" "$raw_password" "$vps_ram" "$vps_cpu" "$public_ip"; then
+        error "VPS provisioning failed."
+        exit 1
+      fi
       exit 0
       ;;
     delete)
@@ -2540,7 +2690,6 @@ _one_click() {
   cmds["bench-sys"]=""
   cmds["cron"]=""
   cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-  cmds["migrator"]=""
   cmds["net-repair"]=""
   cmds["net"]=""
   cmds["net-info"]=""
@@ -2571,7 +2720,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'console'"
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
@@ -2702,7 +2851,6 @@ _one_click() {
   cmds["bench-sys"]=""
   cmds["cron"]=""
   cmds["engine"]="open flush backup restore raw: allow drop reject delete mask enable disable remember append multiport range sensitive: sensitive-list sensitive-remove: from to audit"
-  cmds["migrator"]=""
   cmds["net-repair"]=""
   cmds["net"]=""
   cmds["net-info"]=""
@@ -2733,7 +2881,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'snapshot' 'backup' 'view' 'start' 'stop'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'console'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
@@ -2863,7 +3011,6 @@ map_one_click() {
       bench)              echo "--bench"       ;;
       bench-sys)          echo "-bench-cpu"    ;;
       engine)             echo "$i"            ;;
-      migrator)           echo "--migrator"    ;;
       net-repair)         echo "--repair"      ;;
       net)                echo "--net"         ;;
       net-info)           echo "--net"         ;;
@@ -3045,11 +3192,6 @@ if [[ $# -gt 0 ]]; then
     -r|--repair)
       load_net_repair
       fix_network
-      shift
-      ;;
-    -m|--migrator)
-      load_migrator
-      migration
       shift
       ;;
     -p|--recovery)
@@ -3387,7 +3529,6 @@ if [[ $# -gt 0 ]]; then
         "  bench-sys               Run only geekbench/sysbench benchmark." \
         "  (engine|rule-engine)    Converts natural language into iptables commands" \
         "  menu                    Central menu with direct access to most tools." \
-        "  migrator                System migration tool. Rsync + DD options." \
         "  recovery                Boot partition backup + recovery tool (BIOS, UEFI, GRUB)" \
         "  fleet                   Run remote commands to your fleet of registered servers" \
         "  net-repair              Repair network (Includes snapshots and backup of network files)" \
