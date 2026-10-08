@@ -1,5 +1,5 @@
 # One-Click Toolkit
-![One-Click Logo](https://as214354.network/one-click.png)
+![One-Click Logo](https://oneclick.i.ng/assets/brand/one-click-logo-approved.svg)
 # One-Click — Linux Infrastructure Automation Toolkit
 
 One-Click is an advanced operational console engineered for power users, developers, and sysadmins who demand maximum control with zero infrastructure bloat. Built on a strict **security-first-by-design** architecture, One-Click completely redefines server management by replacing vulnerable, resource-heavy web UIs with a lean, terminal-driven automation matrix.
