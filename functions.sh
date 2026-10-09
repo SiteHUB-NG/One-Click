@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Aug 2026 == # == Version#: 1.2.0 ==== #
+# === Build: Jan 2026 === # === Updated: Oct 2026 == # == Version#: 1.2.0 ==== #
 # ====== One-Click ====== #
 if [[ -f "$log_dir" ]]; then
   mkdir -p "${log_dir:-}"
@@ -1777,7 +1777,6 @@ EOF
     error "Promotion of [$target_destination] failed. The current controller has not been demoted."
     return 1
   fi
-  # identity after the promoted node assumes the controller WireGuard identity.
   local old_controller_peer_conf="/tmp/one-click-demoted-controller.conf"
   rm -f "$old_controller_peer_conf"
   if ! scp -i "$private_key" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
@@ -4477,7 +4476,6 @@ fleet_bench() {
   fi
   local -a excluded_vms=()
   if [[ -n "$excluded" ]]; then
-    # Split by comma and trim whitespace around each excluded host name
     IFS=',' read -r -a raw_excluded <<< "$excluded"
     for item in "${raw_excluded[@]}"; do
       excluded_vms+=("$(echo "$item" | xargs)")
@@ -4589,7 +4587,6 @@ fleet_bench() {
   ansible-inventory -i /etc/one-click/fleet/inventory.yml --list | \
   jq -r '._meta.hostvars | to_entries[] | "\(.key) \(.value.ansible_host)"' | \
   while read -r name ip; do
-    # FIX: Use continue instead of return 0 to avoid breaking out of the while loop entirely
     if host_is_excluded "$name"; then
       warn "$name has been excluded from this run"
       continue
@@ -9000,7 +8997,7 @@ fleet_vps_snapshot() {
     return 1
   fi
   if [[ -z "$action" || -z "$target_vm" || -z "$snap_name" ]]; then
-    error "Usage: one-click fleet snapshot --action <create|restore|delete> --target <vm_name> --name <snapshot_name>"
+    error "Usage: one-click --vps snapshot --action <create|restore|delete> --target <vm_name> --name <snapshot_name>"
     return 1
   fi
   if [[ ! -f "$ledger_json" ]]; then
@@ -9067,128 +9064,441 @@ fleet_vps_snapshot() {
   success "$stat_success"
 }
 # ==== VPS Backup ====
+# Bash-only drop-in replacement for fleet_vps_backup()
 fleet_vps_backup() {
-  local action="" target_vm="" backup_name=""
+  local action="${1:-}" target_vm="${2:-}" backup_name="${3:-}"
   local inventory_json="/etc/one-click/virtualization/inventory.json"
   local inventory_file="/etc/one-click/fleet/inventory.yml"
   local backup_ledger="/etc/one-click/virtualization/backup_ledger.json"
-  . "/etc/one-click/fleet/controller.env"
-  action="$1"
-  target_vm="$2"
-  backup_name="$3"
-  if [[ "${sys_ip:-}" != "${CONTROLLER_IP:-}" ]]; then
+  local remote_backup_base="/etc/one-click/virtualization/backups"
+  local target_host target_ip private_key remote_host_dir disk_archive
+  local timestamp ledger_tmp remote_rc answer allow_restore=0
+  local inventory_host inventory_user inventory_port existing_format
+  case "$action" in
+    create|restore|delete) ;;
+    *) error "Invalid action parameter. Must be: create, restore, or delete."; return 1 ;;
+  esac
+  if [[ -z "$target_vm" || -z "$backup_name" ]]; then
+    error "Usage: one-click --vps backup --action <create|restore|delete> --target <vm_name> --name <backup_name>"
+    return 1
+  fi
+  if [[ ! "$target_vm" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ||
+        ! "$backup_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]]; then
+    error "Invalid VM name or backup name."
+    return 1
+  fi
+  if [[ ! -r /etc/one-click/fleet/controller.env ]]; then
+    error "Fleet Controller configuration is missing."
+    return 1
+  fi
+  . /etc/one-click/fleet/controller.env
+  if [[ -z "${CONTROLLER_IP:-}" || "${sys_ip:-}" != "$CONTROLLER_IP" ]]; then
     error "Backup orchestration must be initiated from the central Controller."
     return 1
   fi
-  if [[ -z "$action" || -z "$target_vm" || -z "$backup_name" ]]; then
-    error "Usage: one-click fleet backup <create|restore|delete> --target <vm_name> --name <backup_name>"
+  if [[ ! -r "$inventory_json" || ! -r "$inventory_file" ]]; then
+    error "Fleet or virtualization inventory is unavailable."
     return 1
   fi
-  if [[ ! -f "$backup_ledger" ]]; then
-    echo "[]" > "$backup_ledger"
-    chmod 644 "$backup_ledger"
-  fi
-  local target_host
-  target_host=$(jq -r ".[] | select(.name == \"$target_vm\") | .host" "$inventory_json" 2>/dev/null | head -1)
-  if [[ -z "$target_host" || "$target_host" == "null" ]]; then
-    error "Target VM '$target_vm' not found in active asset ledger."
+  if [[ -e "$backup_ledger" ]] && ! jq -e 'type == "array"' "$backup_ledger" >/dev/null 2>&1; then
+    error "The VPS backup ledger is invalid. No changes were made."
     return 1
   fi
-  local private_key="/etc/one-click/fleet/keys/id_ed25519"
-  if [[ ! -f "$private_key" ]]; then
-    private_key="/home/oneclick/.ssh/id_ed25519"
-  fi
-  local target_ip
-  target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "$target_host" 2>/dev/null | jq -r '.ansible_host // empty')
-  if [[ -z "$target_ip" ]]; then
-    error "Network Routing Fault: Failed to locate IP route for host [$target_host]."
+  if [[ "$action" == create && -f "$backup_ledger" ]] &&
+     jq -e --arg vm "$target_vm" --arg name "$backup_name" \
+       'any(.[]; .vm == $vm and .name == $name)' "$backup_ledger" >/dev/null; then
+    error "Backup '$backup_name' is already registered for '$target_vm'."
     return 1
   fi
-  local remote_backup_base="/etc/one-click/virtualization/backups"
+  target_host=$(jq -er --arg vm "$target_vm" \
+    '[.[] | select(.name == $vm) | .host] | unique | if length == 1 then .[0] else empty end' \
+    "$inventory_json" 2>/dev/null) || {
+    error "Target VM '$target_vm' not uniquely found in the active asset ledger."
+    return 1
+  }
+  if [[ ! "$target_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    error "Invalid Fleet hypervisor name."
+    return 1
+  fi
+  private_key="/etc/one-click/fleet/keys/id_ed25519"
+  [[ -r "$private_key" ]] || private_key="/home/oneclick/.ssh/id_ed25519"
+  if [[ ! -r "$private_key" ]]; then
+    error "Fleet SSH key could not be located."
+    return 1
+  fi
+  inventory_host=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" \
+    ansible-inventory -i "$inventory_file" --host "$target_host" 2>/dev/null) || {
+    error "Unable to resolve Fleet inventory host [$target_host]."
+    return 1
+  }
+  target_ip=$(jq -r '.ansible_host // empty' <<< "$inventory_host")
+  inventory_user=$(jq -r '.ansible_user // "oneclick"' <<< "$inventory_host")
+  inventory_port=$(jq -r '.ansible_port // 22 | tostring' <<< "$inventory_host")
+  if [[ -z "$target_ip" || ! "$target_ip" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:%-]*$ ||
+        ! "$inventory_user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ||
+        ! "$inventory_port" =~ ^[0-9]+$ ]] ||
+        (( 10#$inventory_port < 1 || 10#$inventory_port > 65535 )); then
+    error "Network Routing Fault: Invalid connection parameters for [$target_host]."
+    return 1
+  fi
+  if [[ "$action" == restore || "$action" == delete ]]; then
+    if [[ ! -r "$backup_ledger" ]]; then
+      error "Backup '$backup_name' is missing from the Controller ledger."
+      return 1
+    fi
+    existing_format=$(jq -er --arg vm "$target_vm" --arg name "$backup_name" \
+      '[.[] | select(.vm == $vm and .name == $name)] | if length == 1 then .[0].format // "legacy" else empty end' \
+      "$backup_ledger" 2>/dev/null) || {
+      error "Backup '$backup_name' is not uniquely registered for '$target_vm'."
+      return 1
+    }
+    if [[ "$existing_format" != 'oc-lvm-thin-v1' ]]; then
+      error "Legacy/shared-volume backups cannot be restored or deleted by the thin-LV backup workflow."
+      return 1
+    fi
+  fi
+  if [[ "$action" == restore ]]; then
+    warn "Restoring '$backup_name' replaces the disk of '$target_vm' on [$target_host]."
+    warn "Only restoration may gracefully stop the VM; the existing LV is kept for rollback."
+    if [[ ! -t 0 ]]; then
+      error "Interactive confirmation is required to restore a VPS."
+      return 1
+    fi
+    printf '%s[USER]%s Proceed with restore of %s on [%s]? (y|n): ' \
+      "${cyan:-}" "${reset:-}" "$target_vm" "$target_host"
+    IFS= read -r answer || { error "Restoration cancelled."; return 1; }
+    case "$answer" in
+      y|Y|yes|YES|Yes) allow_restore=1 ;;
+      *) warn "Restoration cancelled by user."; return 1 ;;
+    esac
+  fi
   local remote_host_dir="${remote_backup_base}/${target_vm}"
-  local disk_archive="${remote_host_dir}/${target_vm}_${backup_name}.qcow2.gz"
-  local target_disk="/var/lib/libvirt/images/${target_vm}.qcow2"
+  local disk_archive="${remote_host_dir}/${target_vm}_${backup_name}.lvm.gz"
   case "$action" in
     create)
       info "Initiating backup for $target_vm on [$target_host]."
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsfreeze $target_vm 2>/dev/null" &>/dev/null || true
-      if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -s '$target_disk'"; then
-        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsthaw $target_vm 2>/dev/null" &>/dev/null || true
-        error "VM disk not found or empty on target hypervisor: $target_disk"
-        return 1
-      fi
-      local raw_disk_bytes
-      raw_disk_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo stat -c%s '$target_disk'" 2>/dev/null | tr -d '[:space:]')
-      if [[ -z "$raw_disk_bytes" || ! "$raw_disk_bytes" =~ ^[0-9]+$ ]]; then
-        raw_disk_bytes=""
-      fi
-      info "Compressing backup $backup_name."
-      if [[ -n "$raw_disk_bytes" ]]; then
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p '$remote_host_dir' && sudo dd if='$target_disk' bs=1M status=none | pv -s '$raw_disk_bytes' | gzip -c | sudo tee '$disk_archive' 2> /var/log/one-click/virt/error.log"
-      else
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo mkdir -p '$remote_host_dir' && sudo dd if='$target_disk' bs=1M status=none | pv | gzip -c | sudo tee '$disk_archive' 2> /var/log/one-click/virt/error.log"
-      fi
-      local run_status=$?
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh domfsthaw $target_vm 2>/dev/null" &>/dev/null || true
-      local remote_file_check
-      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -s '$disk_archive' && echo 'OK' || echo 'FAIL'")
-      if [[ $run_status -eq 0 && "$remote_file_check" == "OK" ]]; then
-        success "The VM disk backup has successfully been compressed and stored on [$target_host]."
-        local timestamp
-        timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        jq ". += [{ \"name\": \"$backup_name\", \"vm\": \"$target_vm\", \"host\": \"$target_host\", \"file\": \"$disk_archive\", \"created_at\": \"$timestamp\" }]" "$backup_ledger" > "${backup_ledger}.tmp" && mv "${backup_ledger}.tmp" "$backup_ledger"
-      else
-        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f '$disk_archive'" &>/dev/null
-        error "Creation of hypervisor-local block archive backup $backup_name failed."
-        return 1
-      fi
+      info "Capturing live LVM snapshot, then compressing backup $backup_name."
       ;;
     restore)
       warn "Restoring '$backup_name'."
-      local remote_file_check
-      remote_file_check=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -f '$disk_archive' && echo 'OK' || echo 'FAIL'")
-      if [[ "$remote_file_check" == "FAIL" ]]; then
-        error "Backup file not found on target hypervisor path: $disk_archive"
-        return 1
-      fi
-      info "Stopping $target_vm for restoration activity."
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh destroy $target_vm 2>/dev/null" &>/dev/null || true
-      local compressed_bytes
-      compressed_bytes=$(ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo stat -c%s '$disk_archive'" 2>/dev/null | tr -d '[:space:]')
-      if ! ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo test -f '$target_disk'"; then
-        error "Target VM disk is missing; refusing restore to an unexpected path: $target_disk"
-        return 1
-      fi
-      info "Decompressing and restoring the selected VM disk on target hypervisor storage."
-      if [[ -n "$compressed_bytes" && "$compressed_bytes" =~ ^[0-9]+$ ]]; then
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat \"$disk_archive\" | pv -s \"$compressed_bytes\" | gzip -dc | dd of=\"$target_disk\" bs=1M status=none'"
-      else
-        ssh -t -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -c 'cat \"$disk_archive\" | pv | gzip -dc | dd of=\"$target_disk\" bs=1M status=none'"
-      fi
-      local restore_status=$?
-      if [[ $restore_status -eq 0 ]]; then
-        info "Restarting virtual machine."
-        ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo virsh start $target_vm" &>/dev/null
-        success "The VM disk backup $backup_name has successfully been restored on [$target_host]."
-      else
-        error "Restoration of VM disk backup $backup_name has failed."
-        return 1
-      fi
+      info "Verifying archive and staging restored VM disk before the final swap."
       ;;
     delete)
       warn "Deleting backup $backup_name from [$target_host]."
-      ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo rm -f '$disk_archive'" &>/dev/null
-      jq "del(.[] | select(.name == \"$backup_name\" and .vm == \"$target_vm\"))" "$backup_ledger" > "${backup_ledger}.tmp" && mv "${backup_ledger}.tmp" "$backup_ledger"
-      success "Backup $backup_name has been deleted."
       ;;
-    *)
-      error "Invalid action parameter. Must be: create, restore, or delete."
-      return 1
-      ;;
+  esac
+  ssh -T -i "$private_key" -p "$inventory_port" \
+    -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${inventory_user}@${target_ip}" \
+    "sudo -n bash -s -- '$action' '$target_vm' '$backup_name' '$allow_restore'" <<'REMOTE_VPS_LIVE_BACKUP'
+set -Eeuo pipefail
+umask 077
+operation=${1:?}; vm=${2:?}; backup_name=${3:?}; allow_restore=${4:-0}
+vg=one_click_vg
+pool=one_click_pool
+origin_name="lv_${vm}"
+origin="/dev/${vg}/${origin_name}"
+base='/etc/one-click/virtualization/backups'
+vm_dir="${base}/${vm}"
+archive="${vm_dir}/${vm}_${backup_name}.lvm.gz"
+metadata="${archive}.meta.json"
+origin_bytes=''
+snapshot=''; frozen=0; archive_tmp=''; metadata_tmp=''; staging=''
+restore_old=''; restore_swapped=0; restore_complete=0; shutdown_by_tool=0; old_disk_safe=1
+fatal() { printf '[BACKUP ERROR] %s\n' "$*" >&2; exit 1; }
+notice() { printf '[INFO]: %s\n' "$*"; }
+warning() { printf '[BACKUP WARN] %s\n' "$*" >&2; }
+trim() { tr -d '[:space:]'; }
+backup_cleanup() {
+  local rc=$? current
+  trap - EXIT HUP INT TERM
+  set +e
+  if (( frozen )); then
+    if ! virsh domfsthaw "$vm" >/dev/null 2>&1; then
+      warning "Guest filesystem thaw failed for '$vm'; inspect immediately."
+      rc=1
+    fi
+  fi
+  if [[ -n "$snapshot" ]] && lvs "${vg}/${snapshot}" >/dev/null 2>&1; then
+    if ! lvremove -f -y "${vg}/${snapshot}" >/dev/null 2>&1; then
+      warning "Temporary snapshot ${vg}/${snapshot} could not be removed."
+      rc=1
+    fi
+  fi
+  [[ -z "$archive_tmp" ]] || rm -f -- "$archive_tmp"
+  [[ -z "$metadata_tmp" ]] || rm -f -- "$metadata_tmp"
+  if [[ -n "$staging" ]] && lvs "${vg}/${staging}" >/dev/null 2>&1; then
+    lvremove -f -y "${vg}/${staging}" >/dev/null 2>&1 || {
+      warning "Temporary staged restore LV ${vg}/${staging} requires manual cleanup."
+      rc=1
+    }
+  fi
+  if (( restore_swapped && ! restore_complete )) && [[ -n "$restore_old" ]] &&
+     lvs "${vg}/${restore_old}" >/dev/null 2>&1; then
+    current=$(virsh domstate "$vm" 2>/dev/null) || current=unknown
+    if [[ "$current" == 'shut off' ]] && lvs "${vg}/${origin_name}" >/dev/null 2>&1; then
+      local rescue="ocr_failed_${vm:0:24}_$(date +%s)_${BASHPID}"
+      if lvrename "$vg" "$origin_name" "$rescue" >/dev/null 2>&1 &&
+         lvrename "$vg" "$restore_old" "$origin_name" >/dev/null 2>&1; then
+        warning "Original LV recovered. Failed replacement retained at ${vg}/${rescue}."
+        restore_old=''
+        restore_swapped=0
+      else
+        old_disk_safe=0
+        warning "Interrupted restore rollback failed. VM must remain stopped for inspection."
+        rc=1
+      fi
+    else
+      old_disk_safe=0
+      warning "Restore was interrupted after LV swap. Check guest state before restart."
+      rc=1
+    fi
+  fi
+  if [[ -n "$restore_old" ]] && (( ! restore_complete )) &&
+     lvs "${vg}/${restore_old}" >/dev/null 2>&1; then
+    if ! lvs "${vg}/${origin_name}" >/dev/null 2>&1; then
+      lvrename "$vg" "$restore_old" "$origin_name" >/dev/null 2>&1 || {
+        warning "Original LV name needs manual recovery: ${vg}/${restore_old}."
+        old_disk_safe=0; rc=1
+      }
+    fi
+  fi
+  if (( shutdown_by_tool && old_disk_safe && ! restore_complete )) &&
+     [[ "$(virsh domstate "$vm" 2>/dev/null)" == 'shut off' ]]; then
+    notice "Restarting original virtual machine '$vm' after unsuccessful restore."
+    virsh start "$vm" >/dev/null || {
+      warning "Failed to restart '$vm'; investigate on owning hypervisor."
+      rc=1
+    }
+  fi
+  exit "$rc"
+}
+trap backup_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+for cmd in virsh lvs lvcreate lvchange lvremove lvrename jq dd gzip sha256sum awk flock pv timeout; do
+  command -v "$cmd" >/dev/null 2>&1 || fatal "Missing required hypervisor command: $cmd"
+done
+[[ ! -L "$base" && ! -L "$vm_dir" && ! -L "$archive" && ! -L "$metadata" ]] ||
+  fatal 'Backup path contains a symbolic link.'
+exec 9>"/run/lock/one-click-vps-backup-${vm}.lock"
+flock -n 9 || fatal "Another backup operation is running for '$vm'."
+if [[ "$operation" != delete ]]; then
+  virsh domuuid "$vm" >/dev/null 2>&1 || fatal "VPS '$vm' does not exist on this hypervisor."
+  actual=$(virsh domblklist "$vm" --details 2>/dev/null) || fatal 'Unable to read VM disk configuration.'
+  disk_count=0; disk_source=''
+  while read -r disk_type device target source remainder; do
+    if [[ "$device" == disk ]]; then
+      ((disk_count+=1))
+      [[ "$disk_type" == block && -n "$source" ]] || fatal 'Only direct, block-backed VM disks are supported.'
+      disk_source="$source"
+    fi
+  done <<< "$actual"
+  (( disk_count == 1 )) || fatal "Expected exactly one VPS disk; found ${disk_count}."
+  expected_dev=$(readlink -f -- "$origin") || fatal "Expected dedicated LV '$origin' is missing."
+  observed_dev=$(readlink -f -- "$disk_source") || fatal 'Could not resolve libvirt disk path.'
+  [[ -n "$expected_dev" && "$observed_dev" == "$expected_dev" ]] ||
+    fatal "VM disk '$disk_source' does not match dedicated LV '$origin'."
+  attributes=$(lvs --noheadings --separator '|' --nosuffix --units b \
+    -o lv_attr,pool_lv,lv_size "$origin" 2>/dev/null) || fatal "Dedicated LV '$origin' unavailable."
+  IFS='|' read -r attr pool_name origin_bytes <<< "$attributes"
+  attr=$(printf '%s' "$attr" | trim)
+  pool_name=$(printf '%s' "$pool_name" | trim)
+  origin_bytes=$(printf '%s' "$origin_bytes" | trim)
+  origin_bytes="${origin_bytes%%.*}"
+  [[ "$attr" == V* && "$pool_name" == "$pool" && "$origin_bytes" =~ ^[0-9]+$ ]] ||
+    fatal "'$origin' is not an expected thin LV in ${vg}/${pool}."
+  vm_uuid=$(virsh domuuid "$vm") || fatal 'Unable to read VM UUID.'
+fi
+check_pool() {
+  local values dp mp
+  values=$(lvs --noheadings --separator '|' -o data_percent,metadata_percent \
+    "${vg}/${pool}" 2>/dev/null) || fatal 'Cannot inspect thin-pool capacity.'
+  IFS='|' read -r dp mp <<< "$values"
+  dp=$(printf '%s' "$dp" | trim); mp=$(printf '%s' "$mp" | trim)
+  awk -v a="$dp" -v b="$mp" 'BEGIN {
+    if (a !~ /^[0-9]+([.][0-9]+)?$/ || b !~ /^[0-9]+([.][0-9]+)?$/) exit 1;
+    if (a >= 85 || b >= 85) exit 2;
+  }' || fatal "Thin pool ${vg}/${pool} is too full or its usage is unknown (data=${dp}% metadata=${mp}%)."
+}
+load_metadata() {
+  [[ -f "$archive" && -s "$archive" && -f "$metadata" && ! -L "$archive" && ! -L "$metadata" ]] ||
+    fatal 'Selected backup or its integrity manifest is missing. Legacy archives cannot be restored automatically.'
+  jq -e --arg vm "$vm" --arg name "$backup_name" --arg lv "$origin" \
+    --arg uuid "$vm_uuid" --argjson bytes "$origin_bytes" '
+    .format == "oc-lvm-thin-v1" and .vm == $vm and .name == $name and
+    .origin == $lv and .uuid == $uuid and .bytes == $bytes and
+    (.archive_sha256 | type == "string") and (.raw_sha256 | type == "string")
+  ' "$metadata" >/dev/null || fatal 'Backup manifest does not match this VPS and its LV.'
+  expected_archive_sha=$(jq -r '.archive_sha256' "$metadata")
+  expected_raw_sha=$(jq -r '.raw_sha256' "$metadata")
+  [[ "$expected_archive_sha" =~ ^[0-9a-f]{64}$ && "$expected_raw_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    fatal 'Invalid manifest checksums.'
+  actual_sha=$(sha256sum "$archive" | awk '{print $1}')
+  [[ "$actual_sha" == "$expected_archive_sha" ]] || fatal 'Compressed backup checksum mismatch.'
+  gzip -t -- "$archive" || fatal 'Compressed archive is invalid.'
+}
+case "$operation" in
+  create)
+    mkdir -p -- "$vm_dir"
+    chmod 700 -- "$vm_dir"
+    [[ ! -e "$archive" && ! -e "$metadata" ]] || fatal 'Backup already exists; choose another name.'
+    check_pool
+    state=$(virsh domstate "$vm") || fatal 'Unable to read VM state.'
+    [[ "$state" == running || "$state" == 'shut off' ]] || fatal "Unsupported VPS state '$state'."
+    if [[ "$state" == running ]]; then
+      local_freeze_rc=0
+      timeout 20 virsh domfsfreeze "$vm" >/dev/null 2>&1 || local_freeze_rc=$?
+      if (( local_freeze_rc == 0 )); then
+        frozen=1
+        notice "Guest filesystem briefly frozen for live snapshot."
+      elif (( local_freeze_rc == 124 || local_freeze_rc == 137 )); then
+        virsh domfsthaw "$vm" >/dev/null 2>&1 || true
+        fatal "Guest-agent freeze timed out; snapshot cancelled to avoid an uncertain frozen state."
+      else
+        warning "Guest-agent freeze unavailable; backup will be crash-consistent, not application-consistent."
+        virsh domfsthaw "$vm" >/dev/null 2>&1 || true
+      fi
+    fi
+    snapshot="ocb_${vm:0:28}_$(date +%s)_${BASHPID}"
+    timeout 40 lvcreate --snapshot --name "$snapshot" "$origin" >/dev/null || fatal 'Temporary LVM thin snapshot failed.'
+    notice "Captured point-in-time LVM snapshot of '$vm' on this hypervisor."
+    if (( frozen )); then
+      virsh domfsthaw "$vm" >/dev/null || fatal "Guest thaw failed; inspect '$vm' immediately."
+      frozen=0
+    fi
+    lvchange -ay -K "${vg}/${snapshot}" >/dev/null || fatal 'Cannot activate temporary thin snapshot.'
+    archive_tmp=$(mktemp "${archive}.partial.XXXXXXXX") || fatal 'Cannot prepare backup output.'
+    notice "Compressing backup '$backup_name' from the temporary LVM snapshot."
+    dd if="/dev/${vg}/${snapshot}" bs=4M status=none | pv -f -s "$origin_bytes" | gzip -c > "$archive_tmp"
+    gzip -t "$archive_tmp" || fatal 'Backup archive failed gzip validation.'
+    raw_bytes=$(gzip -dc "$archive_tmp" | wc -c | trim)
+    [[ "$raw_bytes" == "$origin_bytes" ]] || fatal 'Backup does not contain the complete volume.'
+    raw_sha=$(gzip -dc "$archive_tmp" | sha256sum | awk '{print $1}')
+    compressed_sha=$(sha256sum "$archive_tmp" | awk '{print $1}')
+    check_pool
+    metadata_tmp=$(mktemp "${metadata}.partial.XXXXXXXX") || fatal 'Cannot prepare manifest.'
+    jq -n --arg vm "$vm" --arg name "$backup_name" --arg uuid "$vm_uuid" \
+      --arg origin "$origin" --arg host "$(hostname -s)" \
+      --arg compressed "$compressed_sha" --arg raw "$raw_sha" \
+      --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson bytes "$origin_bytes" \
+      '{format:"oc-lvm-thin-v1",vm:$vm,name:$name,uuid:$uuid,origin:$origin,
+        host:$host,bytes:$bytes,archive_sha256:$compressed,raw_sha256:$raw,created_at:$date}' > "$metadata_tmp"
+    ln -- "$archive_tmp" "$archive" || fatal 'Cannot publish verified archive.'
+    rm -f -- "$archive_tmp"
+    archive_tmp=''
+    if ! ln -- "$metadata_tmp" "$metadata"; then
+      rm -f -- "$archive"
+      fatal 'Cannot publish backup manifest.'
+    fi
+    rm -f -- "$metadata_tmp"
+    metadata_tmp=''
+    notice "Verified LVM backup while '$vm' remained ${state}."
+    ;;
+  restore)
+    (( allow_restore == 1 )) || fatal 'Restore requires explicit controller confirmation.'
+    load_metadata
+    check_pool
+    staging="ocr_${vm:0:28}_$(date +%s)_${BASHPID}"
+    lvcreate --thin --virtualsize "${origin_bytes}B" --name "$staging" "${vg}/${pool}" >/dev/null ||
+      fatal 'Cannot allocate temporary restore LV.'
+    lvchange -ay "${vg}/${staging}" >/dev/null || fatal 'Cannot activate temporary restore LV.'
+    notice "Restoring backup to an isolated staging LV while '$vm' remains available."
+    gzip -dc "$archive" | dd of="/dev/${vg}/${staging}" bs=4M conv=fsync status=none
+    staged_sha=$(sha256sum "/dev/${vg}/${staging}" | awk '{print $1}')
+    [[ "$staged_sha" == "$expected_raw_sha" ]] || fatal 'Restored LV content failed checksum verification.'
+    check_pool
+    state=$(virsh domstate "$vm") || fatal 'Cannot inspect VM state.'
+    [[ "$state" == running || "$state" == 'shut off' ]] || fatal "Cannot restore while VM is '$state'."
+    if [[ "$state" == running ]]; then
+      notice "Gracefully shutting down '$vm' for the final LV swap."
+      virsh shutdown "$vm" >/dev/null || fatal 'Graceful shutdown request failed.'
+      shutdown_by_tool=1
+      for (( i=0; i<90; i++ )); do
+        state=$(virsh domstate "$vm" 2>/dev/null) || fatal 'Lost VM status during shutdown.'
+        [[ "$state" == 'shut off' ]] && break
+        [[ "$state" == running || "$state" == 'in shutdown' ]] || fatal "Unexpected VM state '$state'."
+        sleep 2
+      done
+      [[ "$state" == 'shut off' ]] || fatal 'Guest did not shut down gracefully; no disk changes made.'
+    fi
+    restore_old="ocr_old_${vm:0:26}_$(date +%s)_${BASHPID}"
+    lvrename "$vg" "$origin_name" "$restore_old" >/dev/null || fatal 'Cannot retain original LV for rollback.'
+    lvrename "$vg" "$staging" "$origin_name" >/dev/null || fatal 'Cannot install staged LV; original name will be recovered.'
+    staging=''
+    restore_swapped=1
+    if ! virsh start "$vm" >/dev/null; then
+      warning 'VM restart failed; attempting to reinstate the original LV.'
+      if [[ "$(virsh domstate "$vm" 2>/dev/null)" == 'shut off' ]]; then
+        failed_name="ocr_failed_${vm:0:25}_$(date +%s)_${BASHPID}"
+        if lvrename "$vg" "$origin_name" "$failed_name" >/dev/null &&
+           lvrename "$vg" "$restore_old" "$origin_name" >/dev/null; then
+          warning "Original LV restored. Failed staged disk retained as ${vg}/${failed_name}."
+          old_disk_safe=1; restore_old=''; restore_swapped=0
+        else
+          old_disk_safe=0
+          warning "Automatic LV rollback failed; inspect ${vg}/${restore_old} before booting."
+        fi
+      else
+        old_disk_safe=0
+        warning 'VM start result uncertain; original LV retained for manual recovery.'
+      fi
+      fatal 'Restored VM could not be started.'
+    fi
+    restore_complete=1
+    notice "Original LV retained for rollback as ${vg}/${restore_old}."
+    ;;
+  delete)
+    [[ -f "$archive" && -f "$metadata" && ! -L "$archive" && ! -L "$metadata" ]] ||
+      fatal 'Backup files are missing; refusing incomplete delete.'
+    rm -f -- "$archive" "$metadata" || fatal 'Unable to delete both backup files.'
+    ;;
+  *) fatal 'Unsupported backup action.' ;;
+esac
+REMOTE_VPS_LIVE_BACKUP
+  remote_rc=$?
+  if (( remote_rc != 0 )); then
+    error "VPS disk backup $action failed on [$target_host]; ledger unchanged."
+    return "$remote_rc"
+  fi
+  if [[ "$action" == create || "$action" == delete ]]; then
+    mkdir -p -- "$(dirname -- "$backup_ledger")" || return 1
+    if [[ ! -f "$backup_ledger" ]]; then
+      printf '[]\n' > "$backup_ledger" || return 1
+      chmod 600 "$backup_ledger"
+    fi
+    ledger_tmp=$(mktemp "${backup_ledger}.tmp.XXXXXXXX") || return 1
+    if [[ "$action" == create ]]; then
+      timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      if ! jq --arg name "$backup_name" --arg vm "$target_vm" \
+        --arg host "$target_host" --arg file "$disk_archive" --arg created "$timestamp" \
+        '. + [{name:$name,vm:$vm,host:$host,file:$file,created_at:$created,format:"oc-lvm-thin-v1"}]' \
+        "$backup_ledger" > "$ledger_tmp"; then
+        rm -f -- "$ledger_tmp"
+        error "Backup exists on [$target_host], but its Controller ledger record could not be saved."
+        return 1
+      fi
+    else
+      if ! jq --arg name "$backup_name" --arg vm "$target_vm" \
+        'map(select(.name != $name or .vm != $vm))' \
+        "$backup_ledger" > "$ledger_tmp"; then
+        rm -f -- "$ledger_tmp"
+        error "Backup deleted remotely, but Controller ledger could not be updated."
+        return 1
+      fi
+    fi
+    chmod 600 "$ledger_tmp"
+    mv -f -- "$ledger_tmp" "$backup_ledger" || return 1
+  fi
+  case "$action" in
+    create) success "The LVM backup has successfully been compressed and stored on [$target_host]." ;;
+    restore) success "The local LVM volume $backup_name has successfully been restored on [$target_host]." ;;
+    delete) success "Backup $backup_name has been deleted." ;;
   esac
   printf "$(tput setaf 152)[BACKUP]${reset} %s\n" \
     "${green}┌──────────────────────────────────────────────────────────┐${reset}" \
-    "  ${blue}Operation:${reset}     VM Disk Backup ${action^^}" \
+    "  ${blue}Operation:${reset}     LVM Backup ${action^^}" \
     "  ${blue}Target VM:${reset}     $target_vm" \
     "  ${blue}Backup Name:${reset}   $backup_name" \
     "  ${blue}Host Node:${reset}     $target_host" \
@@ -9317,12 +9627,10 @@ fleet_proxy_provision() {
   local proxy_mode public_port backend_port
   if [[ -n "$website" ]]; then
     proto="${proto:-http}"
-
     if [[ ! "$website" =~ ^[A-Za-z0-9.-]+$ ]]; then
       error "Invalid website '$website'. Only DNS hostnames are accepted."
       return 1
     fi
-
     case "$proto" in
       http)
         public_port=80
@@ -9337,12 +9645,10 @@ fleet_proxy_provision() {
         return 1
         ;;
     esac
-
     if [[ ! "$backend_port" =~ ^[0-9]+$ ]] || (( backend_port < 1 || backend_port > 65535 )); then
       error "Invalid backend port '$backend_port'."
       return 1
     fi
-
     src_port="$backend_port"
     proxy_mode="web"
     info "Compiling ${proto^^} proxy for $website:$public_port -> $target_vm ($vps_internal_ip:$backend_port)."
@@ -9359,30 +9665,22 @@ fleet_proxy_provision() {
     error "Invalid parameters. Specify either a --website/--proto mapping or a --source/--port mapping."
     return 1
   fi
-
   if [[ ! "$target_vm" =~ ^[A-Za-z0-9._-]+$ || ! "$vps_internal_ip" =~ ^[0-9A-Fa-f:.]+$ ]]; then
     error "Unsafe target name or address in proxy mapping."
     return 1
   fi
-
   info "Connecting to Hypervisor Node [$target_host] to apply proxy."
   local private_key="/etc/one-click/fleet/keys/id_ed25519"
   if [[ ! -f "$private_key" ]]; then
     private_key="/home/oneclick/.ssh/id_ed25519"
   fi
-
   local target_ip
   target_ip=$(ANSIBLE_SSH_ARGS="-C -o IdentityFile=$private_key" ansible-inventory -i "$inventory_file" --host "${target_host:-$CONTROLLER_NAME}" 2>/dev/null | jq -r '.ansible_host // empty')
   if [[ -z "$target_ip" ]]; then
     error "Network Routing Fault: Could not map host '$target_host' to an active IP matrix."
     return 1
   fi
-
   info "Orchestrating network proxy configurations on [$target_host] ($target_ip)."
-
-  # The values below are restricted to safe hostname/name/IP/port characters above,
-  # so they can be passed as positional parameters without embedding a shell payload
-  # into haproxy.cfg.
   ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" \
     "sudo bash -s -- '$proxy_mode' '$target_vm' '$vps_internal_ip' '$website' '$proto' '$src_port' '$dest_port' '$public_port'" <<'REMOTE_HAPROXY'
 set -euo pipefail
@@ -9395,7 +9693,6 @@ proto="$5"
 src_port="$6"
 dest_port="$7"
 public_port="$8"
-
 if ! command -v haproxy >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
@@ -9411,14 +9708,12 @@ if ! command -v haproxy >/dev/null 2>&1; then
   fi
   systemctl enable haproxy
 fi
-
 cfg=/etc/haproxy/haproxy.cfg
 mkdir -p /etc/haproxy/errors
 backup=$(mktemp /tmp/haproxy.cfg.backup.XXXXXX)
 work=$(mktemp /tmp/haproxy.cfg.work.XXXXXX)
 cp -a "$cfg" "$backup"
 commit=0
-
 restore_on_error() {
   rc=$?
   if (( commit == 0 )); then
@@ -9428,7 +9723,6 @@ restore_on_error() {
   exit "$rc"
 }
 trap restore_on_error EXIT
-
 remove_section() {
   section_type="$1"
   section_name="$2"
@@ -9454,22 +9748,18 @@ remove_section() {
   ' "$cfg" > "$work"
   cat "$work" > "$cfg"
 }
-
 ensure_http_frontend() {
   if ! grep -Eq '^frontend[[:space:]]+http_front([[:space:]]|$)' "$cfg"; then
     cat >> "$cfg" <<'EOF_HTTP_FRONT'
-
 frontend http_front
     bind *:80
     mode http
 EOF_HTTP_FRONT
   fi
 }
-
 ensure_https_frontend() {
   if ! grep -Eq '^frontend[[:space:]]+https_front([[:space:]]|$)' "$cfg"; then
     cat >> "$cfg" <<'EOF_HTTPS_FRONT'
-
 frontend https_front
     bind *:443
     mode tcp
@@ -9478,7 +9768,6 @@ frontend https_front
 EOF_HTTPS_FRONT
   fi
 }
-
 insert_frontend_rule() {
   frontend="$1"
   rule="$2"
@@ -9486,7 +9775,6 @@ insert_frontend_rule() {
     sed -i "/^frontend[[:space:]]\+${frontend}[[:space:]]*$/a\\${rule}" "$cfg"
   fi
 }
-
 remove_domain_rule() {
   frontend="$1"
   match_text="$2"
@@ -9503,14 +9791,11 @@ remove_domain_rule() {
   ' "$cfg" > "$work"
   cat "$work" > "$cfg"
 }
-
 safe_vm=${target_vm//[^A-Za-z0-9_]/_}
 safe_site=${website//[^A-Za-z0-9_]/_}
-
 if [[ "$proxy_mode" == "web" ]]; then
   backend_name="oneclick_${proto}_${safe_vm}_${safe_site}"
   remove_section backend "$backend_name"
-
   if [[ "$proto" == "http" ]]; then
     ensure_http_frontend
     remove_domain_rule http_front "{ hdr(host) -i ${website} }"
@@ -12886,64 +13171,40 @@ fleet_vps_web_console() {
   fi
   local session_timeout="${VNC_WEB_TIMEOUT}"
   local inventory_file=/etc/one-click/fleet/inventory.yml
-
   cleanup_vnc_firewall() {
-    local port="$1"
-    [[ -z "$port" ]] && return 0
-
-    local fw rule handle
+    local port="${1:-}" tag="${2:-}" source_ip="${3:-}"
+    local restricted="${4:-}" ipv6_ready="${5:-0}"
+    local fw rc=0
+    [[ "$port" =~ ^[0-9]{1,5}$ &&
+       "$tag" =~ ^oneclick-vnc:[a-fA-F0-9]{24}$ ]] || return 1
     for fw in iptables ip6tables; do
-      command -v "$fw" &>/dev/null || continue
-      while :; do
-        rule=$("$fw" -S INPUT 2>/dev/null | awk -v p="$port" '
-          index($0, "--dport " p) { print; exit }
-        ')
-        [[ -n "$rule" ]] || break
-        rule="${rule/-A INPUT/-D INPUT}"
-        $fw $rule 2>/dev/null || break
-      done
+      [[ "$fw" == ip6tables && "$ipv6_ready" != 1 ]] && continue
+      command -v "$fw" &>/dev/null || { rc=1; continue; }
+
+      if [[ "$restricted" == yes ]]; then
+        if [[ "$fw" == ip6tables && "$source_ip" == *:* ]] ||
+           [[ "$fw" == iptables && "$source_ip" != *:* ]]; then
+          if "$fw" -C INPUT -p tcp --dport "$port" -s "$source_ip" \
+              -m comment --comment "$tag" -j ACCEPT &>/dev/null; then
+            "$fw" -D INPUT -p tcp --dport "$port" -s "$source_ip" \
+              -m comment --comment "$tag" -j ACCEPT || rc=1
+          fi
+        fi
+        if "$fw" -C INPUT -p tcp --dport "$port" \
+            -m comment --comment "$tag" -j DROP &>/dev/null; then
+          "$fw" -D INPUT -p tcp --dport "$port" \
+            -m comment --comment "$tag" -j DROP || rc=1
+        fi
+      else
+        if "$fw" -C INPUT -p tcp --dport "$port" \
+            -m comment --comment "$tag" -j ACCEPT &>/dev/null; then
+          "$fw" -D INPUT -p tcp --dport "$port" \
+            -m comment --comment "$tag" -j ACCEPT || rc=1
+        fi
+      fi
     done
-
-    if command -v nft &>/dev/null; then
-      while :; do
-        handle=$(nft -a list chain inet filter input 2>/dev/null | awk -v p="$port" '
-          index($0, "tcp dport " p) && / handle / { print $NF; exit }
-        ')
-        [[ -n "$handle" ]] || break
-        nft delete rule inet filter input handle "$handle" 2>/dev/null || break
-      done
-    fi
-
-    if command -v firewall-cmd &>/dev/null; then
-      firewall-cmd --zone=public --remove-port="${port}/tcp" &>/dev/null || true
-      while IFS= read -r rich_rule; do
-        [[ -n "$rich_rule" ]] || continue
-        firewall-cmd --zone=public --remove-rich-rule="$rich_rule" &>/dev/null || true
-      done < <(
-        firewall-cmd --zone=public --list-rich-rules 2>/dev/null |
-          awk -v p="$port" 'index($0, "port=\"" p "\"")'
-      )
-      firewall-cmd --reload &>/dev/null || true
-    fi
-
-    if command -v ufw &>/dev/null; then
-      local rule_num
-      while IFS= read -r rule_num; do
-        [[ -n "$rule_num" ]] || continue
-        yes | ufw delete "$rule_num" &>/dev/null || true
-      done < <(
-        ufw status numbered 2>/dev/null |
-          awk -v p="$port" '
-            index($0, p "/tcp") && match($0, /\[[[:space:]]*[0-9]+\]/) {
-              n=substr($0, RSTART+1, RLENGTH-2)
-              gsub(/[[:space:]]/, "", n)
-              print n
-            }
-          ' | sort -rn
-      )
-    fi
+    return "$rc"
   }
-
   info "Initializing ephemeral Web VNC console for $vps_name on $target_host."
   if ! command -v websockify &> /dev/null; then
     info "Installing Websockify."
@@ -12994,58 +13255,205 @@ fleet_vps_web_console() {
   while fuser "${tunnel_port}/tcp" &>/dev/null; do
     tunnel_port=$(shuf -i 59000-59999 -n 1)
   done
+  vnc_valid_client_ip() {
+    local address="${1:-}" octet
+    local -a octets
+    if [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      IFS=. read -r -a octets <<< "$address"
+      for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+      done
+      return 0
+    fi
+    if [[ "$address" == *:* && "$address" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+      ip -6 route get "$address" &>/dev/null && return 0
+    fi
+    return 1
+  }
+  vnc_suggest_client_ip() {
+    local candidate="" line=""
+    candidate="${SSH_CLIENT:-}"; candidate="${candidate%% *}"
+    if vnc_valid_client_ip "$candidate"; then printf '%s' "$candidate"; return 0; fi
+    candidate="${SSH_CONNECTION:-}"; candidate="${candidate%% *}"
+    if vnc_valid_client_ip "$candidate"; then printf '%s' "$candidate"; return 0; fi
+    if command -v who &>/dev/null; then
+      line="$(who -m 2>/dev/null || true)"
+      if [[ "$line" =~ \(([^\)]+)\) ]]; then
+        candidate="${BASH_REMATCH[1]}"
+        if vnc_valid_client_ip "$candidate"; then printf '%s' "$candidate"; return 0; fi
+      fi
+    fi
+    return 1
+  }
+  local lock_vnc="" rec_ip="" recorded_ip="" source_ip=""
+  local firewall_tag="oneclick-vnc:$(openssl rand -hex 12)"
+  local firewall_ipv6_ready=0 bind_address="0.0.0.0"
+  local fw
+  if ! read -r -p "${cyan}[USER] ${orange}WOULD YOU LIKE TO LOCK DOWN THE VNC SESSION TO A SPECIFIC IP:${reset} " lock_vnc; then
+    error "VNC access choice not received; session not started."
+    return 1
+  fi
+  lock_vnc="${lock_vnc,,}"
+  case "$lock_vnc" in
+    y|yes) lock_vnc=yes ;;
+    n|no) lock_vnc=no ;;
+    *) error "Please answer y or n. VNC session not started."; return 1 ;;
+  esac
+  if [[ "$lock_vnc" == yes ]]; then
+    recorded_ip="$(vnc_suggest_client_ip || true)"
+    if [[ -z "$recorded_ip" ]]; then
+      warn "Cannot determine SSH client address in this shell. Enter your browser's public source IP."
+    fi
+    if ! read -r -p "Please enter the IP address to grant access to${recorded_ip:+ or press enter to use $recorded_ip}: " rec_ip; then
+      error "IP restriction cancelled; VNC session not started."
+      return 1
+    fi
+    source_ip="${rec_ip:-$recorded_ip}"
+    if ! vnc_valid_client_ip "$source_ip"; then
+      error "A valid client IP is required for restricted VNC access; no public listener created."
+      return 1
+    fi
+  else
+    warn "This temporary VNC viewer will be accessible from other IP addresses while its bearer token is valid."
+  fi
+  if ! command -v iptables &>/dev/null || ! iptables -S INPUT &>/dev/null; then
+    error "Cannot safely configure temporary VNC firewall rules with iptables."
+    return 1
+  fi
+  if [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 &&
+     command -v ip6tables &>/dev/null && ip6tables -S INPUT &>/dev/null; then
+    firewall_ipv6_ready=1
+    bind_address='[::]'
+  fi
+  if [[ "$source_ip" == *:* && "$firewall_ipv6_ready" != 1 ]]; then
+    error "IPv6 source restriction requested, but ip6tables is unavailable."
+    return 1
+  fi
+  if [[ "$CONTROLLER_IP" == *:* && "$firewall_ipv6_ready" != 1 ]]; then
+    error "IPv6 controller address requires functional IPv6 firewall support."
+    return 1
+  fi
+  info "Applying temporary firewall rules for VNC session $firewall_tag on port $proxy_port."
+  if [[ "$lock_vnc" == yes ]]; then
+    if ! iptables -I INPUT 1 -p tcp --dport "$proxy_port" \
+        -m comment --comment "$firewall_tag" -j DROP; then
+      error "Unable to restrict temporary VNC port."
+      return 1
+    fi
+    if [[ "$firewall_ipv6_ready" == 1 ]] &&
+       ! ip6tables -I INPUT 1 -p tcp --dport "$proxy_port" \
+           -m comment --comment "$firewall_tag" -j DROP; then
+      cleanup_vnc_firewall "$proxy_port" "$firewall_tag" "$source_ip" yes "$firewall_ipv6_ready"
+      error "Unable to restrict IPv6 VNC port."
+      return 1
+    fi
+    if [[ "$source_ip" == *:* ]]; then
+      fw=ip6tables
+    else
+      fw=iptables
+    fi
+    if ! "$fw" -I INPUT 1 -p tcp --dport "$proxy_port" -s "$source_ip" \
+        -m comment --comment "$firewall_tag" -j ACCEPT; then
+      cleanup_vnc_firewall "$proxy_port" "$firewall_tag" "$source_ip" yes "$firewall_ipv6_ready"
+      error "Unable to allow the selected client IP; session not started."
+      return 1
+    fi
+  else
+    if ! iptables -I INPUT 1 -p tcp --dport "$proxy_port" \
+        -m comment --comment "$firewall_tag" -j ACCEPT; then
+      error "Unable to open temporary VNC port."
+      return 1
+    fi
+    if [[ "$firewall_ipv6_ready" == 1 ]] &&
+       ! ip6tables -I INPUT 1 -p tcp --dport "$proxy_port" \
+           -m comment --comment "$firewall_tag" -j ACCEPT; then
+      cleanup_vnc_firewall "$proxy_port" "$firewall_tag" "" no "$firewall_ipv6_ready"
+      error "Unable to open temporary IPv6 VNC port."
+      return 1
+    fi
+  fi
+  success "Temporary VNC firewall access configured for this session."
   local token
-  token=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 24)
-  info "Establishing internal tunnel (127.0.0.1:$tunnel_port -> $target_ip:$remote_vnc_port)."
-  ssh -f -N -L "127.0.0.1:${tunnel_port}:127.0.0.1:${remote_vnc_port}" \
-    -i /etc/one-click/fleet/keys/id_ed25519 \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    "oneclick@${target_ip}"
+  token="$(openssl rand -hex 16)" || {
+    cleanup_vnc_firewall "$proxy_port" "$firewall_tag" "$source_ip" "$lock_vnc" "$firewall_ipv6_ready"
+    error "Unable to generate a VNC session token."
+    return 1
+  }
+  local tunnel_pid="" tunnel_start="" ws_pid="" ws_start=""
   local token_dir="/etc/one-click/vnc_tokens"
-  mkdir -p "$token_dir"
-  echo "${token}: 127.0.0.1:${tunnel_port}" > "${token_dir}/${token}.tokens"
+  local token_file="${token_dir}/${token}.tokens"
+  info "Establishing internal tunnel (127.0.0.1:$tunnel_port -> $target_ip:$remote_vnc_port)."
+  ssh -N -L "127.0.0.1:${tunnel_port}:127.0.0.1:${remote_vnc_port}" \
+    -i /etc/one-click/fleet/keys/id_ed25519 \
+    -o ExitOnForwardFailure=yes -o BatchMode=yes -o ConnectTimeout=8 \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "oneclick@${target_ip}" &>/dev/null &
+  tunnel_pid=$!
+  tunnel_start="$(_one_click_session_pid_starttime "$tunnel_pid" || true)"
+  cleanup_vnc() {
+    local failed=0
+    [[ -n "${ws_start:-}" ]] &&
+      cleanup_session_port "$proxy_port" "$ws_pid" "$ws_start" || true
+    [[ -n "${tunnel_start:-}" ]] &&
+      cleanup_session_port "$tunnel_port" "$tunnel_pid" "$tunnel_start" || true
+    [[ -n "${token_file:-}" ]] && rm -f -- "$token_file"
+    cleanup_vnc_firewall "$proxy_port" "$firewall_tag" "$source_ip" \
+      "$lock_vnc" "$firewall_ipv6_ready" || failed=1
+    return "$failed"
+  }
+
+  if [[ -z "$tunnel_start" ]]; then
+    cleanup_vnc
+    error "Unable to track the Fleet SSH tunnel process; session not started."
+    return 1
+  fi
+  local tunnel_ready=0 attempt
+  for ((attempt=0; attempt<25; attempt++)); do
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then break; fi
+    if command -v ss &>/dev/null &&
+       ss -H -ltn "sport = :$tunnel_port" 2>/dev/null | grep -q .; then
+      tunnel_ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ "$tunnel_ready" != 1 ]]; then
+    cleanup_vnc
+    error "Fleet VNC tunnel failed to open its local listener."
+    return 1
+  fi
+  if ! mkdir -p "$token_dir" ||
+     ! printf '%s: 127.0.0.1:%s\n' "$token" "$tunnel_port" > "$token_file" ||
+     ! chmod 600 "$token_file"; then
+    cleanup_vnc
+    error "Failed to create the temporary VNC access token."
+    return 1
+  fi
   nohup websockify \
     --web /usr/share/novnc \
     --token-plugin TokenFile \
-    --token-source "${token_dir}/${token}.tokens" \
-    --timeout "${session_timeout}" \
-    --heartbeat 30 \
-    "[::]:$proxy_port" &>/dev/null &
-  local ws_pid=$!
-  cleanup_vnc() {
-    cleanup_session_pid "${ws_pid:-}"
-    cleanup_session_port "${proxy_port:-}"
-    cleanup_session_port "${tunnel_port:-}"
-    [[ -n "${token:-}" ]] && rm -f "${token_dir}/${token}.tokens"
-    [[ -n "${proxy_port:-}" ]] && cleanup_vnc_firewall "$proxy_port"
-  }
-  trap cleanup_vnc ERR INT TERM
+    --token-source "$token_file" \
+    --timeout "$session_timeout" --heartbeat 30 \
+    "${bind_address}:$proxy_port" &>/dev/null &
+  ws_pid=$!
+  ws_start="$(_one_click_session_pid_starttime "$ws_pid" || true)"
+  if [[ -z "$ws_start" ]]; then
+    cleanup_vnc
+    error "Could not track the temporary Web VNC listener."
+    return 1
+  fi
+  sleep 0.4
+  if ! kill -0 "$ws_pid" 2>/dev/null; then
+    cleanup_vnc
+    error "Web VNC proxy exited before its session could start."
+    return 1
+  fi
   (
     sleep "$session_timeout"
-    cleanup_session_pid "$ws_pid"
-    cleanup_session_port "$proxy_port"
-    cleanup_session_port "$tunnel_port"
-    rm -f "${token_dir}/${token}.tokens"
-    cleanup_vnc_firewall "$proxy_port"
+    cleanup_vnc
   ) &>/dev/null & disown
   local controller_ip=$CONTROLLER_IP
-  read -rp "${cyan}[USER] ${orange}WOULD YOU LIKE TO LOCK DOWN THE VNC SESSION TO A SPECIFIC IP:${reset} " lock_vnc
-  lock_vnc="${lock_vnc,,}"
-  load_rule_engine
-  if [[ "$lock_vnc" =~ ^(y|yes)$ ]]; then
-    recorded_ip="$(awk '{print $1}' <<< $SSH_CLIENT)"
-    read -p "Please enter the IP address to grant access to or press enter to use your IP $recorded_ip: " rec_ip
-    if [[ -z "$rec_ip" ]]; then
-      source_ip="$recorded_ip"
-    else
-      source_ip="$rec_ip"
-    fi
-    rule_engine "allow all from ${source_ip} to port ${proxy_port}" -y
-    rule_engine "drop port $proxy_port" -y
-  else
-    rule_engine "allow all to port ${proxy_port}" -y
-  fi
   if [[ "$controller_ip" =~ : ]]; then
     controller_ip="[$controller_ip]"
   fi
@@ -13084,10 +13492,42 @@ cleanup_firewall_session() {
     done
   done
 }
+_one_click_session_pid_starttime() {
+  local pid="${1:-}" stat_line
+  local -a fields=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/${pid}/stat" ]] || return 1
+  IFS= read -r stat_line < "/proc/${pid}/stat" || return 1
+  [[ "$stat_line" == *') '* ]] || return 1
+  stat_line="${stat_line##*) }"
+  read -r -a fields <<< "$stat_line"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
 cleanup_session_port() {
-  local port="$1"
-  [[ -n "$port" ]] &&
-    fuser -k "${port}/tcp" &>/dev/null || true
+  local port="${1:-}" session_pid="${2:-}" expected_start="${3:-}"
+  local actual_start
+  if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] ||
+     (( 10#$port < 1 || 10#$port > 65535 )); then
+    error "Invalid session port: ${port:-<empty>}"
+    return 1
+  fi
+  if [[ -z "$session_pid" && -z "$expected_start" ]]; then
+    return 0
+  fi
+  if [[ ! "$session_pid" =~ ^[1-9][0-9]*$ ||
+        ! "$expected_start" =~ ^[0-9]+$ ]]; then
+    error "Session cleanup requires a recorded PID and start time for port $port."
+    return 1
+  fi
+  actual_start=$(_one_click_session_pid_starttime "$session_pid") || return 0
+  if [[ "$actual_start" != "$expected_start" ]]; then
+    warn "Session PID $session_pid no longer belongs to this session; leaving it alone."
+    return 0
+  fi
+  if ! kill -TERM "$session_pid" 2>/dev/null; then
+    [[ -e "/proc/$session_pid" ]] && return 1
+  fi
+  return 0
 }
 cleanup_session_pid() {
   local pid="$1"
@@ -14894,6 +15334,216 @@ password_strength() {
 }
 # =========================================== End Of Secure Password ============================================== #
 # =============================================== Rule Engine =======================================================
+_one_click_fw_manager_decode() {
+  local cmd="${1:-}" re
+  oc_mgr_backend="" oc_mgr_zone="" oc_mgr_action="" oc_mgr_proto=""
+  oc_mgr_port="" oc_mgr_src="" oc_mgr_kind="" oc_mgr_family=""
+  re='^ufw (allow|deny|reject) proto (tcp|udp) from ([a-zA-Z0-9.:/]+) to any port ([0-9]+([:-][0-9]+)?)$'
+  if [[ "$cmd" =~ $re ]]; then
+    oc_mgr_backend=ufw oc_mgr_action="${BASH_REMATCH[1]}"
+    oc_mgr_proto="${BASH_REMATCH[2]}" oc_mgr_src="${BASH_REMATCH[3]}"
+    oc_mgr_port="${BASH_REMATCH[4]}" oc_mgr_kind=port
+  else
+    re='^firewall-cmd --zone=([a-zA-Z0-9_-]+) --add-port=([0-9]+(-[0-9]+)?)/(tcp|udp)$'
+    if [[ "$cmd" =~ $re ]]; then
+      oc_mgr_backend=firewalld oc_mgr_zone="${BASH_REMATCH[1]}"
+      oc_mgr_port="${BASH_REMATCH[2]}" oc_mgr_proto="${BASH_REMATCH[4]}"
+      oc_mgr_action=allow oc_mgr_kind=port
+    else
+      re='^firewall-cmd --zone=([a-zA-Z0-9_-]+) --add-rich-rule=.rule family="(ipv4|ipv6)" source address="([a-zA-Z0-9.:/]+)" port port="([0-9]+(-[0-9]+)?)" protocol="(tcp|udp)" (accept|drop|reject).$'
+      if [[ "$cmd" =~ $re ]]; then
+        oc_mgr_backend=firewalld oc_mgr_zone="${BASH_REMATCH[1]}"
+        oc_mgr_family="${BASH_REMATCH[2]}" oc_mgr_src="${BASH_REMATCH[3]}"
+        oc_mgr_port="${BASH_REMATCH[4]}" oc_mgr_proto="${BASH_REMATCH[6]}"
+        oc_mgr_action="${BASH_REMATCH[7]}" oc_mgr_kind=rich
+      else
+        re="^firewall-cmd --zone=([a-zA-Z0-9_-]+) --add-rich-rule='rule port port=\"([0-9]+(-[0-9]+)?)\" protocol=\"(tcp|udp)\" (drop|reject)'$"
+        if [[ "$cmd" =~ $re ]]; then
+          oc_mgr_backend=firewalld oc_mgr_zone="${BASH_REMATCH[1]}"
+          oc_mgr_port="${BASH_REMATCH[2]}" oc_mgr_proto="${BASH_REMATCH[4]}"
+          oc_mgr_action="${BASH_REMATCH[5]}" oc_mgr_kind=rich
+          oc_mgr_family="" oc_mgr_src=""
+        else
+          return 1
+        fi
+      fi
+    fi
+  fi
+  [[ "$oc_mgr_proto" == tcp || "$oc_mgr_proto" == udp ]] || return 1
+  valid_port "$oc_mgr_port" || return 1
+  if [[ -n "$oc_mgr_src" && "$oc_mgr_src" != any ]]; then
+    if [[ "$oc_mgr_src" == *:* ]]; then
+      valid_ipv6 "$oc_mgr_src" || return 1
+      [[ "$oc_mgr_backend" != firewalld || "$oc_mgr_family" == ipv6 ]] || return 1
+    else
+      valid_ip "$oc_mgr_src" || return 1
+      [[ "$oc_mgr_backend" != firewalld || "$oc_mgr_family" == ipv4 ]] || return 1
+    fi
+  fi
+  case "$oc_mgr_backend:$oc_mgr_kind:$oc_mgr_action" in
+    ufw:port:allow|ufw:port:deny|ufw:port:reject|firewalld:port:allow|firewalld:rich:accept|firewalld:rich:drop|firewalld:rich:reject) ;;
+    *) return 1 ;;
+  esac
+  [[ "$oc_mgr_backend" != firewalld || "$oc_mgr_zone" == public ]] || return 1
+  if [[ "$oc_mgr_backend" == firewalld && "$oc_mgr_kind" == rich ]]; then
+    [[ ( -n "$oc_mgr_family" && -n "$oc_mgr_src" ) ||
+       ( -z "$oc_mgr_family" && -z "$oc_mgr_src" && "$oc_mgr_action" != accept ) ]] || return 1
+  fi
+}
+_one_click_fw_command_argv() {
+  local cmd="${1:-}" token
+  local -a pieces=()
+  fw_argv=()
+  [[ -n "$cmd" && "$cmd" != *$'\n'* && "$cmd" != *$'\r'* ]] || return 1
+  case "$cmd" in
+    'ufw '*|'firewall-cmd '*)
+      _one_click_fw_manager_decode "$cmd" || return 1
+      _one_click_fw_manager_argv apply || { fw_argv=(); return 1; }
+      case "${fw_argv[0]:-}" in ufw|firewall-cmd) return 0 ;; *) fw_argv=(); return 1 ;; esac
+      ;;
+  esac
+  local IFS=$' \t\n'
+  read -r -a pieces <<< "$cmd"
+  (( ${#pieces[@]} >= 2 )) || return 1
+  case "${pieces[0]}" in iptables|ip6tables|nft) ;; *) return 1 ;; esac
+  for token in "${pieces[@]}"; do
+    [[ "$token" =~ ^[a-zA-Z0-9_.:/=,+%!\-]+$ ]] || return 1
+  done
+  fw_argv=("${pieces[@]}")
+  return 0
+}
+_one_click_fw_manager_plan() {
+  _one_click_fw_manager_decode "$1" || return 1
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$oc_mgr_backend" "$oc_mgr_zone" "$oc_mgr_action" "$oc_mgr_proto" \
+    "$oc_mgr_port" "$oc_mgr_src" "$oc_mgr_kind" "$oc_mgr_family"
+}
+_one_click_fw_manager_from_plan() {
+  local backend zone action proto port src kind family extra reconstructed
+  IFS='|' read -r backend zone action proto port src kind family extra <<< "${1:-}"
+  [[ -z "$extra" ]] || return 1
+  case "$backend:$kind" in
+    ufw:port)
+      reconstructed="ufw $action proto $proto from $src to any port $port" ;;
+    firewalld:port)
+      reconstructed="firewall-cmd --zone=$zone --add-port=$port/$proto" ;;
+    firewalld:rich)
+      if [[ -n "$family" && -n "$src" ]]; then
+        reconstructed="firewall-cmd --zone=$zone --add-rich-rule='rule family=\"$family\" source address=\"$src\" port port=\"$port\" protocol=\"$proto\" $action'"
+      elif [[ -z "$family" && -z "$src" ]]; then
+        reconstructed="firewall-cmd --zone=$zone --add-rich-rule='rule port port=\"$port\" protocol=\"$proto\" $action'"
+      else
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  _one_click_fw_manager_decode "$reconstructed" || return 1
+  [[ "$backend|$zone|$action|$proto|$port|$src|$kind|$family" == \
+     "$oc_mgr_backend|$oc_mgr_zone|$oc_mgr_action|$oc_mgr_proto|$oc_mgr_port|$oc_mgr_src|$oc_mgr_kind|$oc_mgr_family" ]]
+}
+_one_click_fw_manager_argv() {
+  local mode="${1:-apply}" rich
+  fw_argv=()
+  case "$oc_mgr_backend" in
+    ufw)
+      case "$mode" in
+        apply) fw_argv=(ufw "$oc_mgr_action" proto "$oc_mgr_proto" from "$oc_mgr_src" to any port "$oc_mgr_port") ;;
+        undo) fw_argv=(ufw --force delete "$oc_mgr_action" proto "$oc_mgr_proto" from "$oc_mgr_src" to any port "$oc_mgr_port") ;;
+        *) return 1 ;;
+      esac ;;
+    firewalld)
+      if [[ "$oc_mgr_kind" == port ]]; then
+        case "$mode" in
+          apply) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--add-port=$oc_mgr_port/$oc_mgr_proto") ;;
+          undo) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--remove-port=$oc_mgr_port/$oc_mgr_proto") ;;
+          query) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--query-port=$oc_mgr_port/$oc_mgr_proto") ;;
+          *) return 1 ;;
+        esac
+      elif [[ "$oc_mgr_kind" == rich ]]; then
+        rich='rule'
+        if [[ -n "$oc_mgr_family" && -n "$oc_mgr_src" ]]; then
+          rich+=" family=\"$oc_mgr_family\" source address=\"$oc_mgr_src\""
+        elif [[ -n "$oc_mgr_family" || -n "$oc_mgr_src" ]]; then
+          return 1
+        fi
+        rich+=" port port=\"$oc_mgr_port\" protocol=\"$oc_mgr_proto\" $oc_mgr_action"
+        case "$mode" in
+          apply) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--add-rich-rule=$rich") ;;
+          undo) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--remove-rich-rule=$rich") ;;
+          query) fw_argv=(firewall-cmd "--zone=$oc_mgr_zone" "--query-rich-rule=$rich") ;;
+          *) return 1 ;;
+        esac
+      else
+        return 1
+      fi ;;
+    *) return 1 ;;
+  esac
+}
+_one_click_fw_manager_exists() {
+  local report token port_query
+  case "$oc_mgr_backend" in
+    firewalld)
+      _one_click_fw_manager_argv query || return 2
+      local status
+      "${fw_argv[@]}" >/dev/null 2>&1 && status=0 || status=$?
+      case "$status" in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+      ;;
+    ufw)
+      report=$(LC_ALL=C ufw show added 2>/dev/null) || return 2
+      port_query="${oc_mgr_port%%[:\-]*}"
+      [[ "$port_query" =~ ^[0-9]+$ ]] || return 2
+      if grep -E -q "(^|[^0-9])${port_query}([^0-9]|$)" <<< "$report"; then return 0; fi
+      return 1
+      ;;
+    *) return 2 ;;
+  esac
+}
+_one_click_fw_manager_restore() {
+  local tx_dir="$1" line result=0 i attempted status
+  local -a plans=() attempts=()
+  [[ -f "$tx_dir/manager.plans" ]] || return 1
+  mapfile -t plans < "$tx_dir/manager.plans"
+  [[ -f "$tx_dir/manager.attempts" ]] || return 1
+  mapfile -t attempts < "$tx_dir/manager.attempts"
+  for (( i=${#attempts[@]}-1; i>=0; i-- )); do
+    attempted="${attempts[$i]}"
+    [[ "$attempted" =~ ^[0-9]+$ && "$attempted" -lt "${#plans[@]}" ]] || {
+      result=1; continue;
+    }
+    line="${plans[$attempted]}"
+    _one_click_fw_manager_from_plan "$line" || { result=1; continue; }
+    if [[ "$oc_mgr_backend" == ufw ]]; then
+      if _one_click_fw_manager_exists; then status=0; else status=$?; fi
+      if (( status == 1 )); then continue; fi
+      if (( status != 0 )); then result=1; continue; fi
+      _one_click_fw_manager_argv undo || { result=1; continue; }
+      timeout --signal=TERM --kill-after=2s 15s "${fw_argv[@]}" || result=1
+    else
+      local status
+      if _one_click_fw_manager_exists; then status=0; else status=$?; fi
+      if (( status == 1 )); then continue; fi
+      if (( status != 0 )); then result=1; continue; fi
+      _one_click_fw_manager_argv undo || { result=1; continue; }
+      timeout --signal=TERM --kill-after=2s 15s "${fw_argv[@]}" || result=1
+    fi
+  done
+  return "$result"
+}
+_one_click_fw_require_prerequisites() {
+  local backend="${1:-none}" prog
+  case "$backend" in
+    iptables|nft|ufw|firewalld) ;;
+    *) error "No supported transactional firewall backend detected: $backend"; return 1 ;;
+  esac
+  check_firewall_available || return 1
+  for prog in systemd-run flock timeout; do
+    command -v "$prog" >/dev/null 2>&1 || {
+      error "Required firewall transaction dependency unavailable: $prog"
+      return 1
+    }
+  done
+}
 fleet_rule_engine_init() {
   local_host=$(hostname -s)
   local now=$(date +%F)
@@ -15289,10 +15939,7 @@ EOF
 sync_custom_ssh_keys() {
   local target_ip="$1"
   local private_key="${2:-}"
-
   info "Preserving user-added SSH authorized keys across transition."
-
-  # Dynamically resolve working private key if none provided or provided key is missing/unusable
   if [[ -z "$private_key" || ! -f "$private_key" ]] || ! ssh -i "$private_key" -o ConnectTimeout=3 -o BatchMode=yes -o StrictHostKeyChecking=no "oneclick@${target_ip}" "true" &>/dev/null; then
     local candidate_keys=(
       "/etc/one-click/fleet/keys/id_ed25519"
@@ -15300,7 +15947,6 @@ sync_custom_ssh_keys() {
       "/etc/one-click/fleet/keys/id_rsa"
       "/home/oneclick/.ssh/id_rsa"
     )
-
     private_key=""
     for key in "${candidate_keys[@]}"; do
       if [[ -f "$key" ]]; then
@@ -15311,19 +15957,15 @@ sync_custom_ssh_keys() {
         fi
       fi
     done
-
     if [[ -z "$private_key" ]]; then
       error "Could not establish SSH connection to [$target_ip] using any key in fleet or home directories."
       return 1
     fi
   fi
-
   local tmp_user_auth="/tmp/user_auth_keys.tmp"
   local tmp_root_auth="/tmp/root_auth_keys.tmp"
-
   [[ -f /home/oneclick/.ssh/authorized_keys ]] && cp /home/oneclick/.ssh/authorized_keys "$tmp_user_auth"
   [[ -f /root/.ssh/authorized_keys ]] && sudo cp /root/.ssh/authorized_keys "$tmp_root_auth"
-
   if [[ -f "$tmp_user_auth" ]]; then
     scp -i "$private_key" -o StrictHostKeyChecking=no "$tmp_user_auth" "oneclick@${target_ip}:/tmp/incoming_user_keys"
     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << 'EOF'
@@ -15336,7 +15978,6 @@ sync_custom_ssh_keys() {
       rm -f /tmp/incoming_user_keys
 EOF
   fi
-
   if [[ -f "$tmp_root_auth" ]]; then
     scp -i "$private_key" -o StrictHostKeyChecking=no "$tmp_root_auth" "oneclick@${target_ip}:/tmp/incoming_root_keys"
     ssh -i "$private_key" -o StrictHostKeyChecking=no "oneclick@${target_ip}" "sudo bash -s" << 'EOF'
@@ -15348,7 +15989,6 @@ EOF
       rm -f /tmp/incoming_root_keys
 EOF
   fi
-
   rm -f "$tmp_user_auth" "$tmp_root_auth"
 }
 apply_node_firewall_transition() {
@@ -15404,25 +16044,93 @@ apply_node_firewall_transition() {
     fi
   fi
 }
-dry_run() {
-  local cmds ns critical_ports broken check_list ssh_port target_ports used_ports=()
+dry_run() (
+  local cmds ns critical_ports broken check_list ssh_port used_ports=()
+  local cmd port_num proto_type action key
+  local -A expected_ports=()
   cmds=("$@")
   ns="one-click_dry-run_namespace"
   broken=0
-  target_ports=$(grep -oE '[0-9]{1,5}' <<< "${cmds[*]}")
+  for cmd in "${cmds[@]}"; do
+    if ! _one_click_fw_manager_decode "$cmd"; then
+      if ! _one_click_fw_command_argv "$cmd"; then
+        printf '%s\n' "[DRY-RUN][FAIL] Cannot validate native command: $cmd"
+        return 1
+      fi
+      local -a argv=("${fw_argv[@]}")
+      local i
+      oc_mgr_src="" oc_mgr_port="" oc_mgr_proto="" oc_mgr_action=""
+      case "${argv[0]}" in
+        iptables|ip6tables)
+          if [[ "${argv[0]}" == ip6tables ]]; then
+            printf '%s\n' '[DRY-RUN][FAIL] IPv6 requires an IPv6 probe fixture.'
+            return 1
+          fi
+          for ((i=0; i<${#argv[@]}; i++)); do
+            case "${argv[i]}" in
+              --dport) oc_mgr_port="${argv[i+1]:-}" ;;
+              -p) oc_mgr_proto="${argv[i+1]:-}" ;;
+              -j) oc_mgr_action="${argv[i+1]:-}" ;;
+              -s|-d) oc_mgr_src="${argv[i+1]:-}" ;;
+            esac
+          done
+          ;;
+        nft)
+          [[ "${argv[1]:-}" == add && "${argv[2]:-}" == rule &&
+             "${argv[3]:-}" == inet && "${argv[4]:-}" == filter ]] || return 1
+          for ((i=5; i<${#argv[@]}; i++)); do
+            [[ "${argv[i]}" == dport ]] && oc_mgr_port="${argv[i+1]:-}"
+            [[ "${argv[i]}" == tcp || "${argv[i]}" == udp ]] && oc_mgr_proto="${argv[i]}"
+            case "${argv[i]}" in accept|drop|reject) oc_mgr_action="${argv[i]}" ;; esac
+            case "${argv[i]}" in saddr) oc_mgr_src="${argv[i+1]:-}" ;; esac
+          done
+          ;;
+        *) return 1 ;;
+      esac
+      [[ "$oc_mgr_port" =~ ^[0-9]+$ ]] || return 1
+    fi
+    if [[ "$oc_mgr_src" != any && -n "$oc_mgr_src" ]]; then
+      printf '%s\n' '[DRY-RUN][FAIL] Source-scoped rules need a source-aware sandbox fixture.'
+      return 1
+    fi
+    if [[ "$oc_mgr_port" == *-* || "$oc_mgr_port" == *:* ]]; then
+      printf '%s\n' '[DRY-RUN][FAIL] Port ranges need a range-aware sandbox fixture.'
+      return 1
+    fi
+    if [[ "$oc_mgr_proto" != tcp ]]; then
+      printf '%s\n' '[DRY-RUN][FAIL] UDP requires a UDP-specific reachability probe.'
+      return 1
+    fi
+    case "$oc_mgr_action" in
+      allow|accept) action=ALLOW ;;
+      drop|deny|reject) action=DROP ;;
+      *) printf '%s\n' '[DRY-RUN][FAIL] Unsupported action'; return 1 ;;
+    esac
+    key="$oc_mgr_port"
+    if [[ -n "${expected_ports[$key]:-}" && "${expected_ports[$key]}" != "$action" ]]; then
+      printf '%s\n' "[DRY-RUN][FAIL] Conflicting rule intentions on TCP/$key"
+      return 1
+    fi
+    expected_ports[$key]="$action"
+  done
   ssh_port=$(awk '/\./{split($5,a,":");print a[2]}' <(ss -taulpn | grep -i ssh))
   check_list=("${ssh_port}:SSH" "53:DNS" "80:HTTP" "443:HTTPS")
   printf '%s\n' "${magenta}[DRY-RUN]${reset} Preparing dry run isolated environment for safe testing."
   # ==== Setup Isolated Namespace ====
-  ip netns add "$ns" 2>/dev/null || true
-  ip -n "$ns" link set lo up
-  ip link add oneclick_vetdry type veth peer name oneclick_vethst 2>/dev/null || true
-  ip link set oneclick_vetdry netns "$ns"
+  if ip netns list 2>/dev/null | grep -q "^${ns}\([[:space:]]\|$\)"; then
+    printf '%s\n' '[DRY-RUN][FAIL] Namespace name is already in use; refusing to destroy it.'
+    return 1
+  fi
+  ip netns add "$ns" || return 1
+  trap 'ip link delete oneclick_vethst 2>/dev/null || true; ip netns delete "$ns" 2>/dev/null || true' EXIT
+  ip -n "$ns" link set lo up || return 1
+  ip link add oneclick_vetdry type veth peer name oneclick_vethst || return 1
+  ip link set oneclick_vetdry netns "$ns" || return 1
   ip addr add 10.200.200.1/24 dev oneclick_vethst 2>/dev/null || true
-  ip link set oneclick_vethst up
-  ip -n "$ns" addr add 10.200.200.2/24 dev oneclick_vetdry
-  ip -n "$ns" link set oneclick_vetdry up
-  ip -n "$ns" route add default via 10.200.200.1
+  ip link set oneclick_vethst up || return 1
+  ip -n "$ns" addr add 10.200.200.2/24 dev oneclick_vetdry || return 1
+  ip -n "$ns" link set oneclick_vetdry up || return 1
+  ip -n "$ns" route add default via 10.200.200.1 || return 1
   # ==== Initialize Backend Ruleset inside Namespace ====
   case "${firewall_backend:-iptables}" in
     nft)
@@ -15444,13 +16152,13 @@ dry_run() {
           printf '%s\n' "${red}[DRY-RUN]${reset} Invalid UFW rule syntax: $cmd"
           broken=1
         fi
-        local port_num proto_type
-        port_num=$(grep -oE '[0-9]{1,5}' <<< "$cmd" | head -n1)
-        proto_type=$(grep -oE 'tcp|udp' <<< "$cmd" || echo "tcp")
-        if [[ "$cmd" =~ deny|reject|block ]]; then
-          ip netns exec "$ns" iptables -A INPUT -p "$proto_type" --dport "$port_num" -j DROP &>/dev/null || true
-        elif [[ "$cmd" =~ allow|permit ]]; then
-          ip netns exec "$ns" iptables -I INPUT -p "$proto_type" --dport "$port_num" -j ACCEPT &>/dev/null || true
+        _one_click_fw_manager_decode "$cmd" || { broken=1; continue; }
+        port_num="$oc_mgr_port"
+        proto_type="$oc_mgr_proto"
+        if [[ "$oc_mgr_action" == deny || "$oc_mgr_action" == reject ]]; then
+          ip netns exec "$ns" iptables -A INPUT -p "$proto_type" --dport "$port_num" -j DROP &>/dev/null || { broken=1; }
+        elif [[ "$oc_mgr_action" == allow ]]; then
+          ip netns exec "$ns" iptables -I INPUT -p "$proto_type" --dport "$port_num" -j ACCEPT &>/dev/null || { broken=1; }
         fi
         ;;
       firewalld)
@@ -15458,13 +16166,13 @@ dry_run() {
           printf '%s\n' "${red}[DRY-RUN]${reset} Firewalld configuration error detected."
           broken=1
         fi
-        local port_num proto_type
-        port_num=$(grep -oE '[0-9]{1,5}' <<< "$cmd" | head -n1)
-        proto_type=$(grep -oE 'tcp|udp' <<< "$cmd" || echo "tcp")
-        if [[ "$cmd" =~ drop|reject ]]; then
-          ip netns exec "$ns" iptables -A INPUT -p "$proto_type" --dport "$port_num" -j DROP &>/dev/null || true
+        _one_click_fw_manager_decode "$cmd" || { broken=1; continue; }
+        port_num="$oc_mgr_port"
+        proto_type="$oc_mgr_proto"
+        if [[ "$oc_mgr_action" == drop || "$oc_mgr_action" == reject ]]; then
+          ip netns exec "$ns" iptables -A INPUT -p "$proto_type" --dport "$port_num" -j DROP &>/dev/null || { broken=1; }
         else
-          ip netns exec "$ns" iptables -I INPUT -p "$proto_type" --dport "$port_num" -j ACCEPT &>/dev/null || true
+          ip netns exec "$ns" iptables -I INPUT -p "$proto_type" --dport "$port_num" -j ACCEPT &>/dev/null || { broken=1; }
         fi
         ;;
       nft)
@@ -15489,6 +16197,12 @@ dry_run() {
         awk -v service="$line" '/\./{split($5,a,":"); print a[2]":"service}' <(ss -taulpn | grep -i "$line")
     done | sort -u
   )
+  for port_num in "${!expected_ports[@]}"; do
+    if ! printf '%s\n' "${check_list[@]}" | grep -q "^${port_num}:"; then
+      check_list+=("${port_num}:rule-target")
+    fi
+  done
+  printf '%s\n' "${magenta}[DRY-RUN]${reset} Isolated simulation uses IPv4/TCP; IPv6 and real firewalld zone precedence are not proven by this test."
   printf '%s\n' "${magenta}[DRY-RUN]${reset} Verifying system accessibility."
   if ! ip netns exec "$ns" ping -c 1 -W 1 127.0.0.1 &>/dev/null; then
     printf "${magenta}[DRY-RUN]${reset} %s\n" "${red}Loopback (lo) is BLOCKED!${reset}"
@@ -15497,33 +16211,35 @@ dry_run() {
   for entry in "${check_list[@]}"; do
     local c_port="${entry%%:*}"
     local c_name="${entry##*:}"
-    local is_user_targeted=0
-    [[ -z "$c_port" ]] && continue
-    if grep -qw "$c_port" <<< "$target_ports"; then
-      is_user_targeted=1
-    fi
+    local expected_action="${expected_ports[$c_port]:-}"
+    [[ -z "$c_port" || ! "$c_port" =~ ^[0-9]+$ ]] && continue
     ip netns exec "$ns" timeout 2 nc -l -p "$c_port" &
     local nc_pid=$!
     sleep 0.2
     if ! nc -zv -w 1 10.200.200.2 "$c_port" &>/dev/null; then
-      if [[ "$c_port" == "22" || "$c_name" == "sshd" ]]; then
-        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "FATAL: $c_name (Port $c_port) will be BLOCKED! This will cause a lockout if applied."
+      if [[ "$expected_action" == DROP ]]; then
+        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "TCP/$c_port ($c_name) is blocked as requested in the sandbox."
+      elif [[ "$expected_action" == ALLOW ]]; then
+        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "TCP/$c_port ($c_name) is blocked despite ALLOW."
         broken=1
-      elif [[ "$is_user_targeted" -eq 0 ]]; then
-        if [[ "$c_name" =~ (mariadb|mysql|redis|nginx|httpd) ]]; then
-          printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "Critical service $c_name (Port $c_port) will be accidentally blocked!"
-          broken=1
-        else
-          printf "${magenta}[DRY-RUN]${yellow}[WARN] %s${reset}\n" "Service $c_name (Port $c_port) will become unreachable."
-        fi
+      elif [[ "$c_port" == "${ssh_port:-22}" || "$c_name" == sshd ]]; then
+        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "SSH unexpectedly unreachable in sandbox."
+        broken=1
+      elif [[ "$c_name" =~ (mariadb|mysql|redis|nginx|httpd) ]]; then
+        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "Critical service TCP/$c_port unexpectedly unreachable."
+        broken=1
       else
-        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "Port $c_port ($c_name) will successfully remain filtered/blocked."
+        printf "${magenta}[DRY-RUN]${yellow}[WARN] %s${reset}\n" "TCP/$c_port ($c_name) is unreachable in sandbox."
+        broken=1 
       fi
     else
-      if [[ "$is_user_targeted" -eq 1 ]]; then
-        printf "${magenta}[DRY-RUN]${yellow}[WARN] %s${reset}\n" "Logic Error: You tried to block $c_port, but it will remain OPEN."
+      if [[ "$expected_action" == DROP ]]; then
+        printf "${magenta}[DRY-RUN]${red}[FAIL] %s${reset}\n" "TCP/$c_port ($c_name) remains reachable despite DROP."
+        broken=1
+      elif [[ "$expected_action" == ALLOW ]]; then
+        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "TCP/$c_port ($c_name) is reachable as requested."
       else
-        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "Service $c_name (Port $c_port) remains accessible."
+        printf "${magenta}[DRY-RUN]${green}[SUCCESS] %s${reset}\n" "Service $c_name (TCP/$c_port) remains accessible."
       fi
     fi
     kill "$nc_pid" 2>/dev/null || true
@@ -15547,7 +16263,7 @@ dry_run() {
       return 1
     fi
   fi
-}
+)
 match_rule_handles() {
   local backend="$1" chain="${2:-INPUT}" action="$3" proto="$4" port="$5" src_ip="$6"
   local matches=()
@@ -15616,138 +16332,475 @@ match_rule_handles() {
 detect_firewall_backend() {
   if systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall_backend="firewalld"
-  elif systemctl is-active --quiet ufw 2>/dev/null || ufw status 2>/dev/null | grep -q "active"; then
+  elif command -v ufw &>/dev/null && {
+       LC_ALL=C ufw status 2>/dev/null | grep -Eq '^[[:space:]]*Status:[[:space:]]*active([[:space:]]|$)';
+     }; then
     firewall_backend="ufw"
-  elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null; then
+  elif command -v nft &>/dev/null && systemctl is-active --quiet nftables 2>/dev/null; then
     firewall_backend="nft"
-  elif command -v iptables >/dev/null 2>&1; then
+  elif command -v iptables &>/dev/null; then
     firewall_backend="iptables"
   else
     firewall_backend="none"
   fi
-  if command -v ip6tables >/dev/null 2>&1; then
+  if command -v ip6tables &>/dev/null; then
     ipv6_available=1
   else
     ipv6_available=0
   fi
 }
-valid_ipv6() {
-  [[ $1 =~ ^([0-9a-fA-F:]+:+)+[0-9a-fA-F]+(/[0-9]{1,3})?$ ]]
-}
 valid_ip() {
-  [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]
+  local address="${1:-}" mask octet
+  [[ -n "$address" ]] || return 1
+  if [[ "$address" == */* ]]; then
+    mask="${address##*/}"
+    address="${address%/*}"
+    [[ "$mask" =~ ^[0-9]{1,2}$ ]] || return 1
+    (( 10#$mask <= 32 )) || return 1
+  fi
+  [[ "$address" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  local -a groups
+  IFS=. read -r -a groups <<< "$address"
+  (( ${#groups[@]} == 4 )) || return 1
+  for octet in "${groups[@]}"; do
+    (( ${#octet} <= 3 )) || return 1
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+valid_ipv6() {
+  local address="${1:-}" mask part left right token
+  local -a groups
+  local count=0 compressed=0
+  [[ -n "$address" ]] || return 1
+  if [[ "$address" == */* ]]; then
+    mask="${address##*/}"
+    address="${address%/*}"
+    [[ "$mask" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$mask <= 128 )) || return 1
+  fi
+  [[ "$address" == *:* && "$address" != *.* ]] || return 1
+  [[ "$address" =~ ^[0-9a-fA-F:]+$ && "$address" != *:::* ]] || return 1
+  if [[ "$address" == *::* ]]; then
+    compressed=1
+    left="${address%%::*}"
+    right="${address#*::}"
+    [[ "$right" != *::* ]] || return 1
+    for part in "$left" "$right"; do
+      [[ -z "$part" ]] && continue
+      [[ "$part" != :* && "$part" != *: ]] || return 1
+      IFS=: read -r -a groups <<< "$part"
+      for token in "${groups[@]}"; do
+        [[ "$token" =~ ^[a-fA-F0-9]{1,4}$ ]] || return 1
+        (( count += 1 ))
+      done
+    done
+    (( count < 8 ))
+  else
+    [[ "$address" != :* && "$address" != *: ]] || return 1
+    IFS=: read -r -a groups <<< "$address"
+    (( ${#groups[@]} == 8 )) || return 1
+    for token in "${groups[@]}"; do
+      [[ "$token" =~ ^[a-fA-F0-9]{1,4}$ ]] || return 1
+    done
+  fi
 }
 valid_port() {
-  [[ $1 =~ ^[0-9]{1,5}(-[0-9]{1,5})?$ ]] && return 0
-  return 1
+  local value="${1:-}" first last
+  [[ "$value" =~ ^([0-9]+)([-:]([0-9]+))?$ ]] || return 1
+  first="${BASH_REMATCH[1]}"
+  last="${BASH_REMATCH[3]:-${first}}"
+  (( ${#first} <= 5 && ${#last} <= 5 )) || return 1
+  (( 10#$first >= 1 && 10#$first <= 65535 &&
+     10#$last  >= 1 && 10#$last  <= 65535 &&
+     10#$first <= 10#$last ))
 }
 valid_range() {
-  local start end
-  if [[ $1 =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]]; then
-    start="${BASH_REMATCH[1]}"
-    end="${BASH_REMATCH[2]}"
-    valid_port "$start" || return 1
-    valid_port "$end"   || return 1
-    (( start <= end )) || return 1
-    return 0
-  fi
-  return 1
+  [[ "${1:-}" == *:* || "${1:-}" == *-* ]] || return 1
+  valid_port "$1"
 }
 check_firewall_available() {
-  if [[ -z "${pkg_mgr:-}" ]]; then
-    if command -v apt-get >/dev/null 2>&1; then
-      pkg_mgr="apt"
-    elif command -v dnf >/dev/null 2>&1; then
-      pkg_mgr="dnf"
-    elif command -v yum >/dev/null 2>&1; then
-      pkg_mgr="yum"
-    elif command -v pacman >/dev/null 2>&1; then
-      pkg_mgr="pacman"
-    elif command -v zypper >/dev/null 2>&1; then
-      pkg_mgr="zypper"
+  case "${firewall_backend:-none}" in
+    iptables)
+      local exe
+      for exe in iptables iptables-save iptables-restore; do
+        command -v "$exe" &>/dev/null || {
+          error "iptables backend requires $exe; refusing rule changes."
+          return 1
+        }
+      done
+      ;;
+    nft)
+      command -v nft &>/dev/null || { error "Native nft backend unavailable."; return 1; }
+      nft list ruleset &>/dev/null || { error "Cannot inspect native nft ruleset."; return 1; }
+      ;;
+    ufw)
+      command -v ufw >/dev/null || return 1
+      LC_ALL=C ufw status | grep -Eq "^[[:space:]]*Status:[[:space:]]*active([[:space:]]|$)" || return 1
+      ;;
+    firewalld)
+      command -v firewall-cmd >/dev/null || return 1
+      firewall-cmd --state >/dev/null 2>&1 || return 1
+      ;;
+    none|"")
+      error "No managed firewall backend detected. Configure iptables or nftables explicitly."
+      return 1
+      ;;
+    *) error "Unrecognised firewall backend: $firewall_backend"; return 1 ;;
+  esac
+}
+_one_click_fw_direct_dispatch() {
+  local kind="$1" original="$2"
+  case "$kind" in
+    parser)
+      ( parse_firewall_command "$original" "" )
+      ;;
+    backup)
+      detect_firewall_backend
+      backup_firewall
+      ;;
+    restore)
+      detect_firewall_backend
+      restore_firewall
+      ;;
+    delete_backups)
+      delete_firewall_backups
+      ;;
+    reject)
+      error "Ambiguous firewall maintenance request. Use 'delete firewall backup' or specify a live rule with its number."
+      return 1
+      ;;
+    *)
+      error "Unknown Rule Engine management operation."
+      return 1
+      ;;
+  esac
+}
+_one_click_fw_backend_preflight() {
+  local backend="${1:-}" cmd chain idx found
+  local -a argv=()
+  shift || return 1
+  (( $# > 0 )) || { error "No firewall commands to validate."; return 1; }
+  case "$backend" in
+    iptables|ip6tables|nft) ;;
+    ufw|firewalld)
+      ;;
+    *) error "Unsupported firewall backend: $backend"; return 1 ;;
+  esac
+  for cmd in "$@"; do
+    if ! _one_click_fw_command_argv "$cmd"; then
+      error "Unsafe or unsupported generated command: $cmd"
+      return 1
     fi
-  fi
-  if [[ -z "${firewall_backend:-}" ]]; then
-    if command -v nft >/dev/null 2>&1; then
-      firewall_backend="nft"
-    elif command -v iptables >/dev/null 2>&1; then
-      firewall_backend="iptables"
-    elif command -v firewalld >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1; then
-      firewall_backend="firewalld"
-    elif command -v ufw >/dev/null 2>&1; then
-      firewall_backend="ufw"
-    else
-      firewall_backend="none"
-    fi
-  fi
-  install_iptables_for_os() {
-    case "$pkg_mgr" in
-      apt)
-        install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
+    argv=("${fw_argv[@]}")
+    case "$backend" in
+      iptables|ip6tables)
+        case "${argv[0]}" in
+          iptables)
+            command -v iptables-save &>/dev/null && command -v iptables-restore &>/dev/null || {
+              error "IPv4 snapshot/restore tools missing."; return 1; }
+            ;;
+          ip6tables)
+            command -v ip6tables &>/dev/null && command -v ip6tables-save &>/dev/null && command -v ip6tables-restore &>/dev/null || {
+              error "IPv6 firewall or snapshot/restore tools missing."; return 1; }
+            ;;
+          *) error "Mixed firewall backends in iptables transaction: ${argv[0]}"; return 1 ;;
+        esac
         ;;
-      dnf|yum)
-        install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
-        install_dep "iptables-services" "type iptables-services" "iptables-services" "$pkg_mgr"
+      ufw|firewalld)
+        _one_click_fw_manager_decode "$cmd" || {
+          error "Unsupported $backend operation: $cmd"; return 1;
+        }
+        [[ "$oc_mgr_backend" == "$backend" ]] || {
+          error "Mixed firewall managers in transaction: $cmd"; return 1;
+        }
         ;;
-      pacman)
-        install_dep "iptables" "type iptables" "iptables" "$pkg_mgr"
-        ;;
-      zypper)
-        install_dep "iptables" "type iptables" "iptables-utils" "$pkg_mgr"
-        ;;
-      *)
-        die "Unsupported package manager." "Cannot install iptables automatically."
+      nft)
+        [[ "${argv[0]}" == nft ]] || {
+          error "Mixed firewall backends in nft transaction: ${argv[0]}"; return 1; }
+        [[ ${#argv[@]} -ge 7 && "${argv[2]}" == rule &&
+           "${argv[3]}" == inet && "${argv[4]}" == filter &&
+           "${argv[1]}" =~ ^(add|delete)$ ]] || {
+          error "Unsupported native nft operation: $cmd"; return 1; }
+        chain="${argv[5]}"
+        [[ "$chain" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$ ]] || {
+          error "Invalid native nft chain: $chain"; return 1; }
+        if [[ "${argv[1]}" == delete ]]; then
+          [[ ${#argv[@]} -eq 8 && "${argv[6]}" == handle &&
+             "${argv[7]}" =~ ^[0-9]+$ ]] || {
+            error "Native nft delete requires an exact rule handle."; return 1; }
+        fi
+        nft list chain inet filter "$chain" &>/dev/null || {
+          error "Native nft chain inet filter/$chain does not exist or is inaccessible."
+          return 1
+        }
         ;;
     esac
-  }
-  if [[ "$firewall_backend" == "iptables" ]]; then
-    if ! command -v iptables >/dev/null 2>&1; then
-      install_iptables_for_os
-    fi
-    return 0
-  elif [[ "$firewall_backend" == "nft" || "$firewall_backend" == "firewalld" || "$firewall_backend" == "ufw" ]]; then
-    if ! command -v iptables >/dev/null 2>&1; then
-      warn "$firewall_backend detected. Installing iptables compatibility layer."
-      install_iptables_for_os
-      firewall_backend="iptables"
-    fi
-    return 0
-  else
-    read -rp "${cyan}[USER]:${reset} No firewall installed. Install iptables? (y|n): " confirm
-    confirm="${confirm,,}"
-    if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
-      install_iptables_for_os
-      firewall_backend="iptables"
-    else
-      die "Firewall required." "No firewall installed."
-    fi
+  done
+}
+_one_click_fw_tx_restore() {
+  local tx_dir="$1" backend
+  backend=$(<"$tx_dir/backend") || return 1
+  case "$backend" in
+    iptables|ip6tables)
+      if [[ -f "$tx_dir/ipv6.rules" ]]; then
+        timeout --kill-after=2s 30s ip6tables-restore -w 5 < "$tx_dir/ipv6.rules" || return 1
+      fi
+      if [[ -f "$tx_dir/ipv4.rules" ]]; then
+        timeout --kill-after=2s 30s iptables-restore -w 5 < "$tx_dir/ipv4.rules" || return 1
+      fi
+      ;;
+    ufw|firewalld)
+      _one_click_fw_manager_restore "$tx_dir" || return 1
+      ;;
+    nft)
+      timeout --kill-after=2s 30s nft -f "$tx_dir/restore.nft" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+_one_click_fw_tx_worker() {
+  local tx_dir="$1" mode="${2:-watch}" fd current now started pending_at actual_start proc_pid
+  umask 077
+  [[ -d "$tx_dir" && -f "$tx_dir/backend" && -f "$tx_dir/state" && -f "$tx_dir/lock" ]] || return 1
+  exec {fd}> "$tx_dir/lock" || return 1
+  case "$mode" in
+    rollback)
+      flock -x "$fd" || return 1
+      current=$(<"$tx_dir/state")
+      case "$current" in
+        COMMITTED|ROLLED_BACK) flock -u "$fd"; return 0 ;;
+        ROLLING_BACK) flock -u "$fd"; return 1 ;;
+      esac
+      printf 'ROLLING_BACK\n' > "$tx_dir/state"
+      if _one_click_fw_tx_restore "$tx_dir" >> "$tx_dir/restore.log" 2>&1; then
+        printf 'ROLLED_BACK\n' > "$tx_dir/state"
+        flock -u "$fd"
+        return 0
+      fi
+      printf 'ROLLBACK_FAILED\n' > "$tx_dir/state"
+      printf 'Firewall rollback FAILED for transaction %s\n' "$tx_dir" >&2
+      flock -u "$fd"
+      return 1
+      ;;
+    commit|pending|applying)
+      flock -x "$fd" || return 1
+      current=$(<"$tx_dir/state")
+      case "$mode:$current" in
+        applying:PREPARED) printf 'APPLYING\n' > "$tx_dir/state" ;;
+        pending:APPLYING)
+          date +%s > "$tx_dir/pending_at"
+          printf 'PENDING_CONFIRM\n' > "$tx_dir/state" ;;
+        commit:PENDING_CONFIRM)
+          now=$(date +%s)
+          pending_at=$(<"$tx_dir/pending_at")
+          if (( now - pending_at >= 10 )); then
+            flock -u "$fd"
+            return 1
+          fi
+          printf 'COMMITTED\n' > "$tx_dir/state" ;;
+        *) flock -u "$fd"; return 1 ;;
+      esac
+      flock -u "$fd"
+      ;;
+    watch)
+      touch "$tx_dir/ready" || return 1
+      started=$(date +%s)
+      while :; do
+        flock -s "$fd" || return 1
+        current=$(<"$tx_dir/state")
+        if [[ "$current" == PENDING_CONFIRM ]]; then
+          pending_at=$(<"$tx_dir/pending_at")
+        fi
+        flock -u "$fd" || return 1
+        case "$current" in
+          COMMITTED|ROLLED_BACK|ROLLBACK_FAILED) return 0 ;;
+          PREPARED|APPLYING)
+            now=$(date +%s)
+            if [[ "$current" == APPLYING && -f "$tx_dir/caller.pid" ]]; then
+              proc_pid=$(<"$tx_dir/caller.pid")
+              actual_start=""
+              if [[ "$proc_pid" =~ ^[0-9]+$ && -r "/proc/$proc_pid/stat" ]]; then
+                actual_start=$(sed -E 's/^[0-9]+ \([^)]*\) //' "/proc/$proc_pid/stat" 2>/dev/null | awk '{print $20}')
+              fi
+              if [[ -z "$actual_start" || "$actual_start" != "$(<"$tx_dir/caller.start")" ]]; then
+                printf 'Watchdog: caller identity mismatch (PID %s, expected start %s, actual %s).\n' \
+                  "$proc_pid" "$(<"$tx_dir/caller.start")" "$actual_start" >> "$tx_dir/watchdog.log"
+                _one_click_fw_tx_worker "$tx_dir" rollback
+                return $?
+              fi
+            fi
+            if (( now - started >= 600 )); then
+              _one_click_fw_tx_worker "$tx_dir" rollback
+              return $?
+            fi
+            ;;
+          PENDING_CONFIRM)
+            now=$(date +%s)
+            [[ "$pending_at" =~ ^[0-9]+$ ]] || {
+              printf 'Watchdog: invalid pending timestamp; refusing to commit transaction.\n' >> "$tx_dir/watchdog.log"
+              _one_click_fw_tx_worker "$tx_dir" rollback; return 1
+            }
+            if (( now - pending_at >= 10 )); then
+              _one_click_fw_tx_worker "$tx_dir" rollback
+              return $?
+            fi
+            ;;
+          ROLLING_BACK) return 0 ;;
+          *) _one_click_fw_tx_worker "$tx_dir" rollback; return 1 ;;
+        esac
+        sleep 1
+      done
+      ;;
+    *) return 1 ;;
+  esac
+}
+_one_click_fw_tx_prepare() {
+  local tx_dir="$1" backend="$2" unit="$3" worker_script
+  umask 077
+  if [[ $EUID -ne 0 ]]; then
+    error 'Firewall transactions require root.'
+    return 1
   fi
+  for worker_script in flock timeout systemd-run; do
+    command -v "$worker_script" >/dev/null 2>&1 || {
+      error "Required firewall transaction tool unavailable: $worker_script"
+      return 1
+    }
+  done
+  case "$backend" in
+    iptables|ip6tables)
+      local family save restore
+      for family in ipv4 ipv6; do
+        if [[ "$family" == ipv4 ]]; then
+          save=iptables-save; restore=iptables-restore
+        else
+          save=ip6tables-save; restore=ip6tables-restore
+        fi
+        if command -v "$save" >/dev/null 2>&1; then
+          command -v "$restore" >/dev/null 2>&1 || { error "Missing $restore"; return 1; }
+          "$save" > "$tx_dir/$family.rules" || { error "Unable to snapshot $family"; return 1; }
+          [[ -s "$tx_dir/$family.rules" ]] || { error "Empty $family firewall snapshot"; return 1; }
+          grep -q '^COMMIT$' "$tx_dir/$family.rules" || { error "Incomplete $family firewall snapshot"; return 1; }
+          "$restore" --test < "$tx_dir/$family.rules" || { error "Invalid $family firewall snapshot"; return 1; }
+        elif [[ "$backend" == ip6tables && "$family" == ipv6 ]] || [[ "$backend" == iptables && "$family" == ipv4 ]]; then
+          error "Missing $save"
+          return 1
+        fi
+      done
+      [[ -s "$tx_dir/ipv4.rules" || -s "$tx_dir/ipv6.rules" ]] || return 1
+      ;;
+    nft)
+      command -v nft >/dev/null 2>&1 || { error 'nft not available'; return 1; }
+      nft list ruleset > "$tx_dir/ruleset.nft" || { error 'Could not snapshot nft ruleset'; return 1; }
+      { printf 'flush ruleset\n'; cat "$tx_dir/ruleset.nft"; } > "$tx_dir/restore.nft" || return 1
+      nft -c -f "$tx_dir/restore.nft" || { error 'Cannot validate nft rollback script'; return 1; }
+      ;;
+    ufw|firewalld)
+      [[ -s "$tx_dir/manager.plans" && -f "$tx_dir/manager.attempts" ]] || {
+        error "Missing $backend transaction plan."; return 1;
+      }
+      local line status
+      if [[ -n "$(LC_ALL=C sort "$tx_dir/manager.plans" | uniq -d)" ]]; then
+        error "Duplicate backend rule in manager transaction."
+        return 1
+      fi
+      if [[ "$backend" == ufw ]]; then
+        LC_ALL=C ufw status > "$tx_dir/manager.before" || return 1
+        LC_ALL=C ufw show added > "$tx_dir/manager.rules.before" || return 1
+        grep -Eq '^Status:[[:space:]]*active([[:space:]]|$)' "$tx_dir/manager.before" || return 1
+      else
+        firewall-cmd --state >/dev/null 2>&1 || return 1
+        firewall-cmd --zone=public --list-all > "$tx_dir/manager.before" || return 1
+      fi
+      while IFS= read -r line; do
+        _one_click_fw_manager_from_plan "$line" || {
+          error "Invalid manager transaction entry."; return 1;
+        }
+        [[ "$oc_mgr_backend" == "$backend" ]] || return 1
+        if _one_click_fw_manager_exists; then status=0; else status=$?; fi
+        if (( status != 1 )); then
+          error "Firewall rule already exists or its state is uncertain; refusing change."
+          return 1
+        fi
+      done < "$tx_dir/manager.plans"
+      ;;
+    *) error "Unsupported firewall transaction backend: $backend"; return 1 ;;
+  esac
+  printf '%s\n' "$backend" > "$tx_dir/backend"
+  printf 'PREPARED\n' > "$tx_dir/state"
+  local caller_pid="$BASHPID" caller_start
+  printf '%s\n' "$caller_pid" > "$tx_dir/caller.pid"
+  caller_start=$(sed -E 's/^[0-9]+ \([^)]*\) //' "/proc/$caller_pid/stat" 2>/dev/null | awk '{print $20}')
+  [[ "$caller_start" =~ ^[0-9]+$ ]] || { error 'Cannot verify firewall caller identity.'; return 1; }
+  printf '%s\n' "$caller_start" > "$tx_dir/caller.start"
+  : > "$tx_dir/lock"
+  worker_script="$tx_dir/worker.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    declare -f valid_port valid_ip valid_ipv6
+    declare -f _one_click_fw_manager_decode _one_click_fw_manager_plan \
+      _one_click_fw_manager_from_plan _one_click_fw_manager_argv \
+      _one_click_fw_manager_exists _one_click_fw_manager_restore
+    declare -f _one_click_fw_tx_restore
+    declare -f _one_click_fw_tx_worker
+    printf '_one_click_fw_tx_worker "$@"\n'
+  } > "$worker_script" || return 1
+  chmod 700 "$worker_script"
+  systemd-run --quiet --collect --unit="$unit" \
+    /usr/bin/bash "$worker_script" "$tx_dir" watch || {
+      error 'Unable to start independent firewall rollback watchdog.'
+      return 1
+    }
+  local attempt
+  for (( attempt=0; attempt<20; attempt++ )); do
+    [[ -f "$tx_dir/ready" ]] && return 0
+    sleep 0.1
+  done
+  error 'Firewall rollback watchdog did not become ready.'
+  return 1
 }
 build_native_cmd() {
   local backend="$1" action="$2" proto="$3" port="$4" src_ip="$5" chain="$6"
   case "$backend" in
     iptables)
-      echo "iptables -A ${chain:-INPUT} -p $proto --dport $port ${src_ip:+-s $src_ip} -j $action"
-      ;;
+      echo "iptables -A ${chain:-INPUT} -p $proto --dport $port ${src_ip:+-s $src_ip} -j $action" ;;
     nft)
-      local nft_action="drop"
-      [[ "$action" == "ACCEPT" ]] && nft_action="accept"
-      echo "nft add rule inet filter ${chain,,:-input} ${src_ip:+ip saddr $src_ip} $proto dport $port $nft_action"
-      ;;
+      local nft_action
+      case "$action" in
+        ACCEPT) nft_action=accept ;;
+        DROP) nft_action=drop ;;
+        *) return 1 ;;
+      esac
+      local nft_family=ip nft_chain="${chain:-INPUT}"
+      [[ "$src_ip" == *:* ]] && nft_family=ip6
+      case "$nft_chain" in INPUT|OUTPUT|FORWARD) nft_chain="${nft_chain,,}" ;; esac
+      echo "nft add rule inet filter $nft_chain ${src_ip:+$nft_family saddr $src_ip} $proto dport $port $nft_action" ;;
     ufw)
-      local ufw_action="deny"
-      [[ "$action" == "ACCEPT" ]] && ufw_action="allow"
-      echo "ufw $ufw_action proto $proto ${src_ip:+from $src_ip} to any port $port"
-      ;;
+      local ufw_action
+      case "$action" in
+        ACCEPT) ufw_action=allow ;;
+        DROP) ufw_action=deny ;;
+        REJECT) ufw_action=reject ;;
+        *) return 1 ;;
+      esac
+      echo "ufw $ufw_action proto $proto from ${src_ip:-any} to any port ${port//-/:}" ;;
     firewalld)
+      local rich_action nft_family=ipv4
+      [[ "$src_ip" == *:* ]] && nft_family=ipv6
+      case "$action" in
+        ACCEPT) rich_action=accept ;;
+        DROP) rich_action=drop ;;
+        REJECT) rich_action=reject ;;
+        *) return 1 ;;
+      esac
       if [[ -n "$src_ip" ]]; then
-        local rich_action="drop"
-        [[ "$action" == "ACCEPT" ]] && rich_action="accept"
-        echo "firewall-cmd --zone=public --add-rich-rule='rule family=\"ipv4\" source address=\"$src_ip\" port port=\"$port\" protocol=\"$proto\" $rich_action'"
+        echo "firewall-cmd --zone=public --add-rich-rule='rule family=\"$nft_family\" source address=\"$src_ip\" port port=\"${port//:/-}\" protocol=\"$proto\" $rich_action'"
+      elif [[ "$action" == ACCEPT ]]; then
+        echo "firewall-cmd --zone=public --add-port=${port//:/-}/$proto"
       else
-        echo "firewall-cmd --zone=public --add-port=$port/$proto"
-      fi
-      ;;
+        echo "firewall-cmd --zone=public --add-rich-rule='rule port port=\"${port//:/-}\" protocol=\"$proto\" $rich_action'"
+      fi ;;
+    *) return 1 ;;
   esac
 }
 backup_firewall() {
@@ -16552,41 +17605,45 @@ rule_exists_backend() {
       [[ -n "$src_ip" ]] && cmd+=("-s" "$src_ip")
       [[ -n "$action" ]] && cmd+=("-j" "$action")
       "${cmd[@]}" &>/dev/null
-      return $?
-      ;;
+      return $? ;;
     ufw)
       local ufw_act="ALLOW"
-      [[ "$action" == "DROP" || "$action" == "REJECT" || "$action" == "DENY" ]] && ufw_act="DENY"
+      [[ "$action" == DROP || "$action" == REJECT || "$action" == DENY ]] && ufw_act=DENY
       if [[ -n "$src_ip" ]]; then
         ufw status | grep -E -q "${port}/${proto}.*${ufw_act}.*${src_ip}"
       else
         ufw status | grep -E -q "${port}/${proto}.*${ufw_act}.*ANYWHERE"
       fi
-      return $?
-      ;;
+      return $? ;;
     nft)
-      local nft_act="accept"
-      [[ "$action" == "DROP" || "$action" == "REJECT" ]] && nft_act="drop"
+      local nft_act=accept
+      [[ "$action" == DROP || "$action" == REJECT ]] && nft_act=drop
       if [[ -n "$src_ip" ]]; then
         nft list ruleset 2>/dev/null | grep -E -q "ip saddr ${src_ip}.*${proto} dport ${port}.*${nft_act}"
       else
         nft list ruleset 2>/dev/null | grep -E -q "${proto} dport ${port}.*${nft_act}"
       fi
-      return $?
-      ;;
+      return $? ;;
     firewalld)
-      if [[ -n "$src_ip" ]]; then
-        local rich_act="accept"
-        [[ "$action" == "DROP" || "$action" == "REJECT" ]] && rich_act="drop"
-        firewall-cmd --zone=public --query-rich-rule="rule family=\"ipv4\" source address=\"$src_ip\" port port=\"$port\" protocol=\"$proto\" $rich_act" &>/dev/null
-      else
+      local rich_act family=ipv4
+      case "$action" in
+        ACCEPT) rich_act=accept ;;
+        DROP) rich_act=drop ;;
+        REJECT) rich_act=reject ;;
+        *) return 1 ;;
+      esac
+      if [[ -z "$src_ip" && "$action" == ACCEPT ]]; then
         firewall-cmd --zone=public --query-port="${port}/${proto}" &>/dev/null
+      else
+        if [[ -n "$src_ip" ]]; then
+          [[ "$src_ip" == *:* ]] && family=ipv6
+          firewall-cmd --zone=public --query-rich-rule="rule family=\"$family\" source address=\"$src_ip\" port port=\"$port\" protocol=\"$proto\" $rich_act" &>/dev/null
+        else
+          firewall-cmd --zone=public --query-rich-rule="rule port port=\"$port\" protocol=\"$proto\" $rich_act" &>/dev/null
+        fi
       fi
-      return $?
-      ;;
-    *)
-      return 1
-      ;;
+      return $? ;;
+    *) return 1 ;;
   esac
 }
 clean_duplicate_rules() {
@@ -16739,9 +17796,20 @@ check_sensitive_ports() {
     if [[ -n "${alerted_ports[$p]:-}" ]]; then
       continue
     fi
+    local sensitive_match=0 sensitive_entry
     if [[ -n "${default_sensitive_ports[$p]:-}" ]]; then
+      sensitive_match=1
+    else
+      for sensitive_entry in "${sensitive_ports[@]}"; do
+        if [[ "$sensitive_entry" == "$p" ]]; then
+          sensitive_match=1
+          break
+        fi
+      done
+    fi
+    if (( sensitive_match )); then
       local service_desc alert1 alert2 len1 len2 width border border2
-	  service_desc="${default_sensitive_ports[$p]}"
+      service_desc="${default_sensitive_ports[$p]:-Administrator-configured sensitive port}"
 	  if [[ "$dry_run" -eq 1 ]]; then
         alert1="${magenta}[DRY-RUN]${reset} Action: $current_action detected on Port $p ($service_desc)."
         alert2="${magenta}[DRY-RUN]${reset} This is a CORE SERVICE. Proceeding may cause connectivity issues! "
@@ -16881,7 +17949,51 @@ parse_firewall_command() {
   fi
   # ==== Detect System Scan ====
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?$ ]]; then
-    python3 /var/cache/one-click/scanner.py
+    python3 /var/cache/one-click/scanner.py --scan-only || python3 /var/cache/one-click/scanner.py
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--help$ ]]; then
+    python3 /var/cache/one-click/scanner.py --help
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--stats$ ]]; then
+    python3 /var/cache/one-click/scanner.py --stats
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--cron$ ]]; then
+    python3 /var/cache/one-click/scanner.py --schedule
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--disable-cron$ ]]; then
+    python3 /var/cache/one-click/scanner.py --disable-schedule
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--json$ ]]; then
+    python3 /var/cache/one-click/scanner.py --stats --json
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--status$ ]]; then
+    python3 /var/cache/one-click/scanner.py --status
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--cleanup$ ]]; then
+    python3 /var/cache/one-click/scanner.py --cleanup
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--disable$ ]]; then
+    python3 /var/cache/one-click/scanner.py --uninstall
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--events-limit[[:space:]]+([0-9]+)$ ]]; then
+    python3 /var/cache/one-click/scanner.py --events --limit "${BASH_REMATCH[2]}"
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--(rebase|rebaseline)$ ]]; then
+    python3 /var/cache/one-click/scanner.py --rebaseline
+	exit 0
+  fi
+  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--verify$ ]]; then
+    python3 /var/cache/one-click/scanner.py --verify-baseline
 	exit 0
   fi
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--init$ ]]; then
@@ -16889,11 +18001,7 @@ parse_firewall_command() {
 	exit 0
   fi
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--deep$ ]]; then
-    python3 /var/cache/one-click/scanner.py --deep
-	exit 0
-  fi
-  if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?[[:space:]]+--remediate$ ]]; then
-    python3 /var/cache/one-click/scanner.py --remediate
+    python3 /var/cache/one-click/scanner.py --deep --scan-only
 	exit 0
   fi
   if [[ "$rule_lower" =~ ^audit[[:space:]]+scan(ner)?([[:space:]]+(--deep))?[[:space:]]+-y$ ]]; then
@@ -16984,7 +18092,7 @@ parse_firewall_command() {
     exit 0
   fi
   # ==== Detect Guard History ====
-  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(guard[[:space:]]+)?history ]]; then
+  if [[ "$rule_lower" =~ ^(audit|ssh)[[:space:]]+(guard[[:space:]]+)?history$ ]]; then
     view_guard_history
     exit 0
   fi
@@ -18275,59 +19383,319 @@ EOF
     reload_webserver
   fi
 }
+_one_click_native_logs_cleanup() {
+  local session_token="${1:-}" web_port="${2:-}" logs_mount_dir="${3:-}"
+  local client_ip="${4:-}" pid args fw
+  shift 4 || return 1
+  [[ "$session_token" =~ ^[[:xdigit:]]{32}$ && "$web_port" =~ ^[0-9]+$ ]] || return 1
+  for pid in "$@"; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    args=$(ps -p "$pid" -o args= 2>/dev/null) || continue
+    [[ "$args" == *"oneclick-syslogs-${session_token}"* ]] && kill "$pid" 2>/dev/null || true
+  done
+  if [[ -n "$client_ip" ]]; then
+    if [[ "$client_ip" == *:* ]]; then fw=ip6tables; else fw=iptables; fi
+    if command -v "$fw" >/dev/null 2>&1; then
+      "$fw" -D INPUT -p tcp --dport "$web_port" -s "$client_ip" \
+        -m comment --comment "oneclick-syslogs:${session_token}" -j ACCEPT 2>/dev/null || true
+    fi
+  fi
+  rm -f "/etc/nginx/conf.d/sys_sess_${session_token}.conf"
+  if [[ -f "/etc/apache2/sites-available/sys_sess_${session_token}.conf" ]]; then
+    command -v a2dissite >/dev/null 2>&1 && a2dissite "sys_sess_${session_token}" >/dev/null 2>&1 || true
+    rm -f "/etc/apache2/sites-available/sys_sess_${session_token}.conf"
+  fi
+  rm -f "/etc/httpd/conf.d/sys_sess_${session_token}.conf"
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+  elif systemctl is-active --quiet apache2 2>/dev/null; then
+    apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 >/dev/null 2>&1 || true
+  elif systemctl is-active --quiet httpd 2>/dev/null; then
+    apachectl configtest >/dev/null 2>&1 && systemctl reload httpd >/dev/null 2>&1 || true
+  fi
+  if [[ "$logs_mount_dir" == "/var/www/one-click-native-logs/$session_token" && -d "$logs_mount_dir" ]]; then
+    rm -rf -- "$logs_mount_dir"
+  fi
+}
+setup_native_system_log_vhost() {
+  local session_token="${1:-}" web_port="${2:-}" logs_mount_dir="${3:-}" client_ip="${4:-}"
+  local conf_file service conf_base="sys_sess_${session_token}" listen_line
+  if [[ ! "$session_token" =~ ^[[:xdigit:]]{32}$ ||
+        ! "$web_port" =~ ^[0-9]+$ ||
+        "$web_port" -lt 1024 || "$web_port" -gt 65535 ||
+        "$logs_mount_dir" != "/var/www/one-click-native-logs/$session_token" ||
+        -z "$client_ip" ]]; then
+    error "Invalid Native System Log vhost arguments."
+    return 1
+  fi
+  if [[ "$client_ip" == *:* ]]; then
+    listen_line="listen [::]:${web_port} ipv6only=on;"
+  else
+    listen_line="listen 0.0.0.0:${web_port};"
+  fi
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    service=nginx
+    conf_file="/etc/nginx/conf.d/${conf_base}.conf"
+    cat > "$conf_file" <<EOF
+server {
+    ${listen_line}
+    server_name _;
+    autoindex off;
+    location / { return 403; }
+    location /${session_token}/ {
+        alias ${logs_mount_dir}/;
+        index index.html;
+        allow ${client_ip};
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+    }
+}
+EOF
+    if ! nginx -t >/dev/null 2>&1 || ! systemctl reload nginx >/dev/null 2>&1; then
+      rm -f -- "$conf_file"
+      nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+      error "Nginx failed to load the Native System Log session configuration."
+      return 1
+    fi
+
+  elif systemctl is-active --quiet apache2 2>/dev/null || systemctl is-active --quiet httpd 2>/dev/null; then
+    if systemctl is-active --quiet apache2 2>/dev/null; then
+      service=apache2
+      conf_file="/etc/apache2/sites-available/${conf_base}.conf"
+    else
+      service=httpd
+      conf_file="/etc/httpd/conf.d/${conf_base}.conf"
+    fi
+    cat > "$conf_file" <<EOF
+Listen ${web_port}
+<VirtualHost *:${web_port}>
+    ServerName localhost
+    DocumentRoot "${logs_mount_dir}"
+    Alias /${session_token}/ "${logs_mount_dir}/"
+    <Directory "${logs_mount_dir}">
+        Options -Indexes -FollowSymLinks
+        AllowOverride None
+        Require ip ${client_ip} 127.0.0.1 ::1
+        DirectoryIndex index.html
+    </Directory>
+    <Location "/">
+        Require all denied
+    </Location>
+    <Location "/${session_token}/">
+        Require ip ${client_ip} 127.0.0.1 ::1
+    </Location>
+</VirtualHost>
+EOF
+    if [[ "$service" == apache2 ]]; then
+      if ! a2ensite "$conf_base" >/dev/null 2>&1 ||
+         ! apache2ctl configtest >/dev/null 2>&1 ||
+         ! systemctl reload apache2 >/dev/null 2>&1; then
+        a2dissite "$conf_base" >/dev/null 2>&1 || true
+        rm -f -- "$conf_file"
+        apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 >/dev/null 2>&1 || true
+        error "Apache failed to load the Native System Log session configuration."
+        return 1
+      fi
+    else
+      if ! apachectl configtest >/dev/null 2>&1 || ! systemctl reload httpd >/dev/null 2>&1; then
+        rm -f -- "$conf_file"
+        apachectl configtest >/dev/null 2>&1 && systemctl reload httpd >/dev/null 2>&1 || true
+        error "HTTPD failed to load the Native System Log session configuration."
+        return 1
+      fi
+    fi
+  else
+    error "No active Nginx or Apache web server available."
+    return 1
+  fi
+  return 0
+}
 live_system_logs_view() {
   build_vars
-  local session_minutes="${LOG_VIEWER_SESSION}"
-  local excluded_hosts=()
+  local session_minutes="${LOG_VIEWER_SESSION:-20}" session_seconds session_token
+  local inventory_file="/etc/one-click/fleet/inventory.yml" local_hostname ui_target
+  local web_port client_ip="" ssh_peer family fw web_user web_group
+  local logs_base="/var/www/one-click-native-logs" logs_mount_dir
+  local session_timer_pid host_list item label ip username ssh_port target
+  local ssh_key="" rc=0 pid
+  local -a excluded_hosts=() hosts=() remote_targets=() stream_pids=()
+  local -a ssh_opts=()
+  local -A seen_labels=()
+
+  [[ "$session_minutes" =~ ^[0-9]+$ ]] && (( session_minutes >= 1 && session_minutes <= 120 )) || {
+    error "LOG_VIEWER_SESSION must be between 1 and 120 minutes."
+    return 1
+  }
+  session_seconds=$((session_minutes * 60))
+  session_token=$(openssl rand -hex 16) || { error "Failed to create session token."; return 1; }
+  web_port=$(get_free_port) || { error "Failed to allocate web port."; return 1; }
+  [[ "$web_port" =~ ^[0-9]+$ ]] || { error "Invalid session port."; return 1; }
+
   if [[ -n "${2:-}" ]]; then
     IFS=',' read -r -a excluded_hosts <<< "$2"
   fi
-  local session_seconds=$((session_minutes * 60))
-  local session_token=$(openssl rand -hex 16)
-  local inventory_file="/etc/one-click/fleet/inventory.yml"
-  if [[ "${SSH_CLIENT:-}" =~ : ]]; then
-    ui_target="$sys_ipv6"
+  if [[ -z "${SSH_CLIENT:-}" ]]; then
+    warn "Unable to automatically populate public IP in this environment."
+	read -rp "${cyan}[USER]${reset} Please enter your public IP to secure the session: " client_ip
   else
-    ui_target="$sys_ip"
+    client_ip="${SSH_CLIENT%% *}"
   fi
-  if [[ "$ui_target" =~ : ]]; then
-    ui_target="[$ui_target]"
+  [[ -n "$client_ip" ]] || client_ip="${SSH_CONNECTION%% *}"
+  if [[ -z "$client_ip" ]]; then
+    ssh_peer=$(who -m 2>/dev/null | awk '{print $NF}' | tr -d '()')
+    [[ "$ssh_peer" != "" && "$ssh_peer" != "-" ]] && client_ip="$ssh_peer"
   fi
-  local web_port
-  web_port=$(get_free_port)
-  local client_ip
-  client_ip=$(echo "${SSH_CLIENT:-}" | awk '{print $1}')
-  [[ -z "$client_ip" ]] && client_ip=$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')
-  if [[ -n "$client_ip" && "$client_ip" != "127.0.0.1" && "$client_ip" != "::1" ]]; then
-    info "Locking session access exclusively to requesting IP: ${client_ip}"
-    if [[ "$client_ip" =~ : ]]; then
-      ip6tables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-      ip6tables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
-    else
-      iptables -I INPUT -p tcp --dport "$web_port" -s "$client_ip" -j ACCEPT 2>/dev/null || true
-      iptables -A INPUT -p tcp --dport "$web_port" -j DROP 2>/dev/null || true
+  client_ip="${client_ip#[}"
+  client_ip="${client_ip%]}"
+  if [[ -z "$client_ip" || "$client_ip" == 127.0.0.1 || "$client_ip" == ::1 ]]; then
+    warn "SSH client IP is unavailable in this shell."
+    read -rp "Enter the public IP to authorise for this log session (blank to cancel): " client_ip || return 1
+  else
+    info "Detected requesting IP: ${client_ip}"
+    local reply
+    read -rp "Use this IP for log-viewer access? [Y/n]: " reply || reply=y
+    if [[ "$reply" =~ ^[Nn]([Oo])?$ ]]; then
+      read -rp "Enter the public IP to authorise: " client_ip || return 1
     fi
   fi
-  local raw_targets=()
-  if [[ -f "$inventory_file" ]] && command -v ansible &>/dev/null; then
-    info "Discovering fleet members from Ansible inventory."
-    local host_list
-    host_list=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | grep -v "hosts (" | awk '{print $1}')
-    for host in $host_list; do
-      raw_targets+=("${host}:${host}")
+  client_ip="${client_ip#[}"
+  client_ip="${client_ip%]}"
+  if [[ "$client_ip" == *:* ]]; then
+    [[ "$client_ip" =~ ^[0-9a-fA-F:]+$ && "$client_ip" == *:* ]] || {
+      error "Invalid IPv6 address; refusing unrestricted access."
+      return 1
+    }
+    family=6
+    fw=ip6tables
+    ui_target="${sys_ipv6:-}"
+    [[ -n "$ui_target" ]] && ui_target="[$ui_target]"
+  else
+    local -a octets=()
+    local oct
+    IFS=. read -r -a octets <<< "$client_ip"
+    [[ ${#octets[@]} -eq 4 ]] || { error "Enter a valid IPv4 address."; return 1; }
+    for oct in "${octets[@]}"; do
+      [[ "$oct" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( 10#$oct <= 255 )) || {
+        error "Enter a valid IPv4 address."
+        return 1
+      }
     done
+    family=4
+    fw=iptables
+    ui_target="${sys_ip:-}"
   fi
-  local local_hostname
-  local_hostname=$(hostname -s)
-  raw_targets+=("${local_hostname}:local")
-  local remote_targets=()
-  local seen_labels=()
-  for item in "${raw_targets[@]}"; do
-    IFS=":" read -r label target_type <<< "$item"
-    if [[ " ${seen_labels[*]} " =~ " ${label} " ]]; then
-      continue
+  [[ -n "$ui_target" ]] || { error "No public IPv${family} address is configured for the log viewer."; return 1; }
+  if systemctl is-active --quiet nginx 2>/dev/null; then
+    web_user=$(ps -eo user=,comm= | awk '$2 == "nginx" && $1 != "root" {print $1; exit}')
+    [[ -n "$web_user" ]] || web_user=$(nginx -T 2>/dev/null | awk '$1 == "user" {gsub(/;/,"",$2); print $2; exit}')
+    [[ -n "$web_user" ]] || web_user=www-data
+  elif systemctl is-active --quiet apache2 2>/dev/null; then
+    web_user=$(ps -eo user=,comm= | awk '$2 == "apache2" && $1 != "root" {print $1; exit}')
+    [[ -n "$web_user" ]] || web_user=www-data
+  elif systemctl is-active --quiet httpd 2>/dev/null; then
+    web_user=$(ps -eo user=,comm= | awk '$2 == "httpd" && $1 != "root" {print $1; exit}')
+    [[ -n "$web_user" ]] || web_user=apache
+    else
+    local web_choice web_package web_service
+    warn "No active Nginx or Apache web server was detected."
+    if (( EUID != 0 )); then
+      error "Run One-Click as root to install and enable a web server."
+      return 1
     fi
-    local skip=0
+    while true; do
+      printf '\n  1) Nginx\n  2) Apache\n  3) Cancel\n\n'
+      read -r -p "[USER] Select a web server to install [1-3]: " web_choice || return 1
+      case "$web_choice" in
+        1)
+          web_package=nginx
+          web_service=nginx
+          break
+          ;;
+        2)
+          if command -v apt-get &>/dev/null; then
+            web_package=apache2
+            web_service=apache2
+          elif command -v dnf &>/dev/null; then
+            web_package=httpd
+            web_service=httpd
+          else
+            error "Unsupported package manager: cannot install Apache."
+            return 1
+          fi
+          break
+          ;;
+        3)
+          warn "Web-server installation cancelled."
+          return 1
+          ;;
+        *)
+          warn "Please select 1, 2 or 3."
+          ;;
+      esac
+    done
+    info "Installing and enabling ${web_package} for the Native System Log Viewer."
+    if command -v apt-get &>/dev/null; then
+      if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$web_package"; then
+        error "Failed to install ${web_package}."
+        return 1
+      fi
+    elif command -v dnf &>/dev/null; then
+      if ! dnf install -y "$web_package"; then
+        error "Failed to install ${web_package}."
+        return 1
+      fi
+    else
+      error "Neither apt-get nor dnf is available."
+      return 1
+    fi
+    if ! systemctl enable --now "$web_service" ||
+       ! systemctl is-active --quiet "$web_service"; then
+      error "${web_service} was installed but could not be started. Check: journalctl -u ${web_service}"
+      return 1
+    fi
+    case "$web_service" in
+      nginx)
+        web_user=$(ps -eo user=,comm= | awk '$2 == "nginx" && $1 != "root" {print $1; exit}')
+        [[ -n "$web_user" ]] || web_user=$(nginx -T 2>/dev/null | awk '$1 == "user" {gsub(/;/,"",$2); print $2; exit}')
+        if [[ -z "$web_user" ]]; then
+          if id nginx &>/dev/null; then web_user=nginx; else web_user=www-data; fi
+        fi
+        ;;
+      apache2)
+        web_user=$(ps -eo user=,comm= | awk '$2 == "apache2" && $1 != "root" {print $1; exit}')
+        [[ -n "$web_user" ]] || web_user=www-data
+        ;;
+      httpd)
+        web_user=$(ps -eo user=,comm= | awk '$2 == "httpd" && $1 != "root" {print $1; exit}')
+        [[ -n "$web_user" ]] || web_user=apache
+        ;;
+    esac
+    success "${web_service} is installed and running. Continuing with the log dashboard."
+  fi
+  web_group=$(id -gn "$web_user" 2>/dev/null) || {
+    error "Unable to identify web-server account '$web_user'."
+    return 1
+  }
+  logs_mount_dir="${logs_base}/${session_token}"
+  install -d -m 0711 -o root -g root "$logs_base" || return 1
+  install -d -m 0750 -o root -g "$web_group" "$logs_mount_dir" || return 1
+  local logfile
+  if [[ -f "$inventory_file" ]] && command -v ansible >/dev/null 2>&1; then
+    info "Discovering fleet members from Ansible inventory."
+    host_list=$(ansible all --list-hosts -i "$inventory_file" 2>/dev/null | awk 'NR>1 && NF==1 {print $1}')
+    while IFS= read -r label; do
+      [[ -n "$label" ]] && hosts+=("$label")
+    done <<< "$host_list"
+  fi
+  local_hostname=$(hostname -s)
+  hosts+=("$local_hostname")
+  for label in "${hosts[@]}"; do
+    [[ "$label" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || continue
+    [[ -n "${seen_labels[$label]:-}" ]] && continue
+    seen_labels[$label]=1
+    local skip=0 ex
     for ex in "${excluded_hosts[@]}"; do
       if [[ "$label" == "$ex" ]]; then
         skip=1
@@ -18335,118 +19703,138 @@ live_system_logs_view() {
         break
       fi
     done
-    [[ $skip -eq 1 ]] && continue
-    seen_labels+=("$label")
-    if [[ "${target_type//*@}" == "$local_hostname" ]] || [[ "$target_type" == "local" ]]; then
-      remote_targets+=("${label}:local")
-    else
-      remote_targets+=("${label}:oneclick@${label}")
+    (( skip )) && continue
+
+    if [[ "$label" == "$local_hostname" ]]; then
+      remote_targets+=("${label}|local||")
+      continue
     fi
+    ip="$label"; username=oneclick; ssh_port=22
+    if command -v ansible-inventory >/dev/null 2>&1; then
+      local host_json
+      host_json=$(ansible-inventory -i "$inventory_file" --host "$label" 2>/dev/null)
+      if [[ -n "$host_json" ]] && command -v jq >/dev/null 2>&1; then
+        ip=$(jq -r '.ansible_host // empty' <<< "$host_json")
+        username=$(jq -r '.ansible_user // "oneclick"' <<< "$host_json")
+        ssh_port=$(jq -r '.ansible_port // 22' <<< "$host_json")
+      fi
+    fi
+    [[ "$ip" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ &&
+       "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ &&
+       "$ssh_port" =~ ^[0-9]+$ ]] || {
+      warn "Skipping invalid Fleet endpoint for $label."
+      continue
+    }
+    remote_targets+=("${label}|${ip}|${username}|${ssh_port}")
   done
-  if [ ${#remote_targets[@]} -eq 0 ]; then
+  if (( ${#remote_targets[@]} == 0 )); then
     error "No hosts available to stream system logs. Aborting."
-    cleanup_session_port "$web_port"
-    cleanup_firewall_rules "$web_port"
+    rm -rf -- "$logs_mount_dir"
     return 1
   fi
-  local logs_mount_dir="/etc/one-click/logs/${session_token}"
-  mkdir -p "$logs_mount_dir"
-  generate_dashboard_html "${logs_mount_dir}/index.html" "$session_token" "$session_minutes"
-  local host_json_items=""
+  if ! generate_dashboard_html "${logs_mount_dir}/index.html" "$session_token" "$session_minutes"; then
+    error "Failed to generate system log dashboard."
+    rm -rf -- "$logs_mount_dir"
+    return 1
+  fi
+  local -a labels=()
   for target in "${remote_targets[@]}"; do
-    IFS=":" read -r label _ <<< "$target"
-    if [[ -z "$host_json_items" ]]; then
-      host_json_items="\"${label}\""
-    else
-      host_json_items="${host_json_items}, \"${label}\""
-    fi
+    IFS='|' read -r label _ <<< "$target"
+    labels+=("$label")
+    logfile="${logs_mount_dir}/${label}.log"
+    printf '[SYSTEM] Initializing live log stream for host: %s\n' "$label" > "$logfile"
+    chown root:"$web_group" "$logfile" || return 1
+    chmod 0640 "$logfile"
   done
-  echo "[ ${host_json_items} ]" > "${logs_mount_dir}/hosts.json"
-  setup_native_system_log_vhost "$session_token" "$web_port" "$logs_mount_dir" || {
-    cleanup_session_port "$web_port"
-    cleanup_firewall_rules "$web_port"
+  printf '%s\n' "${labels[@]}" | jq -R . | jq -s . > "${logs_mount_dir}/hosts.json" || {
+    error "Failed to write host index."
+    rm -rf -- "$logs_mount_dir"
     return 1
   }
-  local ssh_key=""
-  if [ -f "/home/oneclick/.ssh/id_ed25519" ]; then
-    ssh_key="/home/oneclick/.ssh/id_ed25519"
-  elif [ -f "/etc/one-click/fleet/keys/id_ed25519" ]; then
-    ssh_key="/etc/one-click/fleet/keys/id_ed25519"
+  chown root:"$web_group" "${logs_mount_dir}/index.html" "${logs_mount_dir}/hosts.json"
+  chmod 0640 "${logs_mount_dir}/index.html" "${logs_mount_dir}/hosts.json"
+  if ! setup_native_system_log_vhost "$session_token" "$web_port" "$logs_mount_dir" "$client_ip"; then
+    rm -rf -- "$logs_mount_dir"
+    return 1
   fi
-  local ssh_opts=("-o" "ConnectTimeout=5" "-o" "StrictHostKeyChecking=no" "-o" "BatchMode=yes")
-  [ -n "$ssh_key" ] && ssh_opts+=("-i" "$ssh_key")
+  if command -v "$fw" >/dev/null 2>&1; then
+    if ! "$fw" -I INPUT -p tcp --dport "$web_port" -s "$client_ip" \
+         -m comment --comment "oneclick-syslogs:${session_token}" -j ACCEPT; then
+      error "Could not apply log session firewall exception."
+      _one_click_native_logs_cleanup "$session_token" "$web_port" "$logs_mount_dir" "$client_ip"
+      return 1
+    fi
+  else
+    warn "$fw unavailable; verify that the host firewall permits the selected client IP."
+  fi
+  local health_url="http://127.0.0.1:${web_port}/${session_token}/"
+  [[ "$family" == 6 ]] && health_url="http://[::1]:${web_port}/${session_token}/"
+  local healthy=0 attempt
+  for attempt in 1 2 3 4 5; do
+    if curl --noproxy '*' -g -fsS -o /dev/null --connect-timeout 2 --max-time 3 "$health_url"; then
+      healthy=1; break
+    fi
+    sleep 1
+  done
+  if (( ! healthy )); then
+    error "Log dashboard is not reachable locally on port $web_port. Check web-server logs and directory permissions."
+    _one_click_native_logs_cleanup "$session_token" "$web_port" "$logs_mount_dir" "$client_ip"
+    return 1
+  fi
+  if [[ -f /home/oneclick/.ssh/id_ed25519 ]]; then
+    ssh_key=/home/oneclick/.ssh/id_ed25519
+  elif [[ -f /etc/one-click/fleet/keys/id_ed25519 ]]; then
+    ssh_key=/etc/one-click/fleet/keys/id_ed25519
+  fi
+  ssh_opts=(-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+  [[ -n "$ssh_key" ]] && ssh_opts+=(-i "$ssh_key")
   info "Initializing ${session_minutes}-minute Native System Log Session across cluster nodes:"
-  local reset=$(tput sgr0 2>/dev/null || echo "")
-  for target in "${remote_targets[@]}"; do
-    IFS=":" read -r label _ <<< "$target"
-    printf "$(tput setaf 148)%s\n${reset}" "- ${label}"
+  local reset
+  reset=$(tput sgr0 2>/dev/null || echo '')
+  for label in "${labels[@]}"; do
+    printf '%s%s\n' "$(tput setaf 148 2>/dev/null || true)" "- ${label}${reset}"
   done
-  local log_stream_cmd='
-    if command -v journalctl &>/dev/null; then
-      stdbuf -oL journalctl -f -n 100 2>/dev/null
-    else
-      LOG_FILES=$(find /var/log -type f \( -name "messages" -o -name "secure" -o -name "auth*" -o -name "syslog*" \) \
-        ! -name "*.gz" ! -name "*.xz" ! -name "*[0-9]*" 2>/dev/null);
-      if [ -n "$LOG_FILES" ]; then
-        stdbuf -oL tail -f -n 100 $LOG_FILES 2>/dev/null
-      fi
-    fi
-  '
+  local log_stream_cmd='if command -v journalctl >/dev/null 2>&1; then
+    exec stdbuf -oL journalctl -f -n 100 --no-pager
+  else
+    find /var/log -type f \( -name messages -o -name secure -o -name "auth*" -o -name "syslog*" \) \
+      ! -name "*.gz" ! -name "*.xz" ! -name "*[0-9]*" -print0 2>/dev/null \
+      | xargs -0 -r tail -F -n 100
+  fi'
   for target in "${remote_targets[@]}"; do
-    IFS=":" read -r label ssh_target <<< "$target"
-    local host_log_file="${logs_mount_dir}/${label}.log"
-    echo "[SYSTEM] Initializing live log stream for host: ${label}" > "$host_log_file"
-    if [[ "$ssh_target" == "local" ]] || [[ "${ssh_target//*@}" == "$local_hostname" ]]; then
-      stdbuf -oL bash -c "$log_stream_cmd" >> "$host_log_file" &
+    IFS='|' read -r label ip username ssh_port <<< "$target"
+    logfile="${logs_mount_dir}/${label}.log"
+    if [[ "$ip" == local ]]; then
+      nohup timeout -k 5s "${session_seconds}s" \
+        bash -c "$log_stream_cmd" "oneclick-syslogs-${session_token}" >> "$logfile" 2>&1 </dev/null &
     else
-      stdbuf -oL ssh "${ssh_opts[@]}" "$ssh_target" "$log_stream_cmd" >> "$host_log_file" 2>/dev/null &
+      nohup timeout -k 5s "${session_seconds}s" \
+        ssh "${ssh_opts[@]}" -p "$ssh_port" "${username}@${ip}" \
+        "${log_stream_cmd}"$'\n'"# oneclick-syslogs-${session_token}" >> "$logfile" 2>&1 </dev/null &
     fi
+    pid=$!
+    stream_pids+=("$pid")
+    disown "$pid" 2>/dev/null || true
   done
-  local timer_pid=$!
-  trap "
-    warn 'Cleaning up Native System Log session.'
-    kill $timer_pid 2>/dev/null || true
-    rm -f '/etc/nginx/conf.d/sys_sess_${session_token}.conf'
-    if command -v apache2 &>/dev/null; then
-      sudo a2dissite 'sys_sess_${session_token}.conf' &>/dev/null || true
-      rm -f '/etc/apache2/sites-available/sys_sess_${session_token}.conf'
-    fi
-    rm -f '/etc/httpd/conf.d/sys_sess_${session_token}.conf'
-    if systemctl list-unit-files nginx.service | grep -q nginx.service && systemctl is-active --quiet nginx; then
-      sudo systemctl reload nginx 2>/dev/null || true
-    elif systemctl list-unit-files apache2.service | grep -q apache2.service && systemctl is-active --quiet apache2; then
-      sudo systemctl reload apache2 2>/dev/null || true
-    elif systemctl list-unit-files httpd.service | grep -q httpd.service && systemctl is-active --quiet httpd; then
-      sudo systemctl reload httpd 2>/dev/null || true
-    fi
-    if [[ -n '${client_ip}' && '${client_ip}' != '127.0.0.1' && '${client_ip}' != '::1' ]]; then
-      if [[ '${client_ip}' =~ : ]]; then
-        sudo ip6tables -D INPUT -p tcp --dport '${web_port}' -s '${client_ip}' -j ACCEPT 2>/dev/null || true
-        sudo ip6tables -D INPUT -p tcp --dport '${web_port}' -s '${client_ip}' -j DROP 2>/dev/null || true
-      else
-        sudo iptables -D INPUT -p tcp --dport '${web_port}' -s '${client_ip}' -j ACCEPT 2>/dev/null || true
-        sudo iptables -D INPUT -p tcp --dport '${web_port}' -s '${client_ip}' -j DROP 2>/dev/null || true
-      fi
-    fi
-    cleanup_session_port '${web_port}'
-    cleanup_firewall_rules '${web_port}'
-    info 'Native System Log session destroyed.'
-  " EXIT
-  info "Dashboard (Restricted to ${client_ip:-All}) will expire at: $(date -d "now + $session_minutes minutes")"
-  success "Access Live Console Here: ${orange}http://${ui_target}:${web_port}/${session_token}/${reset}"
   (
-    sleep "$session_seconds"
-    cleanup_session_port "$web_port"
-    cleanup_firewall_rules "$web_port"
-    kill -SIGTERM $$ 2>/dev/null
-  ) &
+    sleep "$session_seconds" &
+    local sleeper_pid=$!
+    trap 'kill "$sleeper_pid" 2>/dev/null || true; _one_click_native_logs_cleanup "$session_token" "$web_port" "$logs_mount_dir" "$client_ip" "${stream_pids[@]}"' EXIT
+    trap 'exit 0' HUP INT TERM
+    wait "$sleeper_pid" || true
+  ) </dev/null >/dev/null 2>&1 &
+  session_timer_pid=$!
+  disown "$session_timer_pid" 2>/dev/null || true
+
+  info "Dashboard (Restricted to ${client_ip}) will expire at: $(date -d "now + $session_minutes minutes")"
+  success "Access Live Console Here: ${orange}http://${ui_target}:${web_port}/${session_token}/${reset}"
   info "Session active in background for ${session_minutes} minutes."
-  info "To terminate early, run: kill ${timer_pid}"
-  disown "$timer_pid" 2>/dev/null || true
-  read -rp "Press Enter to continue..."
-  cleanup_session_port "$web_port"
-  cleanup_firewall_rules "$web_port"
-  trap - EXIT
+  info "To terminate early, run: kill ${session_timer_pid}"
+  info "The session remains active if you return to the One-Click menu."
+  if [[ -t 0 ]]; then
+    read -rp "Press Enter to continue..." || true
+  fi
+  return 0
 }
 browse_files() {
   mapfile -t logs < <(
