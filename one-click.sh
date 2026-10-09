@@ -162,17 +162,28 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  audit block <ID> perm   Permanently ban the IP address." \
     "  audit unblock <ID>      Remove a previously applied block." \
     "  audit history           View historical actions taken against attackers." \
-    "  audit banlist           Show combined ban list from RuleEngine and Fail2Ban." "" \
+    "  audit banlist           Show combined ban list from RuleEngine and Fail2Ban." \
+	"  audit lookup <0-9+>     IP Reputation Lookup - Requires API key configured" "" \
     "  audit jail <args>       Used to create additional custom jails in faileban with custom." \
-    "                          ports and timers." \
+    "                          ports and retry timers." \
     "                          Example: one-click engine 'audit jail [name] port [port] retry [count]'" "" \
     "$(tput smul)$(tput bold)AbuseIPDB Integration$(tput sgr0)$(tput rmul)" \
     "  audit key <APIKEY>      Configure AbuseIPDB API key for IP reputation checks." \
     "  audit lookup <IP>       Query AbuseIPDB to check reputation of an IP." "" \
     "$(tput smul)$(tput bold)Intrusion Detection$(tput sgr0)$(tput rmul)" \
     "  audit scan              Run a lightweight file integrity and malware scan." \
-    "  audit scan --deep       Perform a deeper filesystem inspection." "" \
-    "  audit scan --remediate  Authorize IDS to autoheal." "" \
+	"  audir scan --rebase     Rebuild baseline after reviewing changes." \
+	"  audit scan --verify     Verify baseline integrity" \
+    "  audit scan --deep       Perform a deeper filesystem inspection." \
+	"  audit scan --stats      Display IDS Scanner statistics." \
+	"  audit scan --json       Machine-readable statistics." \
+	"  audit scan --status     Status dashboard." \
+	"  audit scan --cron       Enable hourly scan-only automation." \
+	"  audit scan --disable-cron  Disable scheduled scans." \
+	"  audit scan --cleanup    Explicit evidence-retention cleanup." \
+	"  audit scan --events-limit <value>   Show recent security events limit." \
+	"  audit scan --disable    Disable scan automation, retaining saved data." \
+	"  audit scan --help       Scan Audit help menu." "" \
     "$(tput bold)Examples$(tput sgr0)" \
     "────────────────────────────────────────────────────────────────────────────" \
     "  one-click net-repair" \
@@ -324,7 +335,7 @@ if ip link show br0 &> /dev/null; then
 fi
 sys_ip=$(awk '$1 == "inet" {split($2,arr,"/"); print arr[1]}' <(ip a s "$nic"))
 updated="June 2026"
-version="1.2.1"
+version="1.2.3"
 priv1="-----END PRIVATE KEY-----"
 service_name="resumable-rsync-$(date +%s)"
 service_file="/etc/systemd/system/${service_name}.service"
@@ -1422,6 +1433,26 @@ if [[ "$1" == "--vps" ]]; then
   virt_mac=""
   import_state=""
   while [[ $# -gt 0 ]]; do
+    if [[ "$action" == "snapshot" ]]; then
+      case "${1:-}" in
+        --action|-n|--name|-t|--target)
+          if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
+            error "Missing value for snapshot option: $1"
+            exit 1
+          fi
+          ;;
+      esac
+    fi
+	if [[ "$action" == "backup" ]]; then
+      case "${1:-}" in
+        --action|-n|--name|-t|--target)
+          if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
+            error "Missing value for VPS $action option: $1"
+            exit 1
+          fi
+          ;;
+      esac
+    fi
     case "${1:-}" in
       -n|--name)     vps_name="$2"        ; shift 2 ;;
       -t|--target)   target_host="$2"     ; shift 2 ;;
@@ -1434,10 +1465,22 @@ if [[ "$1" == "--vps" ]]; then
       -p|--ip)       public_ip="$2"       ; shift 2 ;;
       -l|--language) language="$2"        ; shift 2 ;;
       -v|--virt)     virt_mac="$2"        ; shift 2 ;;
-      --import-state) import_state="$2"    ; shift 2 ;;
-      create)        snap_action="create" ; shift 1 ;;
-      delete)        snap_action="delete" ; shift 1 ;;
-      restore)       snap_action="restore"; shift 1 ;;
+      --import-state) import_state="$2"   ; shift 2 ;;
+      --action)
+        if [[ "$action" != "snapshot" && "$action" != "backup" ]]; then
+          error "--action is only supported for VPS snapshot and backup operations."
+          exit 1
+        fi
+        snap_action="$2"
+        shift 2 ;;
+      create|delete|restore)
+        # Retain the positional form used by the existing Fleet menu.
+        if [[ -n "$snap_action" && "$snap_action" != "$1" ]]; then
+          error "Conflicting VPS actions: $snap_action and $1"
+          exit 1
+        fi
+        snap_action="$1"
+        shift 1 ;;
       -f|--full)     force_flag="$2"      ; shift 2 ;;
       *) error "Unknown CLI argument parameter passed: $1"; exit 1 ;;
     esac
@@ -1500,53 +1543,49 @@ if [[ "$1" == "--vps" ]]; then
       exit 0
       ;;
     backup)
-      if [[ "${target_host}" != "all" ]]; then
-        found=0
-        shopt -s nullglob
-        state_files=("/etc/one-click/fleet/state"/*.conf)
-        shopt -u nullglob
-        for file in "${state_files[@]}"; do
-          filename="${file##*/}"
-          peer_name="${filename%.conf}"
-          if [[ "$target_host" == "$peer_name" ]]; then
-            success "$target_host found in inventory"
-            found=1
-          fi
-        done
-        if [[ "$found" -eq 0 ]]; then
-          error "$target_host not found in inventory"
-          warn "Please use a valid fleet peer"
+	  case "${snap_action:-}" in
+        create|restore|delete)
+          ;;
+        *)
+          error "Usage: one-click --vps backup --action <create|restore|delete> --target <vps_name> --name <backup_name>"
           exit 1
-        fi
-      else
-        warn "Executing commands on all fleet members"
+          ;;
+      esac
+      if [[ -z "${target_host:-}" ||
+          "$target_host" == "all" ||
+          -z "${vps_name:-}" ]]; then
+        error "Select exactly one VPS (--target) and one backup name (--name)."
+        exit 1
+      fi
+      if [[ ! "$target_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ||
+            ! "$vps_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]]; then
+        error "Invalid VPS name or backup name."
+        exit 1
       fi
       fleet_vps_backup "$snap_action" "$target_host" "$vps_name"
+      exit $?
       ;;
     snapshot)
-      if [[ "${target_host}" != "all" ]]; then
-        found=0
-        shopt -s nullglob
-        state_files=("/etc/one-click/fleet/state"/*.conf)
-        shopt -u nullglob
-        for file in "${state_files[@]}"; do
-          filename="${file##*/}"
-          peer_name="${filename%.conf}"
-          if [[ "$target_host" == "$peer_name" ]]; then
-            success "$target_host found in inventory"
-            found=1
-          fi
-        done
-        if [[ "$found" -eq 0 ]]; then
-          error "$target_host not found in inventory"
-          warn "Please use a valid fleet peer"
-          exit 1
-        fi
-      else
-        warn "Executing commands on all fleet members"
+      case "$snap_action" in
+        create|restore|delete) ;;
+        edit)
+          error "Snapshot edit is not implemented. Supported: create, restore, delete."
+          exit 1 ;;
+        *)
+          error "Usage: one-click --vps snapshot --action <create|restore|delete> --target <vps_name> --name <snapshot_name>"
+          exit 1 ;;
+      esac
+      if [[ -z "$target_host" || "$target_host" == "all" || -z "$vps_name" ]]; then
+        error "Snapshot operations require one VPS (--target) and a snapshot (--name)."
+        exit 1
+      fi
+      if [[ ! "$target_host" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ||
+            ! "$vps_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+        error "Unsafe VPS or snapshot name. Use letters, digits, '.', '_' or '-'."
+        exit 1
       fi
       fleet_vps_snapshot "$snap_action" "$target_host" "$vps_name"
-      exit 0
+      exit $?
       ;;
     view)
       fleet_snapshot_viewer
@@ -2077,7 +2116,7 @@ EOF
       ;;
     *)
       error "Invalid VPS subsystem operational action: $action"
-      echo "Available choices: create | delete | edit"
+      echo "Available choices: create | start | stop | patch | delete | edit | view | snapshot | reinstall | backup | migrate | import | export"
       exit 1
       ;;
   esac
