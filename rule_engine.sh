@@ -10,7 +10,7 @@
 # grub + initramfs need *************************** reinstall OS' over network #
 # reinitalization after a migration.| *https://github.com/bin456789/reinstall* #
 # ============================================================================ #
-# === Build: Jan 2026 === # === Updated: Aug 2026 == # === Version#: 1.0.0 === #
+# === Build: Jan 2026 === # === Updated: Oct 2026 == # === Version#: 1.0.0 === #
 # ====== One-Click ====== #
 # ==== Firewall RuleEngine ==== 
 # ==== Helper: Ensure nftables IP Filter Base Chains Exist ====
@@ -38,35 +38,117 @@ expand_multiport_command() {
     echo "$cmd"
   fi
 }
-# ==== Firewall RuleEngine ====
+_one_click_fw_direct_kind() {
+  local text="${1:-}" kind=""
+  case "$text" in
+    audit|audit\ *|ssh\ *|alias-*|sensitive:*|sensitive-remove:*|sensitive-list*|list|list\ *|show|show\ *|view|view\ *|display|display\ *|delete\ alias*|remove\ alias*|purge\ alias*|forget\ alias*)
+      kind=parser ;;
+    backup|backup\ *|save|save\ *|retain|retain\ *|copy\ firewall*|export\ firewall*|dump\ firewall*|snapshot\ firewall*)
+      kind=backup ;;
+    restore|restore\ *|revive\ firewall*|recreate\ firewall*|regenerate\ firewall*|repair\ firewall*|import\ firewall*|reinstate\ firewall*)
+      kind=restore ;;
+    delete\ firewall\ backup*|remove\ firewall\ backup*|purge\ firewall\ backup*|delete\ backup*|remove\ backup*|purge\ backup*)
+      kind=delete_backups ;;
+    delete\ firewall\ rule*|remove\ firewall\ rule*|purge\ firewall\ rule*|delete\ firewall\ policy*|remove\ firewall\ policy*)
+      kind=reject ;;
+  esac
+  printf '%s' "$kind"
+}
+_one_click_fw_split_clauses() {
+  local input="${1:-}" segment item candidate previous=""
+  local action="" protocol="" keyword="" prefix="" suffix=""
+  local list re_ports re_bare re_single port
+  local -a sections=() entries=() numbers=()
+  rule_clauses=()
+  input=$(sed -E 's/[[:space:]]+and[[:space:]]+/|/g' <<< "$input") || return 1
+  IFS='|' read -r -a sections <<< "$input"
+  (( ${#sections[@]} > 0 )) || { error "Empty firewall request."; return 1; }
+  re_ports='^(.+[[:space:]])(ports?)[[:space:]]+(([0-9]+([-:][0-9]+)?)([[:space:]]*,[[:space:]]*[0-9]+([-:][0-9]+)?)+)([[:space:]].*)?$'
+  re_bare='^(.+[[:space:]])(([0-9]+([-:][0-9]+)?)([[:space:]]*,[[:space:]]*[0-9]+([-:][0-9]+)?)+)([[:space:]].*)?$'
+  re_single='^(.+[[:space:]]ports?[[:space:]]+)([0-9]+([-:][0-9]+)?)([[:space:]].*)?$'
+  for segment in "${sections[@]}"; do
+    segment="${segment#"${segment%%[![:space:]]*}"}"
+    segment="${segment%"${segment##*[![:space:]]}"}"
+    [[ -n "$segment" ]] || { error "Empty firewall rule clause."; return 1; }
+    if [[ "$segment" == ,* || "$segment" == *, || "$segment" == *,,* ]]; then
+      error "Malformed firewall comma list: $segment"
+      return 1
+    fi
+    prefix="" suffix="" list=""
+    if [[ "$segment" =~ $re_ports ]]; then
+      prefix="${BASH_REMATCH[1]}${BASH_REMATCH[2]} "
+      list="${BASH_REMATCH[3]}"
+      suffix="${BASH_REMATCH[8]}"
+    elif [[ "$segment" =~ $re_bare ]]; then
+      prefix="${BASH_REMATCH[1]}"
+      list="${BASH_REMATCH[2]}"
+      suffix="${BASH_REMATCH[7]}"
+    fi
+    if [[ -n "$list" ]]; then
+      IFS=',' read -r -a numbers <<< "$list"
+      for port in "${numbers[@]}"; do
+        port="${port//[[:space:]]/}"
+        candidate="${prefix}${port}${suffix}"
+        rule_clauses+=("$candidate")
+        previous="$candidate"
+      done
+    else
+      IFS=',' read -r -a entries <<< "$segment"
+      for item in "${entries[@]}"; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [[ -n "$item" ]] || { error "Empty firewall comma clause."; return 1; }
+        candidate="$item"
+        if [[ "$item" =~ ^(allow|open|permit|accept|add|block|drop|deny|reject|remove|delete|flush|clear|reset|log)([[:space:]]|$) ]]; then
+          : 
+        elif [[ -z "$previous" ]]; then
+          candidate="$item"
+        elif [[ "$item" =~ ^(tcp|udp|icmp|icmpv6)([[:space:]]|$) ]]; then
+          candidate="$action $item"
+        elif [[ "$item" =~ ^(ports?|range)([[:space:]]|$) ]]; then
+          candidate="$action ${protocol:+$protocol }$item"
+        elif [[ "$item" =~ ^[0-9]+([-:][0-9]+)?([[:space:]]|$) ]]; then
+          if [[ "$previous" =~ $re_single ]]; then
+            candidate="${BASH_REMATCH[1]}${item}${BASH_REMATCH[4]}"
+          elif [[ "$previous" =~ ^(.+[[:space:]])([0-9]+([-:][0-9]+)?)([[:space:]].*)?$ ]]; then
+            candidate="${BASH_REMATCH[1]}${item}${BASH_REMATCH[4]}"
+          else
+            error "Cannot safely inherit the previous port context for '$item'."
+            return 1
+          fi
+        else
+          candidate="$action ${protocol:+$protocol }$item"
+        fi
+        rule_clauses+=("$candidate")
+        previous="$candidate"
+        if [[ "$candidate" =~ ^(allow|open|permit|accept|add|block|drop|deny|reject|remove|delete|flush|clear|reset|log)([[:space:]]|$) ]]; then
+          action="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$candidate" =~ (^|[[:space:]])(tcp|udp|icmp|icmpv6)([[:space:]]|$) ]]; then
+          protocol="${BASH_REMATCH[2]}"
+        else
+          protocol=""
+        fi
+      done
+    fi
+    if [[ -n "$list" ]]; then
+      if [[ "$previous" =~ ^(allow|open|permit|accept|add|block|drop|deny|reject|remove|delete|flush|clear|reset|log)([[:space:]]|$) ]]; then
+        action="${BASH_REMATCH[1]}"
+      fi
+      if [[ "$previous" =~ (^|[[:space:]])(tcp|udp|icmp|icmpv6)([[:space:]]|$) ]]; then
+        protocol="${BASH_REMATCH[2]}"
+      else
+        protocol=""
+      fi
+    fi
+  done
+  (( ${#rule_clauses[@]} > 0 && ${#rule_clauses[@]} <= 40 )) || {
+    error "Rule request contains no commands or too many commands (maximum 40)."
+    return 1
+  }
+}
+# ==== Rule Engine Helpers ====
 rule_engine() {
-  if ! systemctl is-active --quiet firewalld; then
-    fail2ban_failed=true
-  else
-    fail2ban_failed=false
-  fi
-  if [[ -f "/var/log/auth.log" || -f "/var/log/secure" ]]; then
-    logs_exist=true
-  else
-    logs_exist=false
-  fi
-  if [[ "$pkg_mgr" == "apt" ]]; then
-    if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
-      apt-get -y install rsyslog &> /dev/null
-      systemctl enable --now rsyslog &> /dev/null
-    fi
-    install_dep "iptables" "type iptables" "iptables" "$pkg_mgr" true
-    install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
-    systemctl enable fail2ban --now &> /dev/null
-  elif [[ "$pkg_mgr" == "dnf" ]]; then
-    if [[ "$fail2ban_failed" == true && "$logs_exist" == false ]]; then
-      dnf -y install rsyslog &> /dev/null
-      systemctl enable --now rsyslog &> /dev/null
-    fi
-    install_dep "iptables" "command -v iptables" "iptables iptables-services" "$pkg_mgr" true
-    install_dep "fail2ban" "command -v fail2ban-client" "fail2ban" "$pkg_mgr" true
-    systemctl enable fail2ban --now &> /dev/null
-  fi
   declare -gA alerted_ports=()
   engine_dir="/etc/one-click/rule-engine/"
   alias_file=/etc/one-click/rule-engine/.alias.conf
@@ -83,9 +165,6 @@ rule_engine() {
     fi
     dry_run=1
     rule="$flag"
-    if [[ -f /tmp/fw_confirmed ]]; then
-      rm -f /tmp/fw_confirmed
-    fi
   fi
   if [[ "$y_int" == "-y" || "$flag" == "-y" ]]; then
     y_interactive=1
@@ -93,9 +172,6 @@ rule_engine() {
   if [[ -z "$rule" ]]; then
     die "Usage: one-click rule-engine [--dry-run] '<rule in human words wrapped in quotes>'"
   fi
-  mkdir -p "$engine_dir"
-  mkdir -p "${engine_dir}guard/"
-  touch "$alias_file"
   # ==== Default Sensitive Ports ====
   declare -A default_sensitive_ports=(
     ["${real_ssh:-22}"]="SSH (Remote Access)"
@@ -115,69 +191,86 @@ rule_engine() {
       host_aliases[$name]=$ip
     done < "$alias_file"
   }
+  if [[ "$rule" =~ ^[[:space:]]*[Rr][Aa][Ww]: ]]; then
+    if (( dry_run == 1 )); then
+      error "[DRY-RUN] Raw shell commands cannot be previewed safely."
+      return 1
+    fi
+    _one_click_fw_raw_dispatch "$rule"
+    return $?
+  fi
   rule_lower=${rule,,}
-  rule_lower=$(sed -E 's/ ?(how to|please|can you|help|fix|this) ?//g' <<< "$rule_lower")
+  rule_lower=$(sed -E 's/^[[:space:]]*(please|can you|could you|help me|how to)[[:space:]]+//; s/^[[:space:]]+//; s/[[:space:]]+$//' <<< "$rule_lower")
+  [[ -n "$rule_lower" ]] || { error "No firewall command provided."; return 1; }
+  local direct_kind=""
+  direct_kind=$(_one_click_fw_direct_kind "$rule_lower") || return 1
+  if [[ -n "$direct_kind" ]]; then
+    if (( dry_run == 1 )); then
+      error "[DRY-RUN] Direct management actions are not previewable; no changes made."
+      return 1
+    fi
+    _one_click_fw_direct_dispatch "$direct_kind" "$rule"
+    return $?
+  fi
+  detect_firewall_backend
+  if (( dry_run == 0 )); then
+    _one_click_fw_require_prerequisites "${firewall_backend:-none}" || return 1
+  fi
+  if (( dry_run == 0 )); then
+    mkdir -p "$engine_dir" "${engine_dir}guard/" || return 1
+    touch "$alias_file" || return 1
+  fi
   last_action=""
   last_proto=""
   generated_cmds=()
-  # ==== Detect Backend Environment ====
-  detect_firewall_backend
+  # ==== Stable Backend Environment ==== 
   if command -v iptables &>/dev/null && iptables -V 2>/dev/null | grep -qi nf_tables; then
-    if [[ "$dry_run" -eq 1 ]]; then
+    if (( dry_run == 1 )); then
       printf "${magenta}[DRY-RUN]${reset} %s\n" "iptables is running in nf_tables compatibility mode."
     else
       info "iptables is running in nf_tables compatibility mode."
     fi
   fi
   load_host_aliases
-  clean_duplicate_rules
-  check_firewall_available
-  rule_normalized=$(sed -E 's/[\t ]+and[\t ]+|,+/|/g' <<< "$rule_lower")
-  IFS='|' read -ra subcommands <<< "$rule_normalized"
-  # ==== Determine last_action from subcommands ====
-  for sub in "${subcommands[@]}"; do
-    if grep -Eq "\b(drop|deny|block|stop|close)\b" <<< "$sub"; then
-      last_action="DROP"; break
-    elif grep -Eq "\b(reject|decline|bounce)\b" <<< "$sub"; then
-      last_action="REJECT"; break
-    elif grep -Eq "\b(open|allow|permit|accept|add)\b" <<< "$sub"; then
-      last_action="ACCEPT"; break
-    elif grep -Eq "\b(delete|remove)\b" <<< "$sub"; then
-      last_action="DELETE"; break
+  _one_click_fw_split_clauses "$rule_lower" || return 1
+  local sub
+  for sub in "${rule_clauses[@]}"; do
+    if [[ -n "$(_one_click_fw_direct_kind "$sub")" ]]; then
+      error "Management commands must be issued separately, not in a rule batch."
+      return 1
     fi
+    last_action=""
+    last_proto=""
+    parse_firewall_command "$sub" "" || {
+      error "Rule parsing failed; no firewall commands applied."
+      return 1
+    }
   done
-  # ==== Parse Subcommands ====
-  for sub in "${subcommands[@]}"; do
-    parse_firewall_command "$sub" "$last_proto"
-  done
-  # ==== Backend-Aware Deduplication Against Live System ====
+  # ==== Validate and safely deduplicate generated operations ====
   unique_cmds=()
+  local -a check_argv=()
+  local i can_check=0
   for cmd in "${generated_cmds[@]}"; do
+    if ! _one_click_fw_command_argv "$cmd"; then
+      error "Unsupported or unsafe generated command; refusing batch: $cmd"
+      return 1
+    fi
     local is_dup=0
-    case "${firewall_backend:-iptables}" in
-      iptables|ip6tables)
-        read -r -a arr <<< "$cmd"
-        if "${fw_bin:-iptables}" -C "${arr[@]:1}" &>/dev/null; then
-          is_dup=1
+    if [[ "${fw_argv[0]}" == iptables || "${fw_argv[0]}" == ip6tables ]]; then
+      check_argv=("${fw_argv[@]}")
+      can_check=0
+      for i in "${!check_argv[@]}"; do
+        if [[ "${check_argv[$i]}" == -I || "${check_argv[$i]}" == -A ]]; then
+          check_argv[$i]=-C
+          can_check=1
+          break
         fi
-        ;;
-      nft)
-        if nft list ruleset 2>/dev/null | grep -F -q "$cmd"; then
-          is_dup=1
-        fi
-        ;;
-      ufw)
-        if ufw status 2>/dev/null | grep -F -q "$cmd"; then
-          is_dup=1
-        fi
-        ;;
-      firewalld)
-        if firewall-cmd --zone=public --query-port="${cmd#*--add-port=}" &>/dev/null 2>&1; then
-          is_dup=1
-        fi
-        ;;
-    esac
-    if [[ "$is_dup" -eq 1 ]]; then
+      done
+      if (( can_check == 1 )) && "${check_argv[@]}" &>/dev/null; then
+        is_dup=1
+      fi
+    fi
+    if (( is_dup == 1 )); then
       info "Skipping duplicate rule already active in kernel: $cmd"
       duplicate_skipped=1
       continue
@@ -187,7 +280,7 @@ rule_engine() {
   if [[ ${#unique_cmds[@]} -eq 0 ]]; then
     if [[ "$duplicate_skipped" == "1" ]]; then
       info "All rules already exist. Nothing to change."
-      exit 0
+      return 0
     fi
     if [[ "$dry_run" -eq 1 ]]; then
       printf "${red}[DRY-RUN]${reset} %s\n" "No valid commands generated." "DRY-RUN Failed!"
@@ -209,151 +302,177 @@ rule_engine() {
       printf "${cyan}[COMMAND]: %s${reset}\n" "$cmd"
     fi
   done
-  confirm=n
-  if [[ "$y_interactive" -eq 1 ]]; then
-    confirm="y"
-  else
-    if [[ "$dry_run" -eq 1 ]]; then
-      read -rp "${magenta}[DRY-RUN]:${reset} Apply ALL rules? (y|n): " confirm
-    else
-      read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm
+  local sandbox_approved=0
+  if (( dry_run == 1 )); then
+    if ! declare -F dry_run >/dev/null 2>&1; then
+      error "[DRY-RUN] Isolated namespace dry_run() function is unavailable; refusing to apply rules."
+      return 1
     fi
+    if ! dry_run "${unique_cmds[@]}"; then
+      warn "[DRY-RUN] Sandbox failed or application was declined; no live firewall changes attempted."
+      return 1
+    fi
+    sandbox_approved=1
+    _one_click_fw_require_prerequisites "${firewall_backend:-none}" || return 1
+    mkdir -p "$engine_dir" "${engine_dir}guard/" || return 1
+    touch "$alias_file" || return 1
+    dry_run=0
+  fi
+  # ==== Transactional Firewall Apply (Fix 02) ====
+  confirm=n
+  if (( sandbox_approved == 1 || y_interactive == 1 )); then
+    confirm=y
+  else
+    read -rp "${cyan}[USER]:${reset} Apply ALL rules? (y|n): " confirm || confirm=n
     confirm="${confirm,,}"
   fi
-  if [[ "$confirm" == "y" || "$confirm" == "yes" ]]; then
-    tmp_snapshot=$(mktemp /tmp/fw_backup.XXXXXX)
-    confirm_file=$(mktemp /tmp/fw_confirmed.XXXXXX)
-    state_file=$(mktemp /tmp/fw_state.XXXXXX)
-    echo "APPLYING" > "$state_file"
-    trap 'rm -f "${tmp_snapshot:-}" "${confirm_file:-}" "${state_file:-}" 2>/dev/null' EXIT INT TERM
-    # ==== Backend-Aware Snapshot Creation ====
-    case "${firewall_backend:-iptables}" in
-      nft)
-        nft list ruleset > "$tmp_snapshot" 2>/dev/null || true
-        ;;
-      ufw)
-        ufw status verbose > "$tmp_snapshot" 2>/dev/null || true
-        ;;
-      firewalld)
-        firewall-cmd --runtime-to-permanent &>/dev/null || true
-        firewall-cmd --zone=public --list-all > "$tmp_snapshot" 2>/dev/null || true
-        ;;
-      *)
-        ${fw_bin:-iptables}-save -c > "$tmp_snapshot" 2>/dev/null || true
-        ;;
-    esac
-    fail=()
-    fatal=0
-    # ==== Dry Run Verification ====
-    if [[ "$dry_run" -eq 1 ]]; then
-      if ! dry_run "${unique_cmds[@]}"; then
-        printf "${magenta}[DRY-RUN]${red} %s${reset}\n" "Dry run failed. Exiting without applying rules."
-        return 1 2>/dev/null || exit 1
-      fi
-    fi
-    # ==== Ensure base nftables chains exist ====
-    ensure_nftables_base_chains
-    # ==== Execute Rules ====
-    for cmd in "${unique_cmds[@]}"; do
-      mapfile -t runnable_cmds < <(expand_multiport_command "$cmd")
-      for exec_cmd in "${runnable_cmds[@]}"; do
-        if eval "$exec_cmd" &>/dev/null; then
-          info "Rule applied: $exec_cmd"
-        else
-          warn "Failed to apply rule: $exec_cmd"
-          fail+=("$exec_cmd")
-          fatal=1
-        fi
-      done
+  if [[ "$confirm" != y && "$confirm" != yes ]]; then
+    warn "No changes applied."
+    return 0
+  fi
+  local exec_cmd tx_dir tx_base tx_unit tx_result=0 confirmed=0
+  local -a apply_cmds=() fail=()
+  local -a runnable_cmds=()
+  for cmd in "${unique_cmds[@]}"; do
+    runnable_cmds=("$cmd")
+    apply_cmds+=("${runnable_cmds[@]}")
+  done
+  if ! _one_click_fw_backend_preflight "${firewall_backend:-none}" "${apply_cmds[@]}"; then
+    error "Firewall backend preflight failed; no changes applied."
+    return 1
+  fi
+  if (( ${#apply_cmds[@]} == 0 || ${#apply_cmds[@]} > 40 )); then
+    error "Firewall transaction requires 1–40 executable rules; split larger batches."
+    return 1
+  fi
+  tx_base="/run/one-click/rule-engine/transactions"
+  if [[ "${ONE_CLICK_FW_TEST_MODE:-}" == 1 ]]; then
+    tx_base="${ONE_CLICK_FW_TEST_BASE:?Missing test transaction base}"
+  fi
+  if (( EUID != 0 )); then
+    error "Run One-Click as root to change firewall rules."
+    return 1
+  fi
+  ( umask 077; mkdir -p "$tx_base" ) || return 1
+  chmod 700 "$tx_base" || return 1
+  tx_dir=$(umask 077; mktemp -d "$tx_base/tx.XXXXXXXX") || {
+    error "Cannot allocate protected firewall snapshot storage."
+    return 1
+  }
+  tx_unit="oneclick-fw-$(basename "$tx_dir" | tr -cd 'a-zA-Z0-9')"
+  if [[ "$firewall_backend" == ufw || "$firewall_backend" == firewalld ]]; then
+    local manager_line
+    : > "$tx_dir/manager.plans" || return 1
+    : > "$tx_dir/manager.attempts" || return 1
+    for exec_cmd in "${apply_cmds[@]}"; do
+      manager_line=$(_one_click_fw_manager_plan "$exec_cmd") || {
+        error "Unrecognised manager rule: $exec_cmd"; return 1;
+      }
+      printf '%s\n' "$manager_line" >> "$tx_dir/manager.plans" || return 1
     done
-    # ==== Universal Rollback Function ====
-    rollback() {
-      warn "Rolling back firewall state."
-      case "${firewall_backend:-iptables}" in
-        nft)
-          nft flush ruleset
-          if nft -f "$tmp_snapshot" &>/dev/null; then
-            success "nftables restored successfully."
-            echo "ROLLED_BACK" > "$state_file"
-            return 0
-          fi
-          ;;
-        ufw)
-          ufw disable &>/dev/null
-          ufw reload &>/dev/null
-          success "UFW state reset."
-          echo "ROLLED_BACK" > "$state_file"
-          return 0
-          ;;
-        firewalld)
-          firewall-cmd --reload &>/dev/null
-          success "Firewalld reloaded from permanent store."
-          echo "ROLLED_BACK" > "$state_file"
-          return 0
-          ;;
-        *)
-          if sanitize_and_restore_iptables "$tmp_snapshot"; then
-            echo "ROLLED_BACK" > "$state_file"
-            return 0
-          fi
-          ;;
-      esac
-      # ==== Emergency Flush Fail-Safe ====
-      error "CRITICAL: Native restore failed! Emergency recovery engaged."
-      if command -v iptables &>/dev/null; then
-        iptables -P INPUT ACCEPT
-        iptables -P OUTPUT ACCEPT
-        iptables -P FORWARD ACCEPT
-        iptables -F
-        iptables -X
-        [[ -n "${real_ssh:-}" ]] && iptables -A INPUT -p tcp --dport "$real_ssh" -j ACCEPT
-        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-      fi
-      echo "ROLLED_BACK" > "$state_file"
-    }
-    if [[ "$fatal" -eq 1 ]]; then
-      warn "Rule application failures detected:"
-      echo "========================================="
-      for f in "${fail[@]}"; do
-        error "${yellow}[][]${blue} $f ${yellow}[][]${reset}"
-      done
-      echo "========================================="
-      rollback
-      exit 1
+  fi
+  if ! _one_click_fw_tx_prepare "$tx_dir" "${firewall_backend:-iptables}" "$tx_unit"; then
+    error "Verified firewall snapshot/watchdog unavailable; refusing to apply rules."
+    return 1
+  fi
+  if ! /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" applying; then
+    error "Firewall rollback watchdog transaction could not be armed."
+    return 1
+  fi
+  # ==== Execute Rules (bounded; watchdog runs independently of SSH) ====
+  local manager_index=0 manager_fd manager_status=0 tx_state
+  for exec_cmd in "${apply_cmds[@]}"; do
+    if ! _one_click_fw_command_argv "$exec_cmd"; then
+      error "Firewall command validation failed during application."
+      tx_result=1
+      fail+=("$exec_cmd")
+      break
     fi
-    success "All rules successfully applied."
-    echo "PENDING_CONFIRM" > "$state_file"
-
-    # ==== Safety Confirmation Loop ====
-    echo
-    confirmed=0
-    if [[ "$y_interactive" -eq 1 ]]; then
-      confirmed=1
-      info "Automation Mode: Changes automatically committed."
+    if ! exec {manager_fd}> "$tx_dir/lock"; then
+      tx_result=1; fail+=("$exec_cmd"); break
+    fi
+    if ! flock -x "$manager_fd"; then
+      exec {manager_fd}>&-
+      tx_result=1; fail+=("$exec_cmd"); break
+    fi
+    tx_state=$(<"$tx_dir/state")
+    if [[ "$tx_state" != APPLYING ]]; then
+      error "Transaction entered state '$tx_state' before command; refusing additional firewall mutations."
+      flock -u "$manager_fd"
+      exec {manager_fd}>&-
+      tx_result=1; fail+=("$exec_cmd"); break
+    fi
+    if [[ "$firewall_backend" == ufw || "$firewall_backend" == firewalld ]]; then
+      if ! printf '%s\n' "$manager_index" >> "$tx_dir/manager.attempts"; then
+        flock -u "$manager_fd"; exec {manager_fd}>&-
+        tx_result=1; fail+=("$exec_cmd"); break
+      fi
+    fi
+    if timeout --signal=TERM --kill-after=2s 10s "${fw_argv[@]}" &>/dev/null; then
+      manager_status=0
     else
-      printf "${yellow}[SAFETY]:${reset} Firewall will auto-rollback in 10 seconds unless confirmed.\n"
-      if ! read -t 10 -rp "$(printf "${cyan}[USER]:${reset} Confirm firewall is functional? (y|yes): ")" safety_confirm; then
-        safety_confirm=""
-      fi
-      safety_confirm="${safety_confirm,,}"
-      if [[ "$safety_confirm" == "y" || "$safety_confirm" == "yes" ]]; then
-        confirmed=1
-      fi
+      manager_status=$?
     fi
+    flock -u "$manager_fd"
+    exec {manager_fd}>&-
+    (( manager_index += 1 ))
+    if (( manager_status == 0 )); then
+      info "Rule applied: $exec_cmd"
+    else
+      warn "Failed to apply rule: $exec_cmd"
+      fail+=("$exec_cmd")
+      tx_result=1
+      break
+    fi
+  done
+  if (( tx_result != 0 )); then
+    warn "Rule application failures detected:"
+    printf '%s\n' '========================================='
+    for exec_cmd in "${fail[@]}"; do
+      error "${yellow}[][]${blue} $exec_cmd ${yellow}[][]${reset}"
+    done
+    printf '%s\n' '========================================='
+    warn "Rolling back firewall state."
+    if /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" rollback; then
+      warn "No changes applied."
+    else
+      error "Rollback failed. Firewall was NOT flushed. Recovery snapshot: $tx_dir"
+    fi
+    return 1
+  fi
+  success "All rules successfully applied."
+  if ! /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" pending; then
+    error "Firewall confirmation state unavailable; requesting safe rollback."
+    /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" rollback || \
+      error "CRITICAL: Rollback failed. Recovery snapshot: $tx_dir"
+    return 1
+  fi
+  # ==== Independent Safety Confirmation ====
+  if (( y_interactive == 1 )); then
+    info "Automation Mode: Changes automatically committed."
+    confirmed=1
+  else
+    printf "${yellow}[SAFETY]:${reset} Firewall will auto-rollback in 10 seconds unless confirmed.\n"
+    local safety_confirm=""
+    read -t 8 -rp "$(printf "${cyan}[USER]:${reset} Confirm firewall is functional? (y|yes): ")" safety_confirm || safety_confirm=""
+    safety_confirm="${safety_confirm,,}"
+    [[ "$safety_confirm" == y || "$safety_confirm" == yes ]] && confirmed=1
+  fi
 
-    if [[ "$confirmed" -eq 1 ]]; then
-      echo "COMMITTED" > "$state_file"
+  if (( confirmed == 1 )); then
+    if /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" commit; then
       success "Firewall changes confirmed and committed."
       info "Please save your rules with ${cyan}one-click engine backup${reset}"
-      sleep 1
-      rm -f "$tmp_snapshot" "$confirm_file"
-    else
-      warn "Confirmation not received. Triggering rollback."
-      rollback
-      warn "No changes applied."
+      return 0
     fi
+    error "Commit deadline expired or rollback already started."
   else
-    warn "No changes applied."
-    exit 0
+    warn "Confirmation not received. Triggering rollback."
   fi
+  if /usr/bin/bash "$tx_dir/worker.sh" "$tx_dir" rollback; then
+    warn "No changes applied."
+  else
+    error "CRITICAL: Firewall rollback failed; preserved snapshot at: $tx_dir"
+  fi
+  return 1
 }
