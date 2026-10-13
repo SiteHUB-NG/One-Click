@@ -9523,16 +9523,19 @@ fleet_snapshot_viewer() {
 # ==== One-Click Fleet Power Management Subsystem ====
 fleet_vps_power_control() {
   build_vars
-  local action="$1"
-  local target_vm="$2"
+  local action="${1:-}" target_vm="${2:-}"
   local inventory_json="/etc/one-click/virtualization/inventory.json"
-  . "/etc/one-click/fleet/controller.env"
-  if [[ "${sys_ip:-${sys_ipv6:-}}" != "${CONTROLLER_IP:-}" ]]; then
+  . "/etc/one-click/fleet/controller.env" || return 1
+  if [[ -z "${CONTROLLER_IP:-}" || "${sys_ip:-${sys_ipv6:-}}" != "$CONTROLLER_IP" ]]; then
     error "Security Violation: Power control actions can only be initialized from the Controller."
     return 1
   fi
+  case "$action" in
+    start|stop|restart|pause|resume) ;;
+    *) error "Invalid power action. Use start, stop, restart, pause or resume."; return 1 ;;
+  esac
   if [[ -z "$target_vm" ]]; then
-    error "Usage: one-click fleet $action <virtual_machine_name>"
+    error "Usage: one-click --vps $action --name <virtual_machine_name>"
     return 1
   fi
   if [[ ! -f "$inventory_json" ]]; then
@@ -9540,27 +9543,67 @@ fleet_vps_power_control() {
     return 1
   fi
   local target_host
-  target_host=$(jq -r ".[] | select(.name == \"$target_vm\") | .host" "$inventory_json" 2>/dev/null)
-  if [[ -z "$target_host" || "$target_host" == "null" ]]; then
-    error "Target VM '$target_vm' is not a VPS managed by a fleet hypervisor."
+  if ! target_host=$(jq -er --arg name "$target_vm" '
+    [.[] | select(.name == $name)] |
+    if length == 1 then .[0].host | select(type == "string" and length > 0)
+    else empty end' "$inventory_json" 2>/dev/null); then
+    error "Target VM '$target_vm' must have exactly one valid Fleet hypervisor binding."
     return 1
   fi
-  local virsh_cmd
-  local already_marker="__ONECLICK_ALREADY__"
-  local state=""
-  local la=""
-  if [[ "$action" == "start" ]]; then
-    virsh_cmd="current_state=\$(virsh domstate '$target_vm' 2>/dev/null) || exit 1; if [[ \"\$current_state\" == \"running\" ]]; then echo '$already_marker'; exit 0; fi; virsh start '$target_vm'"
-    state="${green}started${reset}"
-    la=has
-  elif [[ "$action" == "stop" ]]; then
-    virsh_cmd="current_state=\$(virsh domstate '$target_vm' 2>/dev/null) || exit 1; if [[ \"\$current_state\" == \"shut off\" ]]; then echo '$already_marker'; exit 0; fi; virsh shutdown '$target_vm'"
-    state="${red}stopped${reset}"
-    la=is
-  else
-    error "Internal Error: Invalid action wrapper parameters passed."
-    return 1
-  fi
+  local quoted_vm virsh_cmd remote_script
+  quoted_vm="'${target_vm//\'/\'\\\'\'}'"
+  remote_script=$(cat <<'REMOTE'
+export LC_ALL=C
+current_state=$(virsh domstate "$vm") || exit 1
+case "$action" in
+  start)
+    if [ "$current_state" = "running" ]; then
+      echo __ONECLICK_ALREADY__; exit 0
+    fi
+    virsh start "$vm" || exit 1
+    ;;
+  stop)
+    if [ "$current_state" = "shut off" ]; then
+      echo __ONECLICK_ALREADY__; exit 0
+    fi
+    virsh shutdown "$vm" || exit 1
+    ;;
+  restart)
+    case "$current_state" in
+      running|idle) virsh reboot "$vm" || exit 1 ;;
+      *) echo "Cannot restart VM in state '$current_state'. Resume or start it first." >&2; exit 1 ;;
+    esac
+    ;;
+  pause)
+    if [ "$current_state" = "paused" ]; then
+      echo __ONECLICK_ALREADY__; exit 0
+    fi
+    case "$current_state" in
+      running|idle) virsh suspend "$vm" || exit 1 ;;
+      *) echo "Cannot pause VM in state '$current_state'." >&2; exit 1 ;;
+    esac
+    current_state=$(virsh domstate "$vm") || exit 1
+    [ "$current_state" = "paused" ] || {
+      echo "Pause was requested but VM state is '$current_state'." >&2; exit 1;
+    }
+    ;;
+  resume)
+    case "$current_state" in
+      running|idle) echo __ONECLICK_ALREADY__; exit 0 ;;
+      paused) virsh resume "$vm" || exit 1 ;;
+      *) echo "Cannot resume VM in state '$current_state'." >&2; exit 1 ;;
+    esac
+    current_state=$(virsh domstate "$vm") || exit 1
+    case "$current_state" in
+      running|idle) ;;
+      *) echo "Resume was requested but VM state is '$current_state'." >&2; exit 1 ;;
+    esac
+    ;;
+esac
+REMOTE
+  ) || return 1
+  virsh_cmd="vm=$quoted_vm; action='$action';
+$remote_script"
   local ansible_output
   if ! ansible_output=$(ANSIBLE_HOST_KEY_CHECKING=False \
     ANSIBLE_SSH_TIMEOUT=3 \
@@ -9570,17 +9613,27 @@ fleet_vps_power_control() {
     -i /etc/one-click/fleet/inventory.yml \
     -u oneclick --become \
     -m shell -a "$virsh_cmd" 2>&1); then
-      error "Power directive '$action' failed for $target_vm on hypervisor [$target_host]."
-      echo "$ansible_output"
-      return 1
+    error "Power directive '$action' failed for $target_vm on hypervisor [$target_host]."
+    printf '%s\n' "$ansible_output"
+    return 1
   fi
-  if [[ "$ansible_output" == *"$already_marker"* ]]; then
-    printf "$(tput setaf 48)[POWER]${reset} %s\n" \
-      "$target_vm $la already $state"
-    return 0
+  local message
+  if [[ "$ansible_output" == *"__ONECLICK_ALREADY__"* ]]; then
+    case "$action" in
+      start|resume) message="$target_vm is already running." ;;
+      stop) message="$target_vm is already shut off." ;;
+      pause) message="$target_vm is already paused." ;;
+    esac
+  else
+    case "$action" in
+      start) message="Start request accepted for $target_vm." ;;
+      stop) message="Graceful shutdown request accepted for $target_vm." ;;
+      restart) message="Graceful restart request accepted for $target_vm; guest reboot may still be in progress." ;;
+      pause) message="$target_vm is paused." ;;
+      resume) message="$target_vm has resumed." ;;
+    esac
   fi
-  printf "$(tput setaf 48)[POWER]${reset} %s\n" \
-    "Power directive '$action' successfully completed for $target_vm."
+  printf "${lime}[POWER]${reset} %s\n" "$message"
 }
 # ==== Fleet HAProxy Edge ====
 fleet_proxy_provision() {
