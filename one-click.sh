@@ -165,15 +165,17 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  audit banlist           Show combined ban list from RuleEngine and Fail2Ban." \
 	"  audit lookup <0-9+>     IP Reputation Lookup - Requires API key configured" "" \
     "  audit jail <args>       Used to create additional custom jails in faileban with custom." \
-    "                          ports and retry timers." \
+    "                          ports and timers." \
     "                          Example: one-click engine 'audit jail [name] port [port] retry [count]'" "" \
     "$(tput smul)$(tput bold)AbuseIPDB Integration$(tput sgr0)$(tput rmul)" \
     "  audit key <APIKEY>      Configure AbuseIPDB API key for IP reputation checks." \
     "  audit lookup <IP>       Query AbuseIPDB to check reputation of an IP." "" \
     "$(tput smul)$(tput bold)Intrusion Detection$(tput sgr0)$(tput rmul)" \
     "  audit scan              Run a lightweight file integrity and malware scan." \
-	"  audir scan --rebase     Rebuild baseline after reviewing changes." \
+    "  audit scan --rebase     Rebuild baseline after reviewing changes." \
+    "  audit scan --deep       Perform a deeper filesystem inspection." "" \
 	"  audit scan --verify     Verify baseline integrity" \
+    "  audit scan --remediate  Authorize IDS to autoheal." "" \
     "  audit scan --deep       Perform a deeper filesystem inspection." \
 	"  audit scan --stats      Display IDS Scanner statistics." \
 	"  audit scan --json       Machine-readable statistics." \
@@ -240,9 +242,12 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  patch                   Patch a target node or entire fleet." \
     "  migrate                 Migrate Fleet VPS instance to another Fleet hypervisor." \
 	"  import                  Migrate an external VPS into Fleet." \
-	"  export                  Migrate a Fleet member VPS out to an external VPS." \
+	"  export                  Migrate a Fleet VPS out to an external VPS." \
     "  start                   Start a VPS instance" \
     "  stop                    Stop a VPS instance " \
+    "  restart                 Gracefully restart a running VPS instance" \
+    "  pause                   Pause a running VPS instance" \
+    "  resume                  Resume a paused VPS instance" \
 	"  info                    View stats of VM such as storage, RAM and resources utilized." \
     "  view                    View available snapshots" \
 	"  list|menu               List All VPS, mapped IPs and their hypervisor peer" \
@@ -1022,6 +1027,9 @@ vps_manager_menu() {
       "${magenta}8${blue}"  "${blue}Access Virsh Console Session${blue}"   "${blue}one-click --console <vm_name>${blue}" \
       "${magenta}9${blue}"  "${blue}Import External VPS Into Fleet${blue}" "${blue}one-click --vps import${blue}" \
       "${magenta}10${blue}" "${blue}Export Fleet VPS To External VPS${blue}" "${blue}one-click --vps export --name <vm>${blue}" \
+      "${magenta}11${blue}" "${blue}Restart VM Instance${blue}" "${blue}one-click --vps restart --name <vm>${blue}" \
+      "${magenta}12${blue}" "${blue}Pause VM Instance${blue}" "${blue}one-click --vps pause --name <vm>${blue}" \
+      "${magenta}13${blue}" "${blue}Resume VM Instance${blue}" "${blue}one-click --vps resume --name <vm>${blue}" \
       "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"              "${blue}return${blue}"
     printf "${blue}└────┴────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
@@ -1033,6 +1041,18 @@ vps_manager_menu() {
       2)
         read -rp "${cyan}[USER]:${reset} Enter VM name to halt: " target
         [[ -n "$target" ]] && one-click --vps stop --name "$target"
+        ;;
+      11)
+        read -rp "${cyan}[USER]:${reset} Enter VM name to restart: " target
+        [[ -n "$target" ]] && one-click --vps restart --name "$target"
+        ;;
+      12)
+        read -rp "${cyan}[USER]:${reset} Enter VM name to pause: " target
+        [[ -n "$target" ]] && one-click --vps pause --name "$target"
+        ;;
+      13)
+        read -rp "${cyan}[USER]:${reset} Enter VM name to resume: " target
+        [[ -n "$target" ]] && one-click --vps resume --name "$target"
         ;;
       3)
         read -rp "${cyan}[USER]:${reset} Target scope (type 'all' or specific host): " target
@@ -1432,22 +1452,13 @@ if [[ "$1" == "--vps" ]]; then
   language=""
   virt_mac=""
   import_state=""
+  snap_action=""
   while [[ $# -gt 0 ]]; do
     if [[ "$action" == "snapshot" ]]; then
       case "${1:-}" in
         --action|-n|--name|-t|--target)
           if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
             error "Missing value for snapshot option: $1"
-            exit 1
-          fi
-          ;;
-      esac
-    fi
-	if [[ "$action" == "backup" ]]; then
-      case "${1:-}" in
-        --action|-n|--name|-t|--target)
-          if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == -* ]]; then
-            error "Missing value for VPS $action option: $1"
             exit 1
           fi
           ;;
@@ -1465,10 +1476,14 @@ if [[ "$1" == "--vps" ]]; then
       -p|--ip)       public_ip="$2"       ; shift 2 ;;
       -l|--language) language="$2"        ; shift 2 ;;
       -v|--virt)     virt_mac="$2"        ; shift 2 ;;
-      --import-state) import_state="$2"   ; shift 2 ;;
+      --import-state) import_state="$2"    ; shift 2 ;;
       --action)
         if [[ "$action" != "snapshot" && "$action" != "backup" ]]; then
           error "--action is only supported for VPS snapshot and backup operations."
+          exit 1
+        fi
+        if [[ -n "$snap_action" && "$snap_action" != "$2" ]]; then
+          error "Conflicting VPS actions: $snap_action and $2"
           exit 1
         fi
         snap_action="$2"
@@ -1543,27 +1558,28 @@ if [[ "$1" == "--vps" ]]; then
       exit 0
       ;;
     backup)
-	  case "${snap_action:-}" in
-        create|restore|delete)
-          ;;
-        *)
-          error "Usage: one-click --vps backup --action <create|restore|delete> --target <vps_name> --name <backup_name>"
+      if [[ "${target_host}" != "all" ]]; then
+        found=0
+        shopt -s nullglob
+        state_files=("/etc/one-click/fleet/state"/*.conf)
+        shopt -u nullglob
+        for file in "${state_files[@]}"; do
+          filename="${file##*/}"
+          peer_name="${filename%.conf}"
+          if [[ "$target_host" == "$peer_name" ]]; then
+            success "$target_host found in inventory"
+            found=1
+          fi
+        done
+        if [[ "$found" -eq 0 ]]; then
+          error "$target_host not found in inventory"
+          warn "Please use a valid fleet peer"
           exit 1
-          ;;
-      esac
-      if [[ -z "${target_host:-}" ||
-          "$target_host" == "all" ||
-          -z "${vps_name:-}" ]]; then
-        error "Select exactly one VPS (--target) and one backup name (--name)."
-        exit 1
-      fi
-      if [[ ! "$target_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ||
-            ! "$vps_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]]; then
-        error "Invalid VPS name or backup name."
-        exit 1
+        fi
+      else
+        warn "Executing commands on all fleet members"
       fi
       fleet_vps_backup "$snap_action" "$target_host" "$vps_name"
-      exit $?
       ;;
     snapshot)
       case "$snap_action" in
@@ -1841,7 +1857,6 @@ if [[ "$1" == "--vps" ]]; then
           error "Migration import state is missing or invalid: $import_state"
           exit 1
         }
-
         migration_create_guard=1
         migration_create_exit_guard() {
           local rc=$?
@@ -1859,7 +1874,6 @@ if [[ "$1" == "--vps" ]]; then
           fi
         }
         trap migration_create_exit_guard EXIT
-
         jq \
           --arg started "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
           '.build.status="provisioning" |
@@ -2057,6 +2071,18 @@ EOF
       fleet_vps_power_control "stop" "$vps_name"
       exit 0
       ;;
+    restart|pause|resume)
+      if [[ -z "$vps_name" ]]; then
+        error "Missing instance name for power control."
+        echo "Usage: one-click --vps $action -n <vps_name>"
+        exit 1
+      fi
+      if fleet_vps_power_control "$action" "$vps_name"; then
+        exit 0
+      else
+        exit 1
+      fi
+      ;;
     patch)
       inventory_file="/etc/one-click/fleet/inventory.yml"
       . "/etc/one-click/fleet/controller.env"
@@ -2116,7 +2142,7 @@ EOF
       ;;
     *)
       error "Invalid VPS subsystem operational action: $action"
-      echo "Available choices: create | start | stop | patch | delete | edit | view | snapshot | reinstall | backup | migrate | import | export"
+      echo "Available choices: create | start | stop | restart | pause | resume | patch | delete | edit | view | snapshot | reinstall | backup | migrate | import | export"
       exit 1
       ;;
   esac
@@ -2759,7 +2785,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'console'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'console'"
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
@@ -2920,7 +2946,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'console'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'console'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
