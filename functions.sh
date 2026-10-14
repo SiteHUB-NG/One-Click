@@ -6566,6 +6566,201 @@ ONECLICK_DEST_ACTIVATE
   info "The retained source VM remains shut off with autostart disabled. Do not start it while the destination copy is active."
   info "Migration state: $state_file"
 }
+# ==== Clone Fleet VPS ====
+fleet_vps_clone_disk_script() {
+  cat <<'PY'
+import os, subprocess, sys, xml.etree.ElementTree as ET
+name, directory = sys.argv[1:]
+def virsh(*args):
+    return subprocess.check_output(['virsh', '-c', 'qemu:///system', *args],
+                                   env=dict(os.environ, LC_ALL='C'), text=True).strip()
+def reject(message):
+    raise SystemExit('Clone refused: ' + message)
+if virsh('domstate', name) != 'shut off':
+    reject('source must be shut off, not paused or running')
+xml = ET.fromstring(virsh('dumpxml', name, '--inactive'))
+uuid = xml.findtext('uuid')
+if not uuid:
+    reject('source UUID missing')
+if xml.find('os/loader') is not None or xml.find('os/nvram') is not None or xml.find('os').get('firmware') == 'efi':
+    reject('UEFI guests need a separate firmware-aware clone path')
+if any(xml.find('devices/' + kind) is not None for kind in ('hostdev', 'tpm', 'filesystem')):
+    reject('passthrough devices, TPMs and shared filesystems are unsupported')
+disks = [d for d in xml.findall('devices/disk') if d.get('device') == 'disk']
+if len(disks) != 1 or len(xml.findall('devices/interface')) != 1:
+    reject('exactly one disk and one network interface are supported')
+disk = disks[0]
+if disk.find('readonly') is not None or disk.find('shareable') is not None:
+    reject('read-only or shared root disks are unsupported')
+source, driver = disk.find('source'), disk.find('driver')
+fmt = driver.get('type') if driver is not None else None
+path = source.get('file') if disk.get('type') == 'file' and source is not None else None
+if disk.get('type') == 'block' and source is not None:
+    path = source.get('dev')
+if not path or not path.startswith('/') or fmt not in ('raw', 'qcow2'):
+    reject('root disk must be a local raw/qcow2 file or block device')
+if disk.find('encryption') is not None:
+    reject('encrypted disks are unsupported')
+if any(line.split(':', 1)[0].strip() == 'Managed save' and line.split(':', 1)[1].strip() == 'yes' for line in virsh('dominfo', name).splitlines() if ':' in line):
+    reject('remove the managed save before cloning')
+os.mkdir(directory, 0o700)  # No reuse of an existing staging directory.
+try:
+    subprocess.run(['qemu-img', 'convert', '-f', fmt, '-O', 'qcow2',
+                    path, directory + '/disk.qcow2'], check=True)
+    if virsh('domstate', name) != 'shut off' or virsh('domuuid', name) != uuid:
+        reject('source state or identity changed while copying')
+except BaseException:
+    import shutil
+    shutil.rmtree(directory)
+    raise
+PY
+}
+fleet_vps_clone_host() {
+  LC_ALL=C ANSIBLE_INTERPRETER_DISCOVERY=ignore ANSIBLE_GATHERING=explicit \
+    ANSIBLE_SSH_ARGS='-C -o IdentityFile=/home/oneclick/.ssh/id_ed25519 -o IdentityFile=/etc/one-click/fleet/keys/id_ed25519' \
+    ansible "$1" -i /etc/one-click/fleet/inventory.yml -u oneclick --become \
+      -m "$2" -a "$3"
+}
+fleet_vps_clone() (
+  umask 077
+  local source_name="${1:-}" clone_name="${2:-}" target_host="${3:-}" password="${4:-}"
+  local ledger=/etc/one-click/virtualization/inventory.json
+  local images=/etc/one-click/virtualization/images
+  local record source_host image ram cpu disk token stage seed remote_stage="" rc
+  build_vars
+  . /etc/one-click/fleet/controller.env
+  if [[ "${sys_ip:-${sys_ipv6:-}}" != "${CONTROLLER_IP:-}" || -z "${CONTROLLER_IP:-}" ]]; then
+    error "VPS cloning must run on the fleet Controller."; return 1
+  fi
+  if [[ ! "$source_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ||
+        ! "$clone_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ || "$source_name" == "$clone_name" ]]; then
+    error "Provide two distinct VPS names using letters, numbers, dot, underscore or hyphen."; return 1
+  fi
+  if [[ ! "$password" =~ ^[A-Za-z0-9._@%+=:-]+$ ]]; then
+    error "Supply a new administrator password using letters, numbers or . _ @ % + = : -"; return 1
+  fi
+  for tool in jq python3 qemu-img virt-sysprep virt-customize flock base64 ansible ansible-inventory; do
+    command -v "$tool" >/dev/null || { error "Clone prerequisite missing: $tool"; return 1; }
+  done
+  declare -F fleet_vps_provision >/dev/null || { error "Load the existing VPS provisioning module first."; return 1; }
+  [[ -f "$ledger" ]] && jq -e 'type == "array"' "$ledger" >/dev/null || {
+    error "VPS inventory is missing or invalid."; return 1;
+  }
+  exec 9>/etc/one-click/virtualization/.clone.lock || return 1
+  flock -n 9 || { error "Another VPS clone is already in progress."; return 1; }
+  record=$(jq -ce --arg n "$source_name" '[.[] | select(.name == $n)] | if length == 1 then .[0] else error("source binding missing/ambiguous") end' "$ledger") || return 1
+  if ! jq -e --arg n "$clone_name" 'all(.[]; .name != $n)' "$ledger" >/dev/null; then
+    error "Clone name already exists in the VPS inventory."; return 1
+  fi
+  source_host=$(jq -r '.host // empty' <<<"$record")
+  target_host="${target_host:-$source_host}"
+  for host in "$source_host" "$target_host"; do
+    if [[ ! "$host" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ || "$host" == all || "$host" == localhost ]]; then
+      error "Invalid exact hypervisor name."; return 1
+    fi
+  done
+  local fleet_hosts
+  fleet_hosts=$(ansible-inventory -i /etc/one-click/fleet/inventory.yml --list) || return 1
+  for host in "$source_host" "$target_host"; do
+    if [[ "$host" != "$(hostname -s)" ]] && ! jq -e --arg h "$host" '._meta.hostvars | has($h)' <<<"$fleet_hosts" >/dev/null; then
+      error "Hypervisor is absent from the existing fleet inventory: $host"; return 1
+    fi
+  done
+  if [[ $(jq -r '.mode' <<<"$record") != nat ]]; then
+    error "This clone path supports NAT sources. Public addressing needs a separate clone allocation."; return 1
+  fi
+  image=$(jq -r '.image // empty' <<<"$record")
+  if [[ ! "$image" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ||
+        ! "${image,,}" =~ (ubuntu|debian|deb|alma|rhel|centos|fedora|rocky|el)[0-9]+ ||
+        "${image,,}" =~ (windows|nixos|alpine|\.iso$) ]]; then
+    error "Clone supports standard Debian/Ubuntu/RHEL-family cloud-init images only."; return 1
+  fi
+  ram=$(jq -r '.ram // empty' <<<"$record"); ram="${ram%MB}"
+  cpu=$(jq -r '.cpu // empty' <<<"$record")
+  disk=$(jq -r '.disk // empty' <<<"$record")
+  if [[ ! "$ram" =~ ^[1-9][0-9]*$ || ! "$cpu" =~ ^[1-9][0-9]*$ || ! "$disk" =~ ^[1-9][0-9]*[GMT]$ ]]; then
+    error "Source inventory has an unsupported RAM, CPU or disk profile."; return 1
+  fi
+  if [[ -e "/etc/one-click/virtualization/deployments/$clone_name" || -e "/etc/one-click/virtualization/staging/$clone_name" ]]; then
+    error "Destination has existing deployment or staging artifacts."; return 1
+  fi
+  fleet_validate_hypervisor_resources "$target_host" "$ram" "$cpu" "$disk" || return 1
+  local preflight="command -v virsh >/dev/null && command -v qemu-img >/dev/null && command -v python3 >/dev/null && ! virsh -c qemu:///system dominfo '$clone_name' >/dev/null 2>&1 && test ! -e '/var/lib/libvirt/images/$clone_name.qcow2' && test ! -e '/var/lib/libvirt/images/${clone_name}_cloudinit.iso' && test ! -e '/dev/one_click_vg/lv_${clone_name}'"
+  if [[ "$target_host" == "$(hostname -s)" ]]; then
+    bash -c "$preflight" || { error "Destination already exists or hypervisor tools are missing."; return 1; }
+  else
+    fleet_vps_clone_host "$target_host" shell "$preflight" || return 1
+  fi
+  stage=$(mktemp -d /var/tmp/oneclick-clone.XXXXXXXX) || return 1
+  token="${stage##*.}"
+  seed="clone-${token}-${image}"
+  [[ ! -e "$images/$seed" ]] || { rm -rf -- "$stage"; return 1; }
+  remote_stage="/var/tmp/oneclick-clone-disk-${token}"
+  local own_seed=false own_remote=false
+  clone_cleanup() {
+    local result=$?
+    if [[ "$own_remote" == true ]]; then
+      fleet_vps_clone_host "$source_host" file "$(jq -nc --arg p "$remote_stage" '{path:$p,state:"absent"}')" >/dev/null || warn "Remove clone staging directory on $source_host: $remote_stage"
+    fi
+    if [[ "$own_seed" == true ]] && jq -e --arg seed "$seed" 'type == "array" and all(.[]; .image != $seed)' "$ledger" >/dev/null 2>&1; then
+      rm -f -- "$images/$seed"
+    fi
+    rm -f -- "$images/.clone-${token}.tmp"
+    rm -rf -- "$stage"
+    return "$result"
+  }
+  trap clone_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [[ "$source_host" == "$(hostname -s)" ]]; then
+    fleet_vps_clone_disk_script > "$stage/clone_disk.py"
+    python3 "$stage/clone_disk.py" "$source_name" "$stage/disk-copy" || return 1
+    mv -- "$stage/disk-copy/disk.qcow2" "$stage/disk.qcow2" || return 1
+  else
+    local encoded payload
+    encoded=$(fleet_vps_clone_disk_script | base64 -w0) || return 1
+    payload="python3 -c 'import base64; exec(base64.b64decode(\"$encoded\"))' '$source_name' '$remote_stage'"
+    fleet_vps_clone_host "$source_host" shell "$payload" || {
+      warn "If the source host disconnected during copying, check its staging directory: $remote_stage"
+      return 1
+    }
+    own_remote=true
+    fleet_vps_clone_host "$source_host" fetch "$(jq -nc --arg s "$remote_stage/disk.qcow2" --arg d "$stage/disk.qcow2" '{src:$s,dest:$d,flat:true}')" || return 1
+  fi
+  qemu-img info --output=json "$stage/disk.qcow2" > "$stage/disk.json" || return 1
+  python3 - "$stage/disk.json" "$disk" <<'PY' || return 1
+import json, sys
+info = json.load(open(sys.argv[1]))
+size = sys.argv[2]
+limit = int(size[:-1]) * 1024 ** {'M':2, 'G':3, 'T':4}[size[-1]]
+if info.get('format') != 'qcow2' or info.get('backing-filename') or info['virtual-size'] > limit:
+    raise SystemExit('Clone disk exceeds inventory size or is not a standalone qcow2 image')
+PY
+  virt-sysprep --format qcow2 -a "$stage/disk.qcow2" --no-network \
+    --operations machine-id,ssh-hostkeys,dhcp-client-state,net-hwaddr,udev-persistent-net || return 1
+  virt-customize --format qcow2 -a "$stage/disk.qcow2" --no-network \
+    --run-command 'command -v cloud-init >/dev/null && test ! -e /etc/cloud/cloud-init.disabled && rm -rf /var/lib/cloud && mkdir -p /etc/network && rm -f /etc/wireguard/one-click.conf /etc/netplan/*.yaml /etc/netplan/*.yml /etc/NetworkManager/system-connections/* /etc/sysconfig/network-scripts/ifcfg-* && printf "auto lo\niface lo inet loopback\n" > /etc/network/interfaces && rm -f /var/lib/dbus/machine-id && rm -f /var/lib/systemd/random-seed && rm -f /root/.ssh/authorized_keys /home/oneclick/.ssh/authorized_keys' \
+    --hostname "$clone_name" || return 1
+  mkdir -p "$images" || return 1
+  cp -- "$stage/disk.qcow2" "$images/.clone-${token}.tmp" || return 1
+  if ! ln -- "$images/.clone-${token}.tmp" "$images/$seed"; then
+    rm -f -- "$images/.clone-${token}.tmp"; return 1
+  fi
+  own_seed=true
+  rm -f -- "$images/.clone-${token}.tmp"
+  info "Cloning $source_name as $clone_name on $target_host using the existing NAT provisioner."
+  ( fleet_vps_provision "$clone_name" "$target_host" nat "$seed" "$disk" "$password" "$ram" "$cpu" "" "" )
+  rc=$?
+  if (( rc != 0 )); then
+    error "Clone provisioning failed. Check the existing VPS inventory and provisioning logs before retrying."; return "$rc"
+  fi
+  if ! jq -e --arg n "$clone_name" --arg h "$target_host" --arg seed "$seed" \
+    '([.[] | select(.name == $n and .host == $h and .image == $seed)] | length) == 1' "$ledger" >/dev/null; then
+    error "Clone provisioning returned without a unique inventory entry."; return 1
+  fi
+  own_seed=false
+  success "VPS clone $clone_name provisioned; $source_name remains shut down and unchanged."
+)
 # ==== Import/Export A External VPS In/Out of Fleet Management ====
 fleet_vps_external_migration() {
   local mode="${1:-}"
@@ -18844,6 +19039,7 @@ log_browser_menu() {
 	printf "║ %-46s ║\n" " [3]. Live Web Log Viewer"
 	printf "║ %-46s ║\n" " [4]. Live Log Viewer"
 	printf "║ %-46s ║\n" " [5]. SSH Login Logs"
+	printf "║ %-46s ║\n" " [6]. NetData"
     printf "║ %-46s ║\n" " [0]. Exit"
     echo "╚════════════════════════════════════════════════╝"
     tput sgr0
@@ -18864,10 +19060,242 @@ log_browser_menu() {
         live_journal_view      ;;
       4) live_system_logs_view ;;
       5) live_ssh_view         ;;
+	  6) live_netdata_view     ;;
       0) exit                  ;;
     esac
   done
 }
+_netdata_vhost_edit() {
+  local backend="$1" domain="$2" fragment="$3" input="$4" output="$5"
+  awk -v backend="$backend" -v domain="$domain" -v fragment="$fragment" '
+  function clean(s, i,c,q,esc,r) {
+    q="";esc=0;r=""
+    for(i=1;i<=length(s);i++) {
+      c=substr(s,i,1)
+      if(esc){r=r " ";esc=0;continue}
+      if(c=="\\"){esc=1;r=r " ";continue}
+      if(q!=""){if(c==q)q="";r=r " ";continue}
+      if(c=="\047" || c=="\042"){q=c;r=r " ";continue}
+      if(c=="#")break
+      r=r c
+    }
+    return r
+  }
+  function finish( n,i,a,k,s,tls,matchname) {
+    tls=0;matchname=0
+    for(i=1;i<=n;i++) {
+      s=clean(lines[i])
+      if(backend=="nginx") {
+        if(s ~ /^[ \t]*listen[ \t]+([^; \t]*:)?443([ \t]|;)/ && s ~ /[ \t]ssl([ \t]|;)/)tls=1
+        if(s ~ /^[ \t]*server_name[ \t]+/){gsub(/;/," ",s);k=split(s,a,/[ \t]+/);for(t=1;t<=k;t++)if(a[t]==domain)matchname=1}
+      } else {
+        if(i==1 && s ~ /:443[ \t]*>/)tls=1
+        if(s ~ /^[ \t]*Server(Name|Alias)[ \t]+/){k=split(s,a,/[ \t]+/);for(t=1;t<=k;t++)if(a[t]==domain)matchname=1}
+      }
+    }
+    if(tls && matchname) {
+      matches++
+      if(backend=="nginx" && clean(lines[1]) !~ /^[ \t]*server[ \t]*\{[ \t]*$/)bad=1
+      print lines[1]
+      print "    # ONECLICK NETDATA INCLUDE BEGIN"
+      if(backend=="nginx")print "    include " fragment ";"
+      else print "    Include \042" fragment "\042"
+      print "    # ONECLICK NETDATA INCLUDE END"
+      for(i=2;i<=n;i++)print lines[i]
+    } else for(i=1;i<=n;i++)print lines[i]
+  }
+  {
+    s=clean($0)
+    if(!inside) {
+      if((backend=="nginx" && s ~ /^[ \t]*server[ \t]*\{/) || (backend=="apache" && s ~ /^[ \t]*<VirtualHost[ \t]/)){inside=1;n=0;depth=0}
+      else {print;next}
+    }
+    lines[++n]=$0
+    if(backend=="nginx") {
+      x=s;opens=gsub(/\{/,"",x);x=s;closes=gsub(/\}/,"",x);depth+=opens-closes
+      if(depth==0){finish(n);inside=0}
+    } else if(s ~ /^[ \t]*<\/VirtualHost>/){finish(n);inside=0}
+  }
+  END {if(inside || matches!=1 || bad)exit 42}
+  ' "$input" > "$output"
+}
+_netdata_web_check() {
+  if [[ "$1" == nginx ]]; then nginx -t; else "$2" -t; fi
+}
+_netdata_web_reload() { systemctl reload "$1"; }
+_netdata_install_agent() {
+  local fresh=0 installer config_tmp
+  command -v netdata >/dev/null 2>&1 || fresh=1
+  if ((fresh)); then
+    systemctl mask netdata.service || return 1
+    mkdir -p /etc/netdata || return 1
+    if [[ ! -e /etc/netdata/netdata.conf ]]; then
+      printf '[web]\n    bind to = 127.0.0.1:19999\n    allow connections from = localhost\n[plugins]\n    statsd = no\n' > /etc/netdata/netdata.conf || return 1
+    fi
+    [[ -e /etc/netdata/netflow.yaml ]] || printf 'enabled: false\n' > /etc/netdata/netflow.yaml
+    installer=$(mktemp /tmp/one-click-netdata.XXXXXXXX) || return 1
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 https://get.netdata.cloud/kickstart.sh -o "$installer" ||
+       ! sh "$installer" --repositories-only --native-only --release-channel stable --non-interactive --no-updates --disable-telemetry; then
+      rm -f "$installer"; return 1
+    fi
+    rm -f "$installer"
+    if command -v apt-get >/dev/null; then apt-get install -y netdata || return 1
+    elif command -v dnf >/dev/null; then dnf install -y netdata || return 1
+    elif command -v yum >/dev/null; then yum install -y netdata || return 1
+    else error "Install the native Netdata package first."; return 1; fi
+    touch /etc/netdata/.opt-out-from-anonymous-statistics
+  fi
+  mkdir -p /etc/netdata || return 1
+  [[ -e /etc/netdata/netdata.conf ]] || touch /etc/netdata/netdata.conf
+  [[ ! -L /etc/netdata/netdata.conf ]] || { error "Refusing a symlinked Netdata configuration."; return 1; }
+  config_tmp=$(mktemp /etc/netdata/.one-click.XXXXXXXX) || return 1
+  if ! awk '
+    BEGIN{web=0;count=0}
+    /^[ \t]*\[/ {
+      if(web){print "    bind to = 127.0.0.1:19999";print "    allow connections from = localhost"}
+      web=($0 ~ /^[ \t]*\[web\][ \t]*(#.*)?$/);if(web)count++
+    }
+    web && /^[ \t]*(bind to|allow connections from)[ \t]*=/ {next}
+    {print}
+    END {
+      if(count>1)exit 42
+      if(!count)print "[web]"
+      if(web || !count){print "    bind to = 127.0.0.1:19999";print "    allow connections from = localhost"}
+    }' /etc/netdata/netdata.conf > "$config_tmp"; then rm -f "$config_tmp"; error "Duplicate Netdata [web] sections; no configuration changed."; return 1; fi
+  cp -p /etc/netdata/netdata.conf /etc/netdata/netdata.conf.one-click-backup || { rm -f "$config_tmp"; return 1; }
+  if ! cat "$config_tmp" > /etc/netdata/netdata.conf; then
+    cp -p /etc/netdata/netdata.conf.one-click-backup /etc/netdata/netdata.conf
+    rm -f "$config_tmp"; return 1
+  fi
+  rm -f "$config_tmp"
+  systemctl unmask netdata.service && systemctl enable netdata.service && systemctl restart netdata.service || return 1
+  local attempt listeners
+  for attempt in {1..20}; do
+    if curl -fsS --max-time 2 http://127.0.0.1:19999/api/v1/info >/dev/null; then break; fi
+    sleep 1
+  done
+  curl -fsS --max-time 2 http://127.0.0.1:19999/api/v1/info >/dev/null || return 1
+  listeners=$(ss -H -ltn 'sport = :19999') || return 1
+  if [[ -z "$listeners" ]] || awk '$4 !~ /^127\.0\.0\.1:19999$/ {bad=1} END{exit !bad}' <<< "$listeners"; then
+    systemctl stop netdata.service
+    error "Netdata did not bind exclusively to localhost; it has been stopped."; return 1
+  fi
+}
+_netdata_proxy_fragment() {
+  local backend="$1" token="$2" expires="$3" fragment="$4" secret digest deadline
+  if [[ "$backend" == nginx ]]; then
+    secret=$(openssl rand -hex 32) || return 1
+    digest=$(printf '%s' "${expires} ${token} ${secret}" | openssl dgst -md5 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=') || return 1
+    cat > "$fragment" <<EOF
+location ^~ /__oneclick_netdata/${token}/ {
+    secure_link "${digest},${expires}";
+    secure_link_md5 "\$secure_link_expires ${token} ${secret}";
+    if (\$secure_link = "") { return 403; }
+    if (\$secure_link = "0") { return 410; }
+    limit_except GET HEAD { deny all; }
+    proxy_pass http://127.0.0.1:19999/;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Authorization "";
+    proxy_set_header Cookie "";
+    proxy_hide_header Set-Cookie;
+    proxy_hide_header Cache-Control;
+    proxy_redirect / /__oneclick_netdata/${token}/;
+    proxy_buffering off;
+    access_log off;
+    add_header Cache-Control "no-store" always;
+    add_header Referrer-Policy "no-referrer" always;
+}
+EOF
+  else
+    [[ "$(date +%z)" == "$(date -d "@${expires}" +%z)" ]] || { error "This Apache session would cross a timezone clock change; open it after the change."; return 1; }
+    deadline=$(date -d "@${expires}" +%Y%m%d%H%M%S) || return 1
+    cat > "$fragment" <<EOF
+ProxyRequests Off
+ProxyPass "/__oneclick_netdata/${token}/" "http://127.0.0.1:19999/" connectiontimeout=5 timeout=30
+ProxyPassReverse "/__oneclick_netdata/${token}/" "http://127.0.0.1:19999/"
+<Location "/__oneclick_netdata/${token}/">
+    AuthMerging Off
+    Require expr "%{TIME} < '${deadline}' && %{HTTPS} == 'on' && %{REQUEST_METHOD} in { 'GET', 'HEAD' }"
+    RequestHeader unset Authorization
+    RequestHeader unset Cookie
+    RequestHeader set X-Forwarded-Proto "https"
+    Header unset Set-Cookie
+    Header always set Cache-Control "no-store"
+    Header always set Referrer-Policy "no-referrer"
+</Location>
+EOF
+  fi
+}
+live_netdata_view() (
+  local domain="${1:-}" minutes backend service apachectl="" conf candidate
+  local token expires base fragment backup edited locked=0 integrated=0
+  [[ "$EUID" -eq 0 ]] || { error "Run the log browser as root."; return 1; }
+  build_vars || return 1
+  minutes="${LOG_VIEWER_SESSION:-10}"
+  [[ "$minutes" =~ ^[0-9]+$ && ${#minutes} -le 2 ]] && ((10#$minutes>=1 && 10#$minutes<=60)) || { error "LOG_VIEWER_SESSION must be 1–60 minutes."; return 1; }
+  [[ -n "$domain" ]] || read -rp "Managed HTTPS site hostname: " domain
+  [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "$domain" != *..* ]] || { error "Enter a site hostname, without a URL or port."; return 1; }
+  domain="${domain,,}"
+  if command -v nginx >/dev/null; then
+    backend=nginx;service=nginx
+    nginx -V 2>&1 | grep -q -- '--with-http_secure_link_module' || { error "Nginx needs its secure-link module for server-enforced expiry."; return 1; }
+    for candidate in "/etc/nginx/sites-enabled/${domain}.conf" "/etc/nginx/conf.d/${domain}.conf"; do
+      if [[ -f "$candidate" ]]; then conf=$(readlink -f "$candidate");break;fi
+    done
+  else
+    backend=apache
+    if command -v apache2ctl >/dev/null; then apachectl=apache2ctl;service=apache2
+    elif command -v apachectl >/dev/null; then apachectl=apachectl;service=httpd
+    elif command -v httpd >/dev/null; then apachectl=httpd;service=httpd
+    else error "A managed HTTPS Nginx or Apache site is required.";return 1;fi
+    for candidate in "/etc/apache2/sites-enabled/${domain}.conf" "/etc/apache2/sites-enabled/${domain}-le-ssl.conf" "/etc/httpd/conf.d/${domain}.conf";do
+      if [[ -f "$candidate" ]];then conf=$(readlink -f "$candidate");break;fi
+    done
+    if command -v a2enmod >/dev/null;then a2enmod proxy proxy_http headers authz_core || return 1;fi
+  fi
+  if [[ -z "${conf:-}" ]];then read -rp "Path to this site's active HTTPS vhost file: " conf;fi
+  [[ -f "$conf" && "$conf" == /etc/* && "$conf" != *[[:space:]]* && "$conf" != *[\;\{\}\"\']* ]] || { error "An existing /etc vhost file is required.";return 1; }
+  conf=$(readlink -f "$conf")
+  base=/etc/one-click/log_viewer/netdata
+  mkdir -p "$base" || return 1;chmod 0700 "$base"
+  exec 9> "$base/session.lock";flock -n 9 || { error "Another Netdata dashboard session is active.";return 1; };locked=1
+  token=$(openssl rand -hex 32) || return 1
+  expires=$(($(date +%s)+10#$minutes*60))
+  fragment="$base/session.conf";backup="$base/vhost.backup";edited="$base/vhost.edited"
+  _netdata_cleanup() {
+    if ((integrated));then
+      # Remove only our marker, preserving any later edits to the site.
+      if awk '/^[ \t]*# ONECLICK NETDATA INCLUDE BEGIN$/{skip=1;next} /^[ \t]*# ONECLICK NETDATA INCLUDE END$/{skip=0;next} !skip{print}' "$conf" > "$edited" &&
+         cp --attributes-only --preserve=mode,ownership "$conf" "$edited" && mv -f "$edited" "$conf";then
+        _netdata_web_check "$backend" "$apachectl" && _netdata_web_reload "$service" || true
+      fi
+    fi
+    : > "$fragment"
+    _netdata_web_check "$backend" "$apachectl" && _netdata_web_reload "$service" || true
+    rm -f "$backup" "$edited"
+  }
+  trap _netdata_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  grep -q 'ONECLICK NETDATA INCLUDE' "$conf" && { error "A stale Netdata include exists; remove it before opening a session.";return 1; }
+  _netdata_web_check "$backend" "$apachectl" || return 1
+  _netdata_install_agent || return 1
+  _netdata_proxy_fragment "$backend" "$token" "$expires" "$fragment" || return 1
+  _netdata_vhost_edit "$backend" "$domain" "$fragment" "$conf" "$edited" || { error "Could not identify exactly one matching HTTPS vhost; no vhost changed.";return 1; }
+  cp -p "$conf" "$backup" || return 1
+  cp --attributes-only --preserve=mode,ownership "$conf" "$edited" && mv -f "$edited" "$conf" || return 1
+  integrated=1
+  if ! _netdata_web_check "$backend" "$apachectl" || ! _netdata_web_reload "$service";then
+    cp -p "$backup" "$conf";integrated=0
+    _netdata_web_check "$backend" "$apachectl" && _netdata_web_reload "$service" || true
+    error "Proxy activation failed; original vhost restored.";return 1
+  fi
+  info "Administrator dashboard: host-wide metrics. Link expires at $(date -d "@$expires")."
+  success "https://${domain}/__oneclick_netdata/${token}/"
+  info "Keep this session open. Press Enter to close the dashboard early."
+  read -r -t "$((10#$minutes*60))" _ || true
+)
 install_goaccess() {
   if command -v goaccess &>/dev/null; then
     return 0
