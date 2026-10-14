@@ -239,6 +239,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "  reinstall               Reinstall the OS of a target fleet peer." \
     "  snapshot                Create, delete and restore snapshots" \
     "  backup                  Create, delete and restore backups" \
+	"  clone                   Create a clone of the VMs state." \
     "  patch                   Patch a target node or entire fleet." \
     "  migrate                 Migrate Fleet VPS instance to another Fleet hypervisor." \
 	"  import                  Migrate an external VPS into Fleet." \
@@ -266,6 +267,7 @@ if [[ "$#" -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "hel
     "    one-click --vps create --target hypervisor1 --name db1 --image ubuntu24 --cpu 1 --ram 1G --disk 6G --mode nat --password <password>" \
     "    one-click --vps snapshot create --target <vm_name> --name <snapshot name>" \
     "    one-click --vps migrate --target <target hypervisor> --name <vm_name>" \
+	"    one-click --vps clone --source <vm> --name <copy> [--target <host>] --password <new-password>" \
 	"    one-click --vps import" \
 	"    one-click --vps export -n <vm_name>" \
     "    one-click --vps reinstall -n <name> -i <image> --password <password> -l <optional language>" \
@@ -1011,7 +1013,7 @@ fleet_manager_menu() {
   done
 }
 vps_manager_menu() {
-  local target name proto src p_port choice vm_vnc_name vm_console_name
+  local target name proto src p_port choice vm_vnc_name vm_console_name clone_source clone_name clone_target clone_password
   while true; do
     printf "${blue}┌────┬────────────────────────────────┬───────────────────────────────────────────────┐${reset}\n"
     printf "${blue}│ %-12s │ %-40s │ %-55s │${reset}\n" "${magenta}#${blue}" "${yellow}FLEET REPLICATED CLUSTER PLANE${blue}" "${yellow}ORCHESTRATION HOOKS${blue}"
@@ -1030,6 +1032,7 @@ vps_manager_menu() {
       "${magenta}11${blue}" "${blue}Restart VM Instance${blue}" "${blue}one-click --vps restart --name <vm>${blue}" \
       "${magenta}12${blue}" "${blue}Pause VM Instance${blue}" "${blue}one-click --vps pause --name <vm>${blue}" \
       "${magenta}13${blue}" "${blue}Resume VM Instance${blue}" "${blue}one-click --vps resume --name <vm>${blue}" \
+      "${magenta}14${blue}" "${blue}Clone shut-down NAT VPS${blue}" "${blue}one-click --vps clone --source <vm> --name <copy>${blue}" \
       "${magenta}0${blue}"  "${blue}Back to Main Menu${blue}"              "${blue}return${blue}"
     printf "${blue}└────┴────────────────────────────────┴───────────────────────────────────────────────┘${reset}\n"
     read -rp "${cyan}[USER]:${reset} Select cluster control utility: " sub_ch
@@ -1053,6 +1056,17 @@ vps_manager_menu() {
       13)
         read -rp "${cyan}[USER]:${reset} Enter VM name to resume: " target
         [[ -n "$target" ]] && one-click --vps resume --name "$target"
+        ;;
+      14)
+        read -rp "${cyan}[USER]:${reset} Shut-down source VM: " clone_source
+        read -rp "${cyan}[USER]:${reset} New clone VM name: " clone_name
+        read -rp "${cyan}[USER]:${reset} Destination hypervisor (blank = source host): " clone_target
+        read -rsp "${cyan}[USER]:${reset} New administrator password: " clone_password
+        printf '\n'
+        if [[ -n "$clone_source" && -n "$clone_name" && -n "$clone_password" ]]; then
+          one-click --vps clone --source "$clone_source" --name "$clone_name" --target "${clone_target:-$(jq -r --arg n "$clone_source" '.[] | select(.name == $n) | .host' /etc/one-click/virtualization/inventory.json)}" --password "$clone_password"
+        fi
+        clone_password=""
         ;;
       3)
         read -rp "${cyan}[USER]:${reset} Target scope (type 'all' or specific host): " target
@@ -1434,6 +1448,39 @@ if [[ "$1" == "--vps" ]]; then
     fi
     fleet_vps_info "$3"
 	exit 0
+  fi
+  if [[ "$action" == "clone" ]]; then
+    shift 2
+    clone_source=""
+	clone_name=""
+	clone_target=""
+	clone_password=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --source|-s|--name|-n|--target|-t|--password|-w)
+          if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
+            error "Missing value for VPS clone option: $1"; exit 1
+          fi
+          case "$1" in
+            --source|-s) clone_source="$2" ;;
+            --name|-n) clone_name="$2" ;;
+            --target|-t) clone_target="$2" ;;
+            --password|-w) clone_password="$2" ;;
+          esac
+          shift 2 ;;
+        *) error "Unknown VPS clone option: $1"; exit 1 ;;
+      esac
+    done
+    if [[ -z "$clone_source" || -z "$clone_name" || -z "$clone_password" ]]; then
+      error "Usage: one-click --vps clone --source <vm> --name <new-vm> [--target <host>] --password <new-password>"
+      exit 1
+    fi
+    if ! declare -F fleet_vps_clone >/dev/null; then
+      error "VPS clone backend is not installed. Add fleet_vps_clone.sh to the loaded VPS module."
+      exit 1
+    fi
+    fleet_vps_clone "$clone_source" "$clone_name" "$clone_target" "$clone_password"
+    exit $?
   fi
   if [[ "$action" == "menu" || "$action" == "list" ]]; then
     fleet_vps_list
@@ -2142,7 +2189,7 @@ EOF
       ;;
     *)
       error "Invalid VPS subsystem operational action: $action"
-      echo "Available choices: create | start | stop | restart | pause | resume | patch | delete | edit | view | snapshot | reinstall | backup | migrate | import | export"
+      echo "Available choices: create | start | stop | restart | pause | resume | patch | clone | delete | edit | view | snapshot | reinstall | backup | migrate | import | export"
       exit 1
       ;;
   esac
@@ -2785,7 +2832,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'console'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'clone' 'console'"
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
@@ -2946,7 +2993,7 @@ _one_click() {
   cmds["--nodejs-create"]=""
   cmds["--nodejs-admin"]=""
   cmds["--dns"]=""
-  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'console'"
+  cmds["--vps"]="'create' 'edit' 'delete' 'reinstall' 'snapshot' 'backup' 'view' 'migrate' 'import' 'export' 'patch' 'info' 'list' 'menu' 'start' 'stop' 'restart' 'pause' 'resume' 'clone' 'console'"
   cmds["--nextcloud-create"]=""
   cmds["--nextcloud-admin"]=""
   cmds["--wireguard"]="'add' 'delete' 'add-user' 'delete-user' 'view'"
